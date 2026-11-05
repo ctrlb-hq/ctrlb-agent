@@ -1,0 +1,80 @@
+---
+title: The session store and CtrlB Relay
+description: What CtrlB keeps of every agent session, and how agents in one run coordinate through that record with posts and claims.
+slug: session-store
+---
+
+# The session store and CtrlB Relay
+
+CtrlB keeps every agent session as rows in your workspace. That record is the **session store**. **CtrlB Relay** is what agents working at the same time do with it: read what the others did, leave notes, and claim work before they start it.
+
+## Concepts
+
+| Term | Meaning |
+|---|---|
+| **Session** | One Claude Code or Codex conversation, including its subagents. Each message, thinking block, tool call and tool result is one row in the sessions dataset, `agent_sessions` by default. |
+| **Run** | A set of agents that share a run id. A session with no `CTRLB_RUN` is its own run, and its subagents join it. A script that starts several agents sets `CTRLB_RUN` once, and they share it. |
+| **Agent** | One session in a run. Its id is the session id, or the `CTRLB_AGENT` label when that is set. |
+| **Relay** | The run's shared record: posts, claims, releases and refusals, one row each, in `_ctrlb_relay_agent_sessions`. Agents read it with `peers`. |
+| **Post** | A short note from one agent to the others in the run (`post`). |
+| **Resource** | What an agent claims: a file path or a task name. |
+| **Key** | The normalised name a claim is decided on. A path becomes `path:<path>`, relative to the agent's working directory. Anything else becomes `name:<lower-cased name>`. `./src//app.py` and `src/app.py` are one key. |
+| **Claim** | An exclusive hold on a key (`claim`). The answer is `held: true` or `held: false` with the holder. |
+| **Lease** | How long a claim lasts unless released: 10 minutes by default. A crashed agent's claim ends when its lease runs out. |
+| **Done** | A claim released with `finished=true`. A done key is refused to every later claim in the run, with `finished_by`. |
+| **Check** | Before an edit, the plugin's hook asks whether another agent holds the file. The answer depends on the workspace's `enforce` setting. |
+
+Claims are advisory unless the workspace sets `enforce` to `enforce`. Relay records who holds what and tells agents. Only the edit hook, in `enforce` mode, refuses an edit, and only for the edit tools it watches. See [Limits](limits.md).
+
+## How rows get there
+
+- The Claude Code plugin and the Codex hooks upload session rows to CtrlB at the end of each turn, before compaction and at session end. Secrets are redacted first. See [Connect Claude Code](connect-claude-code.md) and [Connect Codex](connect-codex.md).
+- Relay rows are written by CtrlB when an agent calls `post`, `claim`, `release`, or when an edit check finds a conflict. Each row is written through to the lake before CtrlB answers, so the next read by any agent sees it.
+- Nothing is updated or deleted. A release is a new row; a claim's state is read from the rows.
+- Both datasets are ordinary logs datasets. Data Explorer, alerts and SQL see them.
+
+## The write-first claim
+
+Two agents can claim the same key at the same moment. If each read the record first and wrote a hold only when it saw none, both would read nothing and both would write: both would think they hold it. A claim in CtrlB writes first and decides on a second read:
+
+```text
+agent-a                        relay dataset                        agent-b
+   |                                 |                                 |
+   |--- 0. read the key's rows ----->|<----- 0. read the key's rows ---|
+   |    (a DONE row: refuse)         |       (a DONE row: refuse)      |
+   |                                 |                                 |
+   |--- 1. write HOLD, nonce a ----->|<------ 1. write HOLD, nonce b --|
+   |                                 |                                 |
+   |    2. wait waitMs (20 ms)       |       2. wait waitMs (20 ms)    |
+   |                                 |                                 |
+   |--- 3. read the live holds ----->|<----- 3. read the live holds ---|
+   |<-- HOLD a, HOLD b --------------|-------------- HOLD a, HOLD b -->|
+   |                                 |                                 |
+   |    4. first live hold is a:     |       4. first live hold is     |
+   |       held: true                |          not mine:              |
+   |                                 |<-- write RELEASE b, REFUSED ----|
+   |                                 |       held: false,              |
+   |                                 |       held_by: agent-a          |
+```
+
+- A live hold is a `HOLD` row with no `RELEASE` or `DONE` row for its nonce, younger than the lease.
+- Holds are ordered by time, then agent, then nonce. Every reader sees the same rows in the same order, so both agents agree on the first.
+- The wait covers the time a written row takes to become readable. On the lake that is a few milliseconds; the default wait is 20 ms.
+- `release` writes `DONE` (`finished=true`) or `RELEASE` (`finished=false`) for the caller's live holds on the key.
+- `check` is step 3 for each path, with no hold written.
+
+In the research behind this page, 480 contended write-first claims produced no double holder, against 30 of 30 trials for read-then-write. Four agents on one repository did 27 of 96 tasks twice with no shared record, 19 when they could post, and 1 when they could claim.
+
+## Research
+
+The two papers behind the session store and Relay are not public yet. They are:
+
+- *A Session Store for Long-Running Coding Agents: Keeping the Full Record Searchable Across Compactions* (`session-store-long-running.tex`): one agent, and a record that survives compaction.
+- *A Session Store for Swarms of Coding Agents: Coordinating Through a Shared, Searchable Record* (`session-store-swarms.tex`): many agents, one record they coordinate through, the claim protocol and its measurements.
+
+## Next
+
+- [Connect Claude Code](connect-claude-code.md), [Connect Codex](connect-codex.md), [Connect with OTEL only](connect-otel.md), [Connect over HTTP](connect-http.md)
+- [Relay tools](relay-tools.md): the eight MCP tools and the agent rules
+- [Run view](run-view.md): runs, timelines and transcripts in CtrlB
+- [Limits](limits.md)
