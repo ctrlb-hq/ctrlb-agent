@@ -1,0 +1,14 @@
+{
+  "name": "ctrlb-agent",
+  "owner": { "name": "CtrlB" },
+  "metadata": { "description": "CtrlB's agent package: the session store and CtrlB Relay for Claude Code" },
+  "plugins": [
+    {
+      "name": "ctrlb-agent",
+      "source": "./plugin",
+      "description": "Uploads every Claude Code session to CtrlB, gives the agent its run id and agent id, and checks edits against the run's claims",
+      "version": "0.2.0",
+      "author": { "name": "CtrlB" }
+    }
+  ]
+}
