@@ -37,9 +37,11 @@ Put the same three lines in your shell profile, clone this repo, and run the ins
 export CTRLB_URL="<your CtrlB URL>"
 export CTRLB_MCP_URL="<your CtrlB URL>/mcp"
 export CTRLB_KEY="<your key>"
-python3 -I codex/install.py --dry-run
-python3 -I codex/install.py
+python3 -I install.py --codex --dry-run
+python3 -I install.py --codex
 ```
+
+`python3 -I install.py --codex` runs `codex/install.py` with the options that follow; either command works.
 
 `--dry-run` prints the change to `~/.codex/config.toml` and writes nothing. The installer then writes one block between two marker comments:
 
@@ -131,6 +133,7 @@ Environment variables win over the file.
 .claude-plugin/marketplace.json   the marketplace: one plugin, ctrlb-agent, at ./plugin
 plugin/                           the Claude Code plugin (hooks, skills, .mcp.json)
 plugin/lib, plugin/bin            symlinks to lib/ and bin/; a plugin install copies their content
+install.py                        python3 -I install.py --codex runs codex/install.py with the options that follow
 codex/install.py                  writes the Codex config.toml block
 codex/hook.py                     the Codex hooks
 lib/common.py                     config, the Seeker client, upload state, log
@@ -138,8 +141,10 @@ lib/rows_claude.py                Claude Code transcript to session rows
 lib/rows_codex.py                 Codex rollout to session rows
 lib/hooks_shared.py               the injected rules and the edit check, shared by both hooks
 lib/redact.py                     the redaction patterns
+lib/paths.py                      resource keys, identical to Seeker's (tests/fixtures/keys.json); edit paths sent relative to cwd
 bin/                              configure.py, status.py, backfill.py
 tests/run_tests.py                python3 -I tests/run_tests.py
+docs/connect-*.md                 the docs-site pages: Claude Code, Codex, OTEL only, HTTP
 docs/relay-plan.md                the build plan
 ```
 

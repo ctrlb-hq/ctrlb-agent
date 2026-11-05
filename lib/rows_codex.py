@@ -9,7 +9,8 @@ A rollout is ~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<time>-<thread id>.jsonl
   response_item custom_tool_call,    -> "tool_use"; tool_use_id is call_id. command: the shell command(s) of the call
                 function_call,         (exec_command cmd values inside a code-mode "exec" call; command / cmd of a
                 local_shell_call       shell function call). paths: the files an apply_patch touches, from the
-                                       patch's *** Update File / *** Add File / *** Delete File / *** Move to lines
+                                       patch's *** Update File / *** Add File / *** Delete File / *** Move to lines,
+                                       normalised against the row's cwd by paths.edit_paths
   response_item *_output             -> "tool_result" with the tool name of its call; is_error when an exec script
                                        failed or a shell call exited non-zero
   token_usage_record                 -> one "result" row, role system, input_tokens and output_tokens from usage
@@ -21,6 +22,7 @@ parent_thread_id is a subagent: parent_session is that id, agent_id its own thre
 run (decision 4). Upload is incremental by byte offset with FileState, through rows_claude.upload_file."""
 import glob, json, os, re, shlex
 import common, rows_claude
+from paths import edit_paths as normalise_edit_paths
 from rows_claude import micros
 
 HARNESS = 'codex'
@@ -186,6 +188,7 @@ def _tool_use(r, p, st):
         paths = []
     r['block_type'], r['tool_name'] = 'tool_use', name
     r['tool_use_id'] = p.get('call_id') or p.get('id') or ''
+    paths = normalise_edit_paths(paths, r['cwd'])
     r['paths'] = json.dumps(paths) if paths else ''
     if r['tool_use_id']:
         st['names'][r['tool_use_id']] = name

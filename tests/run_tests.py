@@ -186,8 +186,10 @@ def test_layout():
     check('hooks.json: every command runs python3 -I', all(h['command'].startswith('python3 -I ') for e in hk.values() for g in e for h in g['hooks']))
     mcp = load('../../plugin/.mcp.json')
     srv = (mcp.get('mcpServers') or mcp).get('ctrlb', {})
-    check('.mcp.json: ctrlb server, section 6 url and headers', srv.get('url') == '${CTRLB_MCP_URL}' and srv.get('headers') == {
-        'Authorization': 'Bearer ${CTRLB_KEY}', 'X-CtrlB-Run': '${CTRLB_RUN}', 'X-CtrlB-Agent': '${CTRLB_AGENT}'})
+    check('.mcp.json: ctrlb http server, section 6 url and headers; run and agent default to empty when unset',
+          'mcpServers' in mcp and srv.get('type') == 'http' and srv.get('url') == '${CTRLB_MCP_URL}' and srv.get('headers') == {
+              'Authorization': 'Bearer ${CTRLB_KEY}', 'X-CtrlB-Run': '${CTRLB_RUN:-}', 'X-CtrlB-Agent': '${CTRLB_AGENT:-}'},
+          json.dumps(srv.get('headers')))
     skills = {n: open(os.path.join(ROOT, 'plugin', 'skills', n, 'SKILL.md')).read() for n in ('setup', 'recall', 'relay')}
     check('skills setup, recall, relay have front matter with their names',
           all(s.startswith('---\n') and f'\nname: {n}\n' in s for n, s in skills.items()))
@@ -259,10 +261,10 @@ def test_hooks(seeker):
     check('tool_result carries the tool name and error flag', by[(5, 0)]['tool_name'] == 'Bash' and by[(5, 0)]['is_error'] is True)
     check('Bash tool_use has the command', by[(4, 0)]['command'] == 'npm run build -- --filter=dash')
     paths = {r['tool_name']: r['paths'] for r in mainr if r['block_type'] == 'tool_use'}
-    check('paths on Edit, Write, MultiEdit, NotebookEdit tool_use rows', paths.get('Edit') == '["/work/dash/src/panels/Latency.tsx"]'
-          and paths.get('Write') == '["/work/dash/src/panels/index.ts"]'
-          and paths.get('MultiEdit') == '["/work/dash/src/panels/Latency.test.tsx"]'
-          and paths.get('NotebookEdit') == '["/work/dash/notebooks/latency.ipynb"]', json.dumps(paths))
+    check('paths on Edit, Write, MultiEdit, NotebookEdit tool_use rows, relative to the row cwd', paths.get('Edit') == '["src/panels/Latency.tsx"]'
+          and paths.get('Write') == '["src/panels/index.ts"]'
+          and paths.get('MultiEdit') == '["src/panels/Latency.test.tsx"]'
+          and paths.get('NotebookEdit') == '["notebooks/latency.ipynb"]', json.dumps(paths))
     check('paths empty on other rows', all(r['paths'] == '' for r in rows if r['tool_name'] not in rows_claude.EDIT_TOOLS
                                            or r['block_type'] != 'tool_use'))
     tin, tout = sum(r['input_tokens'] for r in mainr), sum(r['output_tokens'] for r in mainr)
@@ -402,8 +404,8 @@ def test_pre_tool(seeker):
     check('pre-tool refused key (401): fails open', p.returncode == 0 and not p.stdout.strip())
     p, _ = run('enforce', 'pre_tool_read')
     check('pre-tool on a non-edit tool: no call', not seeker.calls and not p.stdout.strip())
-    for name, want in (('pre_tool_write', '/work/dash/src/panels/index.ts'), ('pre_tool_multiedit', '/work/dash/src/panels/Latency.test.tsx'),
-                       ('pre_tool_notebook', '/work/dash/notebooks/latency.ipynb')):
+    for name, want in (('pre_tool_write', 'src/panels/index.ts'), ('pre_tool_multiedit', 'src/panels/Latency.test.tsx'),
+                       ('pre_tool_notebook', 'notebooks/latency.ipynb')):
         p, _ = run('enforce', name)
         check(f'pre-tool {name[9:]}: path checked and denied', seeker.calls and seeker.calls[0]['body']['paths'] == [want]
               and out_of(p).get('permissionDecision') == 'deny')
@@ -411,6 +413,92 @@ def test_pre_tool(seeker):
     c = seeker.calls[0] if seeker.calls else {}
     check('pre-tool in a subagent: CTRLB_RUN in the route, agent-<id> as agent', c.get('path') == '/ai/relay/agent_sessions/runs/relay-run-7/check'
           and c.get('body', {}).get('agent') == 'agent-abc123' and 'agent="agent-abc123"' in out_of(p).get('permissionDecisionReason', ''))
+
+
+def test_docs():
+    """The four connect pages (Task 9): front matter for the docs site, the two placeholders, no other placeholder in
+    a snippet except the OTEL page's ingest values, and the commands they show match what the repo ships."""
+    pages = {n: open(os.path.join(ROOT, 'docs', f'connect-{n}.md')).read() for n in ('claude-code', 'codex', 'otel', 'http')}
+    check('docs: connect-claude-code, -codex, -otel, -http have front matter with title, description, slug',
+          all(re.match(r'---\ntitle: .+\ndescription: .+\nslug: connect-' + n + r'\n---\n', s) for n, s in pages.items()))
+    allowed = {'<your CtrlB URL>', '<your key>'}
+    extra = {}
+    for n, s in pages.items():
+        for block in re.findall(r'```[a-z]*\n(.*?)```', s, re.S):
+            found = set(re.findall(r'<[a-z][^<>\n]*>', block)) - allowed
+            if n == 'otel':
+                found -= {'<your OTLP logs endpoint>', '<your ingest credentials>'}
+            if found:
+                extra[n] = sorted(found)
+    check('docs: snippets use only <your CtrlB URL> and <your key> (OTEL: also the ingest endpoint and credentials)', not extra, json.dumps(extra))
+    cc = pages['claude-code']
+    check('docs: Claude Code page has the marketplace install, the --plugin-dir fallback and CTRLB_RUN',
+          'claude plugin marketplace add ctrlb-hq/ctrlb-agent' in cc and 'claude plugin install ctrlb-agent@ctrlb-agent' in cc
+          and 'claude --plugin-dir ' in cc and 'CTRLB_RUN=' in cc)
+    cx = pages['codex']
+    check('docs: Codex page has install.py --codex, --dry-run, the backup and bearer_token_env_var',
+          'python3 -I install.py --codex' in cx and '--dry-run' in cx and 'ctrlb-backup' in cx and 'bearer_token_env_var = "CTRLB_KEY"' in cx)
+    ot = pages['otel']
+    check('docs: OTEL page has the Claude Code environment, the Codex [otel] tables and what the export does not carry',
+          'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT' in ot and '[otel.exporter.otlp-http]' in ot and 'protocol = "json"' in ot
+          and 'What OTEL export does not carry' in ot)
+    routes = ['/ai/sessions/agent_sessions/records', '/ai/sessions/agent_sessions/search', '/ai/sessions/agent_sessions/sess-1/records',
+              '/ai/sessions/agent_sessions/commands', '/ai/sessions/agent_sessions/sess-1/next', '/runs/demo-run-1/posts',
+              '/runs/demo-run-1/peers', '-X POST "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/claims"',
+              '-X DELETE "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/claims"', '/runs/demo-run-1/check',
+              '/ai/relay/agent_sessions/runs?status=', '"<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1"',
+              '"<your CtrlB URL>/ai/relay/settings"', '-X PUT "<your CtrlB URL>/ai/relay/settings"']
+    missing = [r for r in routes if r not in pages['http']]
+    check('docs: HTTP page has every section 4 route as curl', not missing and pages['http'].count('-H "Authorization: Bearer <your key>"') >= len(routes),
+          ', '.join(missing))
+    body = re.search(r"-d '(\[.*?\])'", pages['http'], re.S)
+    rows = json.loads(body.group(1)) if body else []
+    check('docs: the HTTP records example is valid JSON with the section 5 columns', rows and set(rows[0]) == COLS - {'body_len', 'truncated'},
+          str(sorted(set(rows[0]) ^ COLS)) if rows else 'no body')
+
+
+def test_keys():
+    """lib/paths.py against Seeker's shared table (tests/fixtures/keys.json, Task 2), and the edit paths the hooks and
+    parsers send against the same keys."""
+    import paths
+    cases = load('keys.json')['cases']
+    bad = [c for c in cases if paths.key(c['resource'], c['cwd'])[0] != c['key']]
+    check(f'paths.key passes Seeker keys.json ({len(cases)} cases)', len(cases) >= 40 and not bad,
+          '; '.join(f"{c['resource']!r},{c['cwd']!r} -> {paths.key(c['resource'], c['cwd'])[0]!r} want {c['key']!r}" for c in bad[:5]))
+    check('paths.key: kind is path or name as the key says', all(paths.key(c['resource'], c['cwd'])[1] == c['key'].split(':', 1)[0] for c in cases))
+    check('paths.key is idempotent on its own keys', all(paths.key(paths.key(c['resource'], c['cwd'])[0], c['cwd'])[0] == c['key'] for c in cases))
+    file_cases = [c for c in cases if c['key'].startswith('path:') and c['key'] != 'path:'
+                  and not c['resource'].strip().startswith(('path:', 'name:'))]
+    check('edit_path: Seeker keys what the package sends as the key of the path itself',
+          all(paths.key(paths.edit_path(c['resource'], c['cwd']), c['cwd'])[0] == c['key'] for c in file_cases))
+    check('edit_path: a file with no extension is sent so it is keyed as a path',
+          paths.edit_path('/work/dash/Makefile', '/work/dash') == './Makefile' and paths.edit_path('Makefile', '/work/dash') == './Makefile'
+          and paths.key('./Makefile', '/work/dash')[0] == 'path:Makefile')
+    check('edit_paths: once per key, empty dropped, order kept',
+          paths.edit_paths(['/w/b.go', 'b.go', './/b.go', '', 'a.go'], '/w') == ['b.go', 'a.go'])
+    check('paths.clean is Go path.Clean, not posixpath.normpath', paths.clean('//a//b/../c/') == '/a/c' and paths.clean('') == '.'
+          and paths.clean('../../x') == '../../x' and paths.clean('/../x') == '/x')
+    check('names follow Go: per-rune lower case, Go whitespace only', paths.key('ΟΔΟΣ')[0] == 'name:οδοσ'
+          and paths.key('a\x1c')[0] == 'name:a\x1c' and paths.key('  Task　 01 ')[0] == 'name:task 01')
+
+
+def test_edit_keys_across_harnesses(seeker):
+    """The same file edited from Claude Code (absolute file_path) and from Codex (a patch path relative to cwd) is sent
+    under one key, also for a file name with no extension."""
+    import paths, rows_codex
+    cwd = '/work/engine'
+    claude = paths.edit_paths(rows_claude.edit_paths('Write', {'file_path': cwd + '/Makefile'}), cwd)
+    codex = paths.edit_paths(rows_codex.input_paths({'command': '*** Begin Patch\n*** Update File: Makefile\n@@\n-a\n+b\n*** End Patch\n'}), cwd)
+    check('Claude Code and Codex send one key for one file (Makefile)', claude == codex == ['./Makefile']
+          and paths.key(claude[0], cwd)[0] == 'path:Makefile', f'{claude} {codex}')
+    env = base_env(seeker.url, os.path.join(WORK, 'home-keys'))
+    inp = {'session_id': SID, 'transcript_path': '', 'cwd': cwd, 'hook_event_name': 'PreToolUse', 'tool_name': 'Edit',
+           'tool_input': {'file_path': cwd + '/./src//lib.rs', 'old_string': 'a', 'new_string': 'b'}}
+    seeker.reset()
+    seeker.state['check'] = 'allow'
+    hook('pre-tool', inp, env)
+    check('pre-tool sends the normalised path with cwd', seeker.calls and seeker.calls[0]['body'] == {'agent': SID, 'paths': ['src/lib.rs'], 'cwd': cwd},
+          json.dumps(seeker.calls[0]['body'] if seeker.calls else {}))
 
 
 def test_failure_safety(seeker):
@@ -712,6 +800,31 @@ def read(path):
         return fh.read()
 
 
+def test_root_install():
+    """python3 -I install.py --codex (the command the connect page shows) is codex/install.py with the same options."""
+    chome = os.path.join(WORK, 'codex-install-root')
+    shutil.rmtree(chome, ignore_errors=True)
+    os.makedirs(chome)
+    url = 'http://127.0.0.1:8095/mcp'
+    env = {k: v for k, v in os.environ.items() if not k.startswith('CTRLB_') and k != 'CODEX_HOME'}
+    env.update(CTRLB_HOME=os.path.join(WORK, 'home-install'), CODEX_HOME=chome)
+
+    def run(args):
+        return subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'install.py')] + args, capture_output=True, text=True,
+                              env=env, timeout=30)
+    p = run(['--codex', '--mcp-url', url, '--dry-run'])
+    check('install.py --codex --dry-run: the diff, nothing written', p.returncode == 0 and '+[mcp_servers.ctrlb]' in p.stdout
+          and not os.listdir(chome), p.stderr[-200:])
+    p = run(['--codex', '--mcp-url', url])
+    first = read(os.path.join(chome, 'config.toml')) if p.returncode == 0 else b''
+    p2 = run(['--codex', '--mcp-url', url])
+    check('install.py --codex writes the block; a second run changes nothing', b'bearer_token_env_var = "CTRLB_KEY"' in first
+          and p2.returncode == 0 and read(os.path.join(chome, 'config.toml')) == first and 'already up to date' in p2.stdout)
+    p = run([])
+    check('install.py without --codex: usage naming the Claude Code marketplace install, exit 2', p.returncode == 2
+          and 'claude plugin marketplace add ctrlb-hq/ctrlb-agent' in p.stdout)
+
+
 def test_codex_install():
     real = os.path.expanduser('~/.codex/config.toml')
     real_before = read(real) if os.path.isfile(real) else None
@@ -834,11 +947,15 @@ def main():
     test_hooks(seeker)
     test_batches(seeker)
     test_pre_tool(seeker)
+    test_keys()
+    test_edit_keys_across_harnesses(seeker)
+    test_docs()
     test_failure_safety(seeker)
     test_config_and_status(seeker)
     test_codex_rows(seeker)
     test_codex_hooks(seeker)
     test_codex_install()
+    test_root_install()
     test_codex_backfill(seeker)
     test_validate()
     seeker.httpd.shutdown()
