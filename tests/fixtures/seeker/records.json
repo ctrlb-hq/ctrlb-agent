@@ -1,0 +1,11 @@
+{
+  "synthetic": "Built by hand from relay-plan section 4 (Sessions), not recorded from a running Seeker. Replace with a recording once Seeker Task 4 serves the route.",
+  "route": "POST /ai/sessions/{dataset}/records",
+  "limits": {"max_rows": 500, "max_bytes": 4000000},
+  "responses": {
+    "accepted": {"status": 202, "body": {"accepted": 0}, "_note": "accepted is set to the number of rows in the request"},
+    "too_many_rows": {"status": 413, "body": {"error": "at most 500 rows or 4 MB per call"}},
+    "other_user": {"status": 403, "body": {"error": "a row names another user"}},
+    "no_key": {"status": 401, "body": {"error": "missing or invalid key"}}
+  }
+}

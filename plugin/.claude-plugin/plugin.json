@@ -1,0 +1,7 @@
+{
+  "name": "ctrlb-agent",
+  "version": "0.2.0",
+  "description": "CtrlB Relay and the session store for Claude Code: uploads every session, including subagents, to CtrlB, gives the agent its run id and agent id, and checks edits against the run's claims",
+  "author": { "name": "CtrlB" },
+  "license": "MIT"
+}

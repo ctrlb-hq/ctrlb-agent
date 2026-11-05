@@ -1,0 +1,11 @@
+{
+  "synthetic": "Built by hand from relay-plan section 4 (Relay, runs list), not recorded from a running Seeker. Replace with a recording once Seeker Task 4 serves the route.",
+  "route": "GET /ai/relay/{dataset}/runs?status=all&limit=",
+  "responses": {
+    "ok": {"status": 200, "body": {"runs": [
+      {"run_id": "relay-demo-1", "agents": 3, "started": 1793000000000000, "last_write": 1793000300000000, "duration_s": 300.0,
+       "live": false, "posts": 7, "claims_held": 5, "claims_refused": 2, "done": 5, "open_claims": 0, "duplicate_edits": 0,
+       "silent_agents": 0, "cost_usd": 0.42}],
+      "next_cursor": ""}}
+  }
+}
