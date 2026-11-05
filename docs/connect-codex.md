@@ -113,6 +113,8 @@ CTRLB_RUN=nightly-refactor-1 codex exec "Fix the failing tests in src/parser"
 
 The agent id is the thread id. Set `CTRLB_AGENT` to use a label instead.
 
+`CTRLB_USER` is still read, as the agent label when `CTRLB_AGENT` is unset; `user_name` on the rows is always the key's user.
+
 ## Past sessions and removal
 
 - Upload past sessions: `python3 -I ~/ctrlb-agent/bin/backfill.py --codex`. It lists what it would send and asks first; `--count` only lists.

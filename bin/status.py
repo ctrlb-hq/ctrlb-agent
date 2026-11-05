@@ -1,4 +1,5 @@
-"""Print ctrlb-agent's configuration (the key masked), whether the environment the ctrlb tools need is set, whether
+"""Print ctrlb-agent's configuration (the key masked), the user the key carries (the name rows are written under),
+whether the environment the ctrlb tools need is set, whether
 Seeker answers and the latest runs, how many transcript files are tracked, and the last lines of the hook log."""
 import json, os, sys, time
 sys.dont_write_bytecode = True
@@ -11,6 +12,17 @@ def main():
     shown = {k: cfg[k] for k in ('url', 'mcp_url', 'dataset', 'user', 'run', 'agent', 'enforce', 'off')}
     shown['key'] = f"set ({len(cfg['key'])} characters)" if cfg['key'] else '(none)'
     print('config:', json.dumps(shown))
+    print(f"key's user (written as user_name): {cfg['user'] or '(none in the key; CtrlB fills user_name from the key)'}")
+    try:
+        with open(os.path.join(common.HOME, 'config.json')) as fh:
+            stored = (json.load(fh).get('user') or '').strip()
+    except Exception:
+        stored = ''
+    if stored and stored != cfg['user']:
+        print(f"config.json names user {stored!r}, which is not the key's user: it is ignored; run bin/configure.py again")
+    if os.environ.get('CTRLB_USER'):
+        print(f"CTRLB_USER={os.environ['CTRLB_USER']!r} is read as the agent label only"
+              + (' (CTRLB_AGENT is set and wins)' if os.environ.get('CTRLB_AGENT') else '') + ', never as user_name')
     for var in ('CTRLB_MCP_URL', 'CTRLB_KEY'):
         print(f"{var} in the environment: {'yes' if os.environ.get(var) else 'NO (the ctrlb tools need it)'}")
     if cfg['off']:

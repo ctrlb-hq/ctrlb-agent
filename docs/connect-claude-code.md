@@ -56,6 +56,8 @@ CTRLB_RUN=nightly-refactor-1 claude -p "Fix the failing tests in src/parser"
 
 The agent id is the session id. Set `CTRLB_AGENT` to use a label instead, for example `CTRLB_AGENT=builder-1`. When neither is set, the MCP server gets empty `X-CtrlB-Run` and `X-CtrlB-Agent` headers, and the agent passes `run_id` and `agent` to the relay tools from its session-start note.
 
+`CTRLB_USER` is still read, as the agent label when `CTRLB_AGENT` is unset; `user_name` on the rows is always the key's user.
+
 ## Keep the key out of your profile
 
 Clone the repository and run the configure step yourself, in a terminal, not through an agent:

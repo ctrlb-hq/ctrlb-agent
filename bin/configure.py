@@ -1,8 +1,9 @@
 """Run this yourself in a terminal, not through an agent:  python3 -I bin/configure.py
-Asks for Seeker's URL, the sessions dataset, an optional name and run id, and your key (hidden input), writes
-~/.ctrlb/config.json (mode 0600, readable only by you) and checks that Seeker answers. Environment variables CTRLB_*
-override the file. Flags (for scripts): --url, --dataset, --user, --run, --key-stdin (read the key from one line of
-stdin instead of a hidden prompt; the key is never taken from the command line)."""
+Asks for Seeker's URL, the sessions dataset, an optional run id, and your key (hidden input), reads the key's user
+from the key (its "email" claim, the one Seeker reads), writes ~/.ctrlb/config.json (mode 0600, readable only by you)
+and checks that Seeker answers. Environment variables CTRLB_* override the file. Flags (for scripts): --url,
+--dataset, --run, --key-stdin (read the key from one line of stdin instead of a hidden prompt; the key is never taken
+from the command line). --user is accepted and ignored: the name on the rows is the key's user."""
 import argparse, getpass, json, os, sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
@@ -30,7 +31,6 @@ def main():
         old = {}
     c = dict(url=ask('Seeker URL (the CtrlB URL the Connect page shows)', old.get('url', ''), a.url).rstrip('/'),
              dataset=ask('Sessions dataset', old.get('dataset', common.DEFAULT_DATASET), a.dataset),
-             user=ask('Your name on the rows (Enter: the name of your key)', old.get('user', ''), a.user),
              run=ask('Run id for every session (Enter: each session is its own run, which is usual)', old.get('run', ''), a.run))
     if a.key_stdin:
         key = sys.stdin.readline()
@@ -44,6 +44,12 @@ def main():
         sys.exit('the dataset name must be letters, digits or _')
     if not c['key']:
         sys.exit('a key is required: mint one on the Connect page')
+    if a.user:
+        print('--user is ignored: the name on the rows is the key\'s user. Set CTRLB_AGENT for an agent label.')
+    user = common.key_user(c['key'])
+    if user:
+        c['user'] = user
+    print(f"the key's user (written as user_name): {user or '(none in the key; CtrlB fills it from the key)'}")
     os.makedirs(common.HOME, mode=0o700, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'w') as fh:

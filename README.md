@@ -111,7 +111,8 @@ Before upload, text that looks like a secret is replaced with `[REDACTED]`. That
 | `CTRLB_MCP_URL` | `mcp_url` | Seeker's `/mcp` URL, for the MCP server |
 | `CTRLB_RUN` | `run` | run id for every session (default: each session is its own run) |
 | `CTRLB_AGENT` | | agent label (default: the session id) |
-| `CTRLB_USER` | `user` | name on the rows (default: the key's user) |
+| | `user` | the key's user (its `email` claim), written by `bin/configure.py`; `user_name` on the rows is always this user, decoded from the key in use |
+| `CTRLB_USER` | | read for compatibility: the agent label when `CTRLB_AGENT` is unset; never `user_name` |
 | `CTRLB_DATASET` | `dataset` | sessions dataset (default `agent_sessions`) |
 | `CTRLB_ENFORCE` | `enforce` | `off` skips the edit check on this machine |
 | `CTRLB_OFF=1` | | turns every hook off |
