@@ -189,13 +189,15 @@ def _finish(r, counts):
     return r
 
 
-def upload_file(cfg, path, deadline):
+def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
     """Send the complete lines of path added since the last upload. Returns {rows, lines, redacted}. The offset only
-    moves forward after Seeker accepts the rows, so a failed upload is retried next time."""
+    moves forward after Seeker accepts the rows, so a failed upload is retried next time. ids and rows_fn default to
+    the Claude Code parser; rows_codex passes its own (rows_fn(rec, seq, state, ids, cfg, hostname) -> [row])."""
     counts = dict(rows=0, lines=0, redacted=0)
     if not path or not os.path.isfile(path):
         return counts
-    ids = ids_for_file(cfg, path)
+    ids = ids if ids is not None else ids_for_file(cfg, path)
+    rows_fn = rows_fn or rows_from
     hostname = common.host()
     with common.FileState(path, deadline) as fs:
         st = fs.data
@@ -223,7 +225,7 @@ def upload_file(cfg, path, deadline):
                 rec = json.loads(raw)
             except Exception:
                 rec = None
-            line_rows = [_finish(r, counts) for r in rows_from(rec, line, st, ids, cfg, hostname)] if isinstance(rec, dict) else []
+            line_rows = [_finish(r, counts) for r in rows_fn(rec, line, st, ids, cfg, hostname)] if isinstance(rec, dict) else []
             size = sum(len(json.dumps(r)) + 1 for r in line_rows)
             if batch and (len(batch) + len(line_rows) > BATCH_ROWS or nbytes + size > BATCH_BYTES):
                 send(batch)                    # everything before this line: the offset may move to its start
