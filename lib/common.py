@@ -4,9 +4,11 @@ Config comes from environment variables, falling back to ~/.ctrlb/config.json (w
 
   CTRLB_URL      Seeker's URL                                   file key "url"
   CTRLB_KEY      the user's MCP key, sent as Authorization: Bearer   file key "key"
-  CTRLB_USER     optional; Seeker fills user_name from the key   file key "user"
+  (no variable)  the key's user: the "email" claim of the key, as Seeker reads it; the only source of user_name
+                                                                 file key "user" (written by bin/configure.py)
   CTRLB_RUN      run id shared by every agent of one run         file key "run"
   CTRLB_AGENT    optional agent label (default: the session id)  (environment only)
+  CTRLB_USER     read for compatibility as the agent label when CTRLB_AGENT is unset; never sent as user_name
   CTRLB_DATASET  sessions dataset (default agent_sessions)        file key "dataset"
   CTRLB_ENFORCE  "off" skips the edit check without calling Seeker; anything else lets Seeker's mode decide
                                                                  file key "enforce"
@@ -15,12 +17,29 @@ Config comes from environment variables, falling back to ~/.ctrlb/config.json (w
   CTRLB_HOME     where config.json, hooks.log and upload state live (default ~/.ctrlb)
 
 Everything is off when the URL or the key is missing or the dataset name is not letters, digits and _."""
-import fcntl, hashlib, json, os, re, socket, time, urllib.error, urllib.parse, urllib.request
+import base64, fcntl, hashlib, json, os, re, socket, time, urllib.error, urllib.parse, urllib.request
 
 VERSION = '0.2.0'
 HOME = os.environ.get('CTRLB_HOME') or os.path.expanduser('~/.ctrlb')
 NAME_RE = re.compile(r'^[A-Za-z0-9_]{1,64}$')
 DEFAULT_DATASET = 'agent_sessions'
+USER_CLAIM = 'email'   # the claim Seeker takes the caller's user_name from (middleware GetEmailFromJWT)
+
+
+def key_user(key):
+    """The user an MCP key belongs to: the USER_CLAIM of its JWT payload (base64url, no signature check; Seeker
+    checks the signature). '' when the key is not a JWT or carries no such claim, so rows then omit user_name and
+    Seeker fills it from the key."""
+    try:
+        parts = (key or '').strip().split('.')
+        if len(parts) != 3:
+            return ''
+        seg = parts[1]
+        payload = json.loads(base64.urlsafe_b64decode(seg + '=' * (-len(seg) % 4)))
+        user = payload.get(USER_CLAIM) if isinstance(payload, dict) else None
+        return user.strip() if isinstance(user, str) else ''
+    except Exception:
+        return ''
 
 
 def _file_config():
@@ -41,11 +60,13 @@ def config():
 
     c = dict(url=pick('CTRLB_URL', 'url').rstrip('/'),
              key=pick('CTRLB_KEY', 'key'),
-             user=pick('CTRLB_USER', 'user'),
              run=pick('CTRLB_RUN', 'run'),
-             agent=(env('CTRLB_AGENT') or '').strip(),
+             agent=(env('CTRLB_AGENT') or env('CTRLB_USER') or '').strip(),
              dataset=pick('CTRLB_DATASET', 'dataset', DEFAULT_DATASET),
              enforce=pick('CTRLB_ENFORCE', 'enforce').lower())
+    # user_name only ever comes from the key in effect (CTRLB_KEY or the file's key), decoded now, so a key from the
+    # environment and an old config.json "user" written as a label can never put another name on the rows.
+    c['user'] = key_user(c['key'])
     c['mcp_url'] = pick('CTRLB_MCP_URL', 'mcp_url', c['url'] + '/mcp' if c['url'] else '')
     c['off'] = env('CTRLB_OFF') == '1' or not c['url'] or not c['key'] or not NAME_RE.match(c['dataset'])
     return c

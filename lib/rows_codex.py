@@ -152,7 +152,7 @@ def _row(cfg, ids, st, hostname, ts, seq, role):
              block_type='', tool_name='', tool_use_id='', command='', paths='', body='', is_error=False,
              is_summary=False, cwd=st.get('cwd') or '', git_branch=st.get('branch') or '', cost_usd=0.0,
              input_tokens=0.0, output_tokens=0.0)
-    if cfg.get('user'):
+    if cfg.get('user'):   # the key's own user (common.key_user), never CTRLB_USER; without it Seeker fills user_name
         r['user_name'] = cfg['user']
     return r
 

@@ -3,7 +3,7 @@
 Seeker is a local fake that answers with the synthetic responses in tests/fixtures/seeker/ (relay-plan section 4).
 Nothing is sent anywhere else, Claude is never called, and no real config is read: every CTRLB_* variable from the
 calling environment is dropped and CTRLB_HOME points into tests/work/."""
-import glob, http.server, json, os, re, shutil, socket, stat, subprocess, sys, threading, time
+import base64, glob, http.server, json, os, re, shutil, socket, stat, subprocess, sys, threading, time
 sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -17,8 +17,23 @@ SID = '5f0c7a52-0000-4000-8000-000000000001'
 CSID = '01a07695-3fee-7191-bd75-a4df7b3baa7e'        # the thread id of tests/fixtures/codex-rollout.jsonl
 CSUB = '01a0aaaa-0000-7000-8000-000000000002'        # a subagent thread of it, written by the tests
 KEY = 'test-key-not-a-real-key'
+
+
+def fake_jwt(claims):
+    """A JWT-shaped key built here from made-up claims, with a made-up signature: never a real key."""
+    def enc(d):
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip('=')
+    return enc(dict(alg='RS256', typ='JWT')) + '.' + enc(claims) + '.' + enc(dict(sig='made-up'))
+
+
+KEY_USER = 'dev.one@example.test'
+JWT_KEY = fake_jwt(dict(sub='user-0001', email=KEY_USER, typ='mcp', workspaceId='ws-test', perm_version=1, role='member'))
+JWT_NOCLAIM = fake_jwt(dict(sub='user-0002', typ='mcp', workspaceId='ws-test', perm_version=1, role='member'))
+# the fake Seeker's keys and the user each one belongs to; a row naming any other user_name is refused with 403
+KEYS = {KEY: 'fixture-owner@example.test', JWT_KEY: KEY_USER, JWT_NOCLAIM: 'user-two@example.test'}
 sys.path.insert(0, os.path.join(ROOT, 'lib'))
 os.environ['CTRLB_HOME'] = os.path.join(WORK, 'home-import')
+import common  # noqa: E402
 import redact  # noqa: E402
 import rows_claude  # noqa: E402
 
@@ -43,7 +58,7 @@ class Seeker:
 
     def __init__(self):
         self.records, self.check_fx, self.runs_fx = load('seeker/records.json'), load('seeker/check.json'), load('seeker/runs.json')
-        self.calls, self.rows, self.state = [], [], dict(check='allow')
+        self.calls, self.rows, self.refused, self.state = [], [], [], dict(check='allow')
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -67,13 +82,18 @@ class Seeker:
                 body = json.loads(raw) if raw else None
                 outer.calls.append(dict(method=method, path=self.path, auth=self.headers.get('Authorization'), body=body,
                                         size=len(raw)))
-                if self.headers.get('Authorization') != 'Bearer ' + KEY:
+                auth = self.headers.get('Authorization') or ''
+                owner = KEYS.get(auth[len('Bearer '):]) if auth.startswith('Bearer ') else None
+                if owner is None:
                     return self._answer(**outer.records['responses']['no_key'])
                 m = re.match(r'^/ai/sessions/([A-Za-z0-9_]+)/records$', self.path)
                 if m and method == 'POST':
                     lim = outer.records['limits']
                     if not isinstance(body, list) or len(body) > lim['max_rows'] or len(raw) > lim['max_bytes']:
                         return self._answer(**outer.records['responses']['too_many_rows'])
+                    if any(isinstance(r, dict) and r.get('user_name') not in (None, '', owner) for r in body):
+                        outer.refused.append(body)
+                        return self._answer(**outer.records['responses']['other_user'])
                     outer.rows.extend(body)
                     return self._answer(202, dict(outer.records['responses']['accepted']['body'], accepted=len(body)))
                 m = re.match(r'^/ai/relay/([A-Za-z0-9_]+)/runs/([^/]+)/check$', self.path)
@@ -101,6 +121,7 @@ class Seeker:
     def reset(self):
         self.calls.clear()
         self.rows.clear()
+        self.refused.clear()
 
 
 def closed_port():
@@ -279,7 +300,7 @@ def test_hooks(seeker):
     check('compaction summary flagged', any(r['is_summary'] for r in mainr))
     check('fields: harness, cwd, branch, host', all(r['harness'] == 'claude' and r['cwd'] == '/work/dash' and r['git_branch'] == 'feat/dash'
                                                     and r['host'] for r in rows))
-    check('user_name left to Seeker when CTRLB_USER is unset', all('user_name' not in r for r in rows))
+    check('user_name left to Seeker when the key carries no user', all('user_name' not in r for r in rows))
     cols = {'_timestamp', 'host', 'harness', 'session_id', 'parent_session', 'agent_id', 'run_id', 'agent', 'seq', 'block_idx',
             'role', 'block_type', 'tool_name', 'tool_use_id', 'command', 'paths', 'body', 'is_error', 'is_summary', 'cwd',
             'git_branch', 'cost_usd', 'input_tokens', 'output_tokens', 'body_len', 'truncated'}
@@ -318,10 +339,36 @@ def test_hooks(seeker):
           f'leaked {leaked}' if leaked else f"{sent.count('[REDACTED]')} redactions")
     check('non-secret token counts kept', '\\"input_tokens\\": 1234' in sent)
 
-    # user name, when configured, is written
+    # user_name comes only from the key's own user (its email claim); CTRLB_USER is the agent label
     seeker.reset()
-    p, _ = hook('upload', I['stop'], dict(env, CTRLB_HOME=os.path.join(WORK, 'home-user'), CTRLB_USER='dev_one'))
-    check('CTRLB_USER is written as user_name', seeker.rows and all(r.get('user_name') == 'dev_one' for r in seeker.rows))
+    hook('upload', I['stop'], dict(env, CTRLB_HOME=os.path.join(WORK, 'home-user'), CTRLB_KEY=JWT_KEY))
+    check("a key from the environment with an email claim: rows carry that user as user_name",
+          seeker.rows and all(r.get('user_name') == KEY_USER for r in seeker.rows) and not seeker.refused,
+          f'{len(seeker.rows)} rows, {len(seeker.refused)} refused')
+    seeker.reset()
+    hook('upload', I['stop'], dict(env, CTRLB_HOME=os.path.join(WORK, 'home-user-noclaim'), CTRLB_KEY=JWT_NOCLAIM))
+    check('a key with no email claim: rows carry no user_name, Seeker fills it',
+          seeker.rows and all('user_name' not in r for r in seeker.rows) and not seeker.refused)
+    seeker.reset()
+    hook('upload', I['stop'], dict(env, CTRLB_HOME=os.path.join(WORK, 'home-user-label'), CTRLB_USER='seeker-t15-build'))
+    check('CTRLB_USER=seeker-t15-build sets agent and not user_name',
+          seeker.rows and all(r['agent'] == ('seeker-t15-build:agent-' + r['agent_id'] if r['agent_id'] else 'seeker-t15-build')
+                              and 'user_name' not in r for r in seeker.rows)
+          and not seeker.refused, f'{len(seeker.refused)} refused')
+    seeker.reset()
+    hook('upload', I['stop'], dict(env, CTRLB_HOME=os.path.join(WORK, 'home-user-both'), CTRLB_USER='old-label',
+                                   CTRLB_AGENT='builder-1', CTRLB_KEY=JWT_KEY))
+    check('CTRLB_AGENT wins over CTRLB_USER for the label; user_name is still the key user',
+          seeker.rows and all(r['agent'] == ('builder-1:agent-' + r['agent_id'] if r['agent_id'] else 'builder-1')
+                              and r.get('user_name') == KEY_USER for r in seeker.rows))
+    stale = os.path.join(WORK, 'home-user-stale')
+    os.makedirs(stale, exist_ok=True)
+    with open(os.path.join(stale, 'config.json'), 'w') as fh:
+        json.dump(dict(user='a-label-not-the-key-user'), fh)   # a config.json from before: "user" written as a label
+    seeker.reset()
+    hook('upload', I['stop'], dict(env, CTRLB_HOME=stale))
+    check('an old config.json "user" is never sent as user_name', seeker.rows and all('user_name' not in r for r in seeker.rows)
+          and not seeker.refused)
 
     # subagent start flushes the parent and names run and agent
     seeker.reset()
@@ -549,6 +596,43 @@ def test_config_and_status(seeker):
                        env=dict(env, CTRLB_KEY=KEY), timeout=30)
     check('status.py: Seeker answers with the latest runs; key masked', 'Seeker answered: OK' in p.stdout and 'relay-demo-1' in p.stdout
           and KEY not in p.stdout and 'CTRLB_MCP_URL in the environment: NO' in p.stdout, p.stdout[-300:])
+    check("status.py: says the key carries no user when it has no email claim", "key's user (written as user_name): (none in the key" in p.stdout)
+
+    # the key's user: the email claim of the JWT payload, decoded without a signature check
+    check('key_user: a fixture JWT with the email claim decodes to the user', common.key_user(JWT_KEY) == KEY_USER)
+    check('key_user: no email claim, a non-JWT key, a broken payload or no key give no user',
+          common.key_user(JWT_NOCLAIM) == '' and common.key_user(KEY) == '' and common.key_user('aaa.!!!.ccc') == ''
+          and common.key_user('a.' + base64.urlsafe_b64encode(b'[1]').decode() + '.c') == '' and common.key_user('') == ''
+          and common.key_user(fake_jwt(dict(email=7))) == '')
+    check("key_user reads the claim Seeker reads (email)", common.USER_CLAIM == 'email')
+    home2 = os.path.join(WORK, 'home-cfg-jwt')
+    env2 = dict(env, CTRLB_HOME=home2)
+    p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'configure.py'), '--url', seeker.url, '--dataset',
+                        'agent_sessions', '--user', 'some-label', '--run', '', '--key-stdin'], input=JWT_KEY + '\n',
+                       capture_output=True, text=True, env=env2, timeout=30)
+    with open(os.path.join(home2, 'config.json')) as fh:
+        c = json.load(fh)
+    check("configure.py stores the key's user as user, and ignores --user", p.returncode == 0 and c.get('user') == KEY_USER
+          and '--user is ignored' in p.stdout, p.stdout[-300:] + p.stderr[-200:])
+    check('configure.py with a JWT key: Seeker answers, and the key is never printed', 'Seeker answered: OK' in p.stdout
+          and JWT_KEY not in p.stdout + p.stderr and JWT_KEY.split('.')[1] not in p.stdout + p.stderr)
+    p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'status.py')], capture_output=True, text=True,
+                       env=dict(env2, CTRLB_USER='seeker-t15-build'), timeout=30)
+    check("status.py prints the key's user, CTRLB_USER as the label only, and never the key",
+          f"key's user (written as user_name): {KEY_USER}" in p.stdout and 'is read as the agent label only' in p.stdout
+          and '"agent": "seeker-t15-build"' in p.stdout and JWT_KEY not in p.stdout and JWT_KEY.split('.')[1] not in p.stdout,
+          p.stdout[-400:])
+    p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'configure.py'), '--url', seeker.url, '--dataset',
+                        'agent_sessions', '--run', '', '--key-stdin'], input=JWT_NOCLAIM + '\n', capture_output=True, text=True,
+                       env=env2, timeout=30)
+    with open(os.path.join(home2, 'config.json')) as fh:
+        c = json.load(fh)
+    check('configure.py with a key that has no email claim stores no user', p.returncode == 0 and 'user' not in c
+          and c.get('key') == JWT_NOCLAIM, p.stdout[-200:])
+    p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'status.py')], capture_output=True, text=True,
+                       env=dict(env2, CTRLB_KEY=JWT_KEY), timeout=30)
+    check("status.py with CTRLB_KEY in the environment shows that key's user", f"key's user (written as user_name): {KEY_USER}" in p.stdout,
+          p.stdout[-300:])
     p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'backfill.py'), '--count'], capture_output=True, text=True,
                        env=dict(env, CTRLB_KEY=KEY, CLAUDE_PROJECTS_DIR=os.path.join(WORK, 'projects')), timeout=30)
     check('backfill.py --count lists the fixture transcripts', p.returncode == 0 and 'transcript files' in p.stdout, p.stdout.strip()[:200])
@@ -608,6 +692,13 @@ def test_codex_rows(seeker):
               and r['parent_session'] == '' and r['agent_id'] == '' for r in rows))
     check('codex rows: cwd from session_meta and turn_context, branch from session_meta git',
           all(r['cwd'] == '/work/engine' and r['git_branch'] == 'new-rti-design' for r in rows))
+    check('codex rows: no user_name when the key carries no user', all('user_name' not in r for r in rows))
+    seeker.reset()
+    chook('upload', I['stop'], dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-user'), CTRLB_KEY=JWT_KEY,
+                                    CTRLB_USER='seeker-t15-build'))
+    check("codex rows: user_name is the key's user, CTRLB_USER is the agent label",
+          len(seeker.rows) == 11 and all(r.get('user_name') == KEY_USER and r['agent'] == 'seeker-t15-build' for r in seeker.rows)
+          and not seeker.refused, f'{len(seeker.rows)} rows, {len(seeker.refused)} refused')
     by = {(r['seq'], r['block_idx']): r for r in rows}
     kinds = [(r['seq'], r['role'], r['block_type']) for r in rows]
     check('codex rows: developer message, encrypted reasoning, event_msg and turn_context give no rows',

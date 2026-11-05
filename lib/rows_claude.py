@@ -3,6 +3,7 @@ Seeker with redaction. seq is the line number in the transcript file, so a row c
 
 Beyond the content blocks:
   run_id, agent   decision 4 (common.run_id, common.agent_name)
+  user_name       only the key's own user (common.key_user); omitted when the key carries none, and Seeker fills it
   paths           JSON array text of the file paths an edit tool touched (Edit, Write, MultiEdit, NotebookEdit),
                   on tool_use rows, normalised against the row's cwd by paths.edit_paths so Seeker keys them as the
                   claims are keyed; '' on every other row
@@ -94,7 +95,7 @@ def _base(cfg, ids, hostname, rec, ts, seq, parent, role, summ):
              block_type='', tool_name='', tool_use_id='', command='', paths='', body='', is_error=False,
              is_summary=summ, cwd=rec.get('cwd') or '', git_branch=rec.get('gitBranch') or '',
              cost_usd=0.0, input_tokens=0.0, output_tokens=0.0)
-    if cfg.get('user'):
+    if cfg.get('user'):   # the key's own user (common.key_user), never CTRLB_USER; without it Seeker fills user_name
         r['user_name'] = cfg['user']
     return r
 
