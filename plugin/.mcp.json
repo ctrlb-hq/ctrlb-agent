@@ -5,8 +5,8 @@
       "url": "${CTRLB_MCP_URL}",
       "headers": {
         "Authorization": "Bearer ${CTRLB_KEY}",
-        "X-CtrlB-Run": "${CTRLB_RUN}",
-        "X-CtrlB-Agent": "${CTRLB_AGENT}"
+        "X-CtrlB-Run": "${CTRLB_RUN:-}",
+        "X-CtrlB-Agent": "${CTRLB_AGENT:-}"
       }
     }
   }

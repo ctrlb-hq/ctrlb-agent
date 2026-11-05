@@ -4,6 +4,7 @@ the edit check of decision 7. Both harnesses take the same output shapes: hookSp
 permissionDecisionReason."""
 import time
 import common
+from paths import PATH, edit_paths as normalise_edit_paths, key as resource_key
 
 CHECK_S = 2.0
 
@@ -30,8 +31,13 @@ def context(event, text):
 
 
 def _resource(c):
+    """What to name in the claim call: the conflict's path without the key prefix when claiming that names the same key
+    ("src/app.py"), else the key itself ("path:Makefile", since a bare "Makefile" is keyed as a name)."""
     key = c.get('key') or ''
-    return key[len('path:'):] if key.startswith('path:') else (c.get('path') or key)
+    if not key.startswith(PATH):
+        return c.get('path') or key
+    bare = key[len(PATH):]
+    return bare if resource_key(bare)[0] == key else key
 
 
 def _lease(c):
@@ -45,7 +51,9 @@ def _lease(c):
 def decide(cfg, run, agent, paths, cwd=''):
     """Decision 7: post the paths an edit is about to touch to Seeker's check and turn the answer into the hook
     output, or None for no output (allowed, mode off, or no conflict). Raises on any Seeker error; the caller fails
-    open."""
+    open. The paths are sent as paths.edit_paths gives them (relative to cwd, once per key), so Seeker keys them as it
+    keys claims and as it keys the paths column of the session rows."""
+    paths = normalise_edit_paths(paths, cwd or '')
     if not paths or not run or not agent:
         return None
     res = common.check(cfg, run, agent, paths, cwd or '', timeout=CHECK_S)

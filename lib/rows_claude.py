@@ -4,7 +4,8 @@ Seeker with redaction. seq is the line number in the transcript file, so a row c
 Beyond the content blocks:
   run_id, agent   decision 4 (common.run_id, common.agent_name)
   paths           JSON array text of the file paths an edit tool touched (Edit, Write, MultiEdit, NotebookEdit),
-                  on tool_use rows; '' on every other row
+                  on tool_use rows, normalised against the row's cwd by paths.edit_paths so Seeker keys them as the
+                  claims are keyed; '' on every other row
   input_tokens,   from message.usage, once per message id (Claude Code repeats the usage on every block line of one
   output_tokens   message); input_tokens includes cache reads and cache writes. Floats; 0.0 elsewhere
   cost_usd        on block_type "result" rows: the increase of the session's cumulative cost since the previous
@@ -12,6 +13,7 @@ Beyond the content blocks:
                   cost_usd over a session's rows is its cost. Float; 0.0 elsewhere"""
 import datetime, glob, json, os, time
 import common
+from paths import edit_paths as normalise_edit_paths
 from redact import redact
 
 SUMMARY_PREFIX = 'This session is being continued from a previous conversation'
@@ -151,7 +153,7 @@ def rows_from(rec, seq, st, ids, cfg, hostname):
             r['tool_use_id'] = b.get('id') or ''
             st['names'][r['tool_use_id']] = r['tool_name']
             r['command'] = str(inp.get('command', '')) if r['tool_name'] == 'Bash' else ''
-            p = edit_paths(r['tool_name'], inp)
+            p = normalise_edit_paths(edit_paths(r['tool_name'], inp), r['cwd'])
             r['paths'] = json.dumps(p) if p else ''
             r['body'] = r['command'] or json.dumps(inp)
         elif bt == 'tool_result':

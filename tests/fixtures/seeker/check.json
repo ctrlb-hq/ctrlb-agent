@@ -1,18 +1,18 @@
 {
   "synthetic": "Built by hand from relay-plan section 4 (Relay, check), not recorded from a running Seeker. Replace with a recording once Seeker Task 4 serves the route.",
   "route": "POST /ai/relay/{dataset}/runs/{run}/check",
-  "request": {"agent": "5f0c7a52-0000-4000-8000-000000000001", "paths": ["/work/dash/src/panels/Latency.tsx"], "cwd": "/work/dash"},
+  "request": {"agent": "5f0c7a52-0000-4000-8000-000000000001", "paths": ["src/panels/Latency.tsx"], "cwd": "/work/dash"},
   "responses": {
     "allow": {"status": 200, "body": {"mode": "advisory", "allowed": true, "conflicts": []}},
     "advisory": {"status": 200, "body": {"mode": "advisory", "allowed": true, "conflicts": [
-      {"path": "/work/dash/src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "agent-b", "lease_until": 1793000000000000}]}},
+      {"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "agent-b", "lease_until": 1793000000000000}]}},
     "enforce": {"status": 200, "body": {"mode": "enforce", "allowed": false, "conflicts": [
-      {"path": "/work/dash/src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "agent-b", "lease_until": 1793000000000000}]}},
+      {"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "agent-b", "lease_until": 1793000000000000}]}},
     "enforce_allow": {"status": 200, "body": {"mode": "enforce", "allowed": true, "conflicts": []}},
     "off": {"status": 200, "body": {"mode": "off", "allowed": true, "conflicts": [
-      {"path": "/work/dash/src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "agent-b", "lease_until": 1793000000000000}]}},
+      {"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "agent-b", "lease_until": 1793000000000000}]}},
     "self": {"status": 200, "body": {"mode": "enforce", "allowed": false, "conflicts": [
-      {"path": "/work/dash/src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "5f0c7a52-0000-4000-8000-000000000001", "lease_until": 1793000000000000}]}},
+      {"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "5f0c7a52-0000-4000-8000-000000000001", "lease_until": 1793000000000000}]}},
     "error": {"status": 500, "body": {"error": "lake unavailable"}}
   }
 }
