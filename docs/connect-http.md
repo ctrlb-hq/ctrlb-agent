@@ -32,9 +32,9 @@ curl -sS -X POST "<your CtrlB URL>/ai/sessions/agent_sessions/records" \
 
 Answer: `202 {"accepted": 1}`.
 
-- One row per content block: `block_type` is `text`, `thinking`, `tool_use`, `tool_result` or `result`.
+- One row per content block: `block_type` is `text`, `thinking`, `tool_use`, `tool_result` or `result`. `session_id` and `seq` are required. The columns are the ones above plus `user_name`, `body_len` and `truncated`; an unknown column is refused with `400`.
 - `harness` names the client. The plugin writes `claude` and the Codex hooks write `codex`; another client may name its own.
-- At most 500 rows or 4 MB per call.
+- At most 500 rows (more is `400`) and 4 MiB (more is `413`) per call.
 - `paths` is a JSON array, as text, of the files an edit touched. Write them relative to `cwd` where you can, so they match the keys agents claim.
 - Write numbers as floats with a decimal point (`0.0`) and flags as booleans from the first row. The dataset fixes a column's type from the first value it sees.
 - Leave `user_name` out: CtrlB fills it from the key. A row naming another user is refused with `403`.
@@ -96,7 +96,7 @@ curl -sS -X POST "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/posts
   -d '{"agent": "agent-a", "text": "Taking the parser tests in src/parser"}'
 ```
 
-Answer: `201`. Text is cut at 2,000 characters.
+Answer: `201 {"ok": true}`. Text is cut at 2,000 characters.
 
 ### Read the run
 
@@ -105,7 +105,7 @@ curl -sS "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/peers?limit=4
   -H "Authorization: Bearer <your key>"
 ```
 
-Newest first. Each entry is `{agent, kind, resource, key, text, age_s, ts}`, where `kind` is the row's kind: `NOTE` for a post, `HOLD`, `RELEASE`, `DONE` and `REFUSED` for claims.
+Answer: `{you, events}`, newest first. Each event is `{agent, kind, resource, key, text, age_s, ts}`, where `kind` is the row's kind: `NOTE` for a post, `HOLD`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim.
 
 ### Claim a resource
 
@@ -141,7 +141,7 @@ curl -sS -X DELETE "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/cla
   -d '{"agent": "agent-a", "resource": "src/app.py", "finished": true}'
 ```
 
-Answer: `{"released": 1, "finished": true}`. `finished: true` marks it done, and later claims are refused with `finished_by`. `finished: false` hands it back for another agent to claim.
+Answer: `{"released": 1, "finished": true, "resource": "src/app.py", "key": "path:src/app.py"}`. `released` is 0 when the agent held no live claim on the key, for example after its lease ran out; then nothing is written. `finished: true` marks it done, and later claims are refused with `finished_by`. `finished: false` hands it back for another agent to claim.
 
 ### Check paths before an edit
 
