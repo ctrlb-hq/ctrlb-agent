@@ -216,7 +216,10 @@ def test_layout():
           all(s.startswith('---\n') and f'\nname: {n}\n' in s for n, s in skills.items()))
     relay = skills['relay']
     check('relay skill: run id argument and the three rules', '$ARGUMENTS' in relay and all(f'\n{i}. ' in relay for i in (1, 2, 3))
-          and 'call `claim` with the file path' in relay and 'finished=true' in relay)
+          and 'call `claim` with the file path' in relay)
+    check('relay skill: finish tasks, just release files; reopen a finished task',
+          'Finish tasks, just release files' in relay and 'A file path is never finished' in relay and '`reopen=true`' in relay
+          and 'call `release` with `finished=true`' not in relay)
     check('no stdio recall server shipped', not glob.glob(os.path.join(ROOT, '**', 'recall_mcp.py'), recursive=True))
     check('plugin/lib and plugin/bin point at the shared lib and bin',
           os.path.realpath(os.path.join(ROOT, 'plugin', 'lib')) == os.path.join(ROOT, 'lib')
@@ -258,6 +261,9 @@ def test_hooks(seeker):
     check('session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {SID}' in ctx and f'run id is {SID}' in ctx and f'agent id is {SID}' in ctx and p.returncode == 0)
     check('session-start: tells the agent to claim the file path a task names', 'claim with the file path the task names' in ctx)
+    check('session-start: finish tasks, just release files, and reopen a finished task',
+          'Finish tasks, just release files' in ctx and 'a file path is never finished' in ctx
+          and 'finished=true only when releasing a task name' in ctx and 'reopen=true' in ctx)
     check('session-start under 1 s', dt < 1.0, f'{dt:.2f}s')
     p, _ = hook('session-start', I['session_start_compact'], dict(env, CTRLB_RUN='relay-run-7', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
@@ -502,6 +508,23 @@ def test_docs():
     rows = json.loads(body.group(1)) if body else []
     check('docs: the HTTP records example is valid JSON with the section 5 columns', rows and set(rows[0]) == COLS - {'body_len', 'truncated'},
           str(sorted(set(rows[0]) ^ COLS)) if rows else 'no body')
+
+
+def test_release_wording():
+    """Seeker never finishes a file path (relay-plan decision 15): no agent-facing text may tell agents to release
+    with finished=true as the rule for every claim, and the tool docs carry reopen."""
+    old = re.compile(r'(call|then) `?release`? with `?finished=true`?', re.I)
+    files = [f for f in glob.glob(os.path.join(ROOT, '**', '*'), recursive=True)
+             if os.path.isfile(f) and f.endswith(('.md', '.py', '.json')) and '/tests/' not in f and '/.git/' not in f
+             and not f.endswith('relay-plan.md')]
+    bad = [os.path.relpath(f, ROOT) for f in files if old.search(open(f, errors='replace').read())]
+    check('no agent-facing text says to release with finished=true for every claim', not bad, ', '.join(bad))
+    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
+    check('relay-tools: claim documents reopen and release says files are always handed back',
+          '| `reopen` |' in tools and '"reopened": true' in tools and 'A file path is always handed back' in tools)
+    lim = open(os.path.join(ROOT, 'docs', 'limits.md')).read()
+    check('limits: a file path is never done; reopen starts a new round; no "use a new run id"',
+          'A file path is never done' in lim and 'reopen=true' in lim and 'use a new run id' not in lim)
 
 
 def test_keys():
@@ -801,6 +824,8 @@ def test_codex_hooks(seeker):
     check('codex session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {CSID}' in ctx and f'run id is {CSID}' in ctx and f'agent id is {CSID}' in ctx and p.returncode == 0, f'{dt:.2f}s')
     check('codex session-start: tells the agent to claim the file path a task names', 'claim with the file path the task names' in ctx)
+    check('codex session-start: finish tasks, just release files, and reopen a finished task',
+          'Finish tasks, just release files' in ctx and 'finished=true only when releasing a task name' in ctx and 'reopen=true' in ctx)
     p, _ = chook('session-start', I['session_start'], dict(env, CTRLB_RUN='relay-run-8', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
     check('codex session-start: CTRLB_RUN and CTRLB_AGENT win', 'run id is relay-run-8' in ctx and 'agent id is builder-1' in ctx)
@@ -1041,6 +1066,7 @@ def main():
     test_keys()
     test_edit_keys_across_harnesses(seeker)
     test_docs()
+    test_release_wording()
     test_failure_safety(seeker)
     test_config_and_status(seeker)
     test_codex_rows(seeker)

@@ -99,7 +99,7 @@ What the other agents in the run have posted, claimed and released, newest first
 | `run_id`, `agent` | Optional, from the headers. `agent` only fills `you` in the answer. |
 | `limit` | 40 by default, at most 500. |
 
-Answer: `{you, events: [{agent, kind, resource, key, text, age_s, ts}]}`. `kind` is `NOTE` for a post, `HOLD`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim. `text` is cut at 300 characters. You see your own user's rows unless your role has `relay.read_all`.
+Answer: `{you, events: [{agent, kind, resource, key, text, age_s, ts}]}`. `kind` is `NOTE` for a post, `HOLD`, `REOPEN`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim. `text` is cut at 300 characters. You see your own user's rows unless your role has `relay.read_all`.
 
 ### post
 
@@ -121,6 +121,7 @@ An exclusive claim on a resource, a file path or a task name.
 | `resource` | Required. A file path, for example `src/app.py`, or a task name. |
 | `run_id`, `agent` | Required, or from the headers. |
 | `cwd` | Your working directory. An absolute path under it is keyed relative to it. |
+| `reopen` | `true` to claim a finished task name anyway and start a new round of work on it. It has no effect on a key that is not finished. |
 
 Answer when the claim is yours:
 
@@ -135,26 +136,35 @@ Answer when another agent holds it, or it is done:
 ```
 
 ```json
-{"held": false, "resource": "src/app.py", "key": "path:src/app.py", "finished_by": "agent-b", "message": "src/app.py was already finished by agent-b; pick something else"}
+{"held": false, "resource": "slugify", "key": "name:slugify", "finished_by": "agent-b", "finished_at": 1793000300000000, "message": "slugify was already finished by agent-b at 2026-11-07T10:05:00Z. If you were asked to work on it again, claim it with reopen=true to start a new round of work; otherwise pick something else"}
+```
+
+Answer to `claim(resource="slugify", reopen=true)` on that finished task:
+
+```json
+{"held": true, "resource": "slugify", "key": "name:slugify", "lease_until": 1793000900000000, "reopened": true}
 ```
 
 - A refusal is a normal answer, not an error. Pick other work; do not retry the same resource in a loop.
 - `key` is what the claim is held under. A resource with a `/` or a file extension is a path: `./` is dropped, `//`, `/./` and `..` are resolved, and the `cwd` prefix is removed. Anything else is a name, lower-cased with its whitespace collapsed. A file with no extension, such as `Makefile`, is a name unless you write `path:Makefile`.
-- The claim lasts until `lease_until` (10 minutes by default) unless it is released. It is not renewed. Claiming a key you already hold answers `held: false` with `held_by` naming you, and the first hold stands.
+- Only a task name can be finished. A file path is never finished, so `finished_by` never appears on a `path:` key.
+- `reopen=true` on a finished task writes a `REOPEN` row that starts a new round of work. If two agents reopen at once, one holds it and the other is refused with `held_by`. The earlier rounds stay in the record.
+- The claim lasts until `lease_until` (10 minutes by default) unless it is released. Claiming a key you already hold renews it: `held: true, renewed: true`, with the `lease_until` of the new hold.
 
 ### release
 
-Give a claim back, or mark it done.
+Give a claim back, or mark a task done. Finish tasks, just release files.
 
 | Argument | |
 |---|---|
 | `resource` | Required. The resource as you claimed it. |
-| `finished` | `true` (default): done for good, and later claims are refused with `finished_by`. `false`: hand it back for another agent to claim. |
+| `finished` | Task names only. `true` (default): the task is done, and later claims are refused with `finished_by` unless they pass `reopen=true`. `false`: hand it back for another agent to claim. A file path is always handed back, whatever `finished` says. |
+| `cwd` | The working directory the claim was made with, if any. |
 | `run_id`, `agent` | Required, or from the headers. |
 
-Answer: `{released, finished, resource, key}`. `released` counts your live holds on the key. It is 0 when you held none, for example after the lease ran out; then nothing is written and the key is not done. Claim it again, then release it.
+Answer: `{released, finished, resource, key, message?}`. `released` counts your live holds on the key. It is 0 when you held none, for example after the lease ran out; then nothing is written and the key is not done. Claim it again, then release it. On a file path `finished` is always `false`, and when you asked for `finished=true` the `message` says the file was handed back instead.
 
-`release` takes no `cwd`. If you claimed an absolute path with `cwd`, release the relative path the `key` shows, for example `src/app.py`.
+If you claimed an absolute path with `cwd`, release it with the same `cwd`, or release the `key` the claim answered, for example `path:src/app.py`.
 
 ## The three agent rules
 
@@ -163,7 +173,7 @@ These are the rules from the research, worded for the relay tools. Paste them in
 ```text
 1. Other agents are working in this same directory right now. Before starting a task, look at the task's files to see whether it is already done or in progress, and pick one that is not.
 2. Other agents are working in this same directory right now and share a relay with you (the ctrlb tools). Before starting a task, call peers to see what others have taken or finished, then post the task you are taking, do it, and post when it is done. Never take a task another agent has posted.
-3. Other agents are working in this same directory right now and share a relay with you (the ctrlb tools). Before starting a task, call claim with the file path the task names; work on it only if held is true, otherwise claim a different task. When its test passes, call release with finished=true.
+3. Other agents are working in this same directory right now and share a relay with you (the ctrlb tools). Before starting a task, call claim with the file path the task names; work on it only if held is true, otherwise claim a different task. When its test passes, call release on it.
 ```
 
 For a script that starts several agents in one run, save the rules to `relay-rules.txt` and give every agent the same run id:

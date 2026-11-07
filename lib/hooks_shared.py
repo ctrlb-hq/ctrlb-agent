@@ -23,7 +23,10 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
          "the same files. Pass run_id=\"{run}\" and agent=\"{agent}\" to the ctrlb relay tools (peers, post, claim, "
          "release). Before starting a task, call claim with the file path the task names (for example "
          "claim(resource=\"src/app.py\")), not a description of the task; work on it only if held is true, otherwise "
-         "pick other work. When the work on it is finished, call release with finished=true.")
+         "pick other work. Finish tasks, just release files: when you are done with a file, call release on it, and "
+         "it is handed back for later rounds of work (a file path is never finished). Pass finished=true only when "
+         "releasing a task name, to mark the task done. If a task name is refused as finished and you were asked to "
+         "work on it again, claim it with reopen=true to start a new round.")
 
 
 def context(event, text):
