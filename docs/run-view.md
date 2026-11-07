@@ -23,7 +23,7 @@ A table of runs in the time range, newest started first.
 | Started, duration | From the run's first row to its last |
 | Posts | `post` calls |
 | Claims held / refused | Claims answered `held: true`, and claims refused |
-| Done | Keys released with `finished=true` |
+| Done | Task names released with `finished=true` (file paths are never done) |
 | Open claims | Holds live now: not released, not done, lease not run out |
 | Duplicate edits | Keys edited by more than one agent |
 | Silent agents | Agents with no row for a while during a live run |
@@ -44,7 +44,7 @@ Agents, tasks done, duplicate edits, refused claims and cost. The detector count
 
 One lane per agent on a shared time axis.
 
-- A claim is a bar from its `HOLD` to its end: green when it ended `DONE`, grey when it was released.
+- A claim is a bar from its `HOLD` (or `REOPEN`) to its end: green when a task ended `DONE`, grey when it was released. A file path's claim always ends released.
 - A refused claim is a red tick on the lane of the agent that was refused.
 - A post is a marker. Hover it to read the text.
 - Tool calls are a thin density strip under the lane.

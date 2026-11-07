@@ -16,8 +16,9 @@ store**: every agent's record (messages, tool calls, results) as rows in the cus
 searchable by the agent itself and by people. Relay is what agents in one run do with that record:
 `peers`, `post`, `claim`, `release`. A **run** is a set of agents that share
 a run id; an **agent** is one session in a run; a **post** is a note on the relay; a **claim** is an
-exclusive hold on a **resource** (a file path or a task name) with a **lease**; a finished claim is
-**done**. The **run view** is the Orion page. "Dataset" means a stream everywhere in this codebase.
+exclusive hold on a **resource** (a file path or a task name) with a **lease**; a finished task is
+**done** (decision 15: only task names are finished; a file path is always a lease). The **run
+view** is the Orion page. "Dataset" means a stream everywhere in this codebase.
 Do not use "blackboard", "board", "swarm" or "lock" in code, UI or docs; "swarm" is fine in
 marketing copy. Claims are described as advisory unless the workspace turns on `enforce`; never
 write that Relay mechanically prevents conflicting edits.
@@ -154,8 +155,9 @@ Claude Code and Codex facts (verified 2026-11-04 and 2026-11-05):
    SessionStart and SubagentStart hooks tell the agent its run id and agent id in the injected rule.
 5. **Claims are decided in Seeker, write-first, exactly as measured.** Section 4 "Claims" is the
    protocol. The wait after the HOLD write (`waitMs`, default 20) and the lease (`leaseSeconds`,
-   default 600) are workspace settings. A claim on a finished resource is refused with
-   `finished_by`. A resource is normalised before it is keyed (decision 6).
+   default 600) are workspace settings. A claim on a finished task name is refused with
+   `finished_by` unless it passes `reopen` (decision 15). A resource is normalised before it is
+   keyed (decision 6).
 6. **Resources are keyed on normalised paths when they look like paths.** The one duplicate in 96
    came from two names for one task ("task 01 slugify" versus "slugify"). A resource containing a
    `/` or ending in a file extension is a path: strip `./`, collapse `//` and `/./`, resolve `..`
@@ -204,6 +206,29 @@ Claude Code and Codex facts (verified 2026-11-04 and 2026-11-05):
     server): the `claim` arm must complete 96 of 96 tasks with at most 2 duplicated task files over
     8 trials, and the `none` arm is the control. Claim latency through Seeker (p50, p95) is
     recorded in the report.
+15. **Finish tasks, just release files (2026-11-07, amends decision 5).** One flag meant two things.
+    `release(finished=true)` wrote a DONE row, and every later claim on that key was refused for the
+    rest of the run. That is right for a task and wrong for a file: files are edited again in later
+    rounds of work. In a live run a worker sent to fix files that earlier workers had released as
+    finished was refused on every claim and stopped; the only way round was inventing keys such as
+    `path:file.tsx@r4`. Now:
+    - **A `path:` key is a lease and is never finished.** Its release always writes RELEASE,
+      whatever `finished` says. A DONE row already on a path key (written before this decision)
+      only closes its hold and blocks nothing.
+    - **`finished` on a path is ignored, not rejected.** It defaults to true, and agents in the
+      field were told to pass it, so rejecting it would turn the default `release("src/app.py")`
+      into an error and leave the file held until its lease runs out. The answer says
+      `finished: false` and its `message` says the file was handed back.
+    - **A `name:` key (a task) is finished by DONE, and `reopen` starts a new round.** A claim
+      with `reopen: true` on a finished task writes a REOPEN row. A REOPEN is a hold, and the
+      first REOPEN after the round's DONE starts the next round: from then on only rows from that
+      REOPEN on decide the key. Two agents that reopen at once both write, both read both REOPENs
+      after `waitMs`, and agree on the first, as with HOLDs. The lake stays append-only, so every
+      round stays in the record. Without `reopen` a finished task is still refused, now with
+      `finished_at` and a message that says `reopen: true` starts a new round.
+    - The research arm of decision 14 used one file per task and relied on DONE on that path to
+      stop repeats. Under this decision an agent that wants a task to stay done claims the task by
+      name as well; rule 1 (look at the task's files first) still catches finished work.
 
 ## 4. Contract (authoritative; Orion mirrors it)
 
@@ -229,11 +254,13 @@ the epoch as the lake writes them. Cursor paging as findings.
 - `POST /ai/relay/{dataset}/runs/{run}/posts`: `{agent, text}` (text cut at 2 000); `201`.
 - `GET /ai/relay/{dataset}/runs/{run}/peers?limit=40`: newest first, each
   `{agent, kind, resource, key, text, age_s, ts}`.
-- `POST /ai/relay/{dataset}/runs/{run}/claims`: `{agent, resource, cwd?}` → `200`
-  `{held: true, resource, key, lease_until}` or `{held: false, resource, key, held_by | finished_by,
-  message}`. Never `409`: a refusal is a normal answer the agent reads.
+- `POST /ai/relay/{dataset}/runs/{run}/claims`: `{agent, resource, cwd?, reopen?}` → `200`
+  `{held: true, resource, key, lease_until, renewed?, reopened?}` or `{held: false, resource, key,
+  held_by | finished_by and finished_at, message}`. Never `409`: a refusal is a normal answer the
+  agent reads. `reopen: true` starts a new round of a finished task name (decision 15).
 - `DELETE /ai/relay/{dataset}/runs/{run}/claims`: `{agent, resource, finished: true}` → `{released:
-  n, finished: bool}`; `finished: false` hands the resource back.
+  n, finished: bool, message?}`; `finished: false` hands the resource back. `finished` applies to
+  task names only; a file path is always handed back (decision 15).
 - `POST /ai/relay/{dataset}/runs/{run}/check`: `{agent, paths: [..], cwd?}` → `{mode, allowed:
   bool, conflicts: [{path, key, held_by, lease_until}]}`. `allowed` is false only in `enforce`
   mode with at least one conflict.
@@ -252,18 +279,22 @@ the epoch as the lake writes them. Cursor paging as findings.
 - `GET /ai/relay/settings`, `PUT /ai/relay/settings`: `{sessionsDataset, waitMs, leaseSeconds,
   enforce: off|advisory|enforce, silentAfterSeconds (default 120)}`; Mongo, per workspace.
 
-### Claims (the protocol, from `swarm_mcp.py`; keep it exactly)
+### Claims (the protocol, from `swarm_mcp.py`, with decision 15's rounds)
 
-0. Read the resource's rows (`kind IN ('HOLD','RELEASE','DONE')`, ordered by `_timestamp`, `agent`).
-   If any is DONE, answer `held: false, finished_by`.
-1. Write one HOLD row `{run_id, agent, kind: HOLD, key, resource, nonce}` write-through.
+0. Read the resource's rows (`kind IN ('HOLD','REOPEN','RELEASE','DONE')`, ordered by
+   `_timestamp`, `agent`, `nonce`). If the key is a task name whose current round has a DONE,
+   answer `held: false, finished_by, finished_at`, unless the call passes `reopen`.
+1. Write one HOLD row `{run_id, agent, kind: HOLD, key, resource, nonce}` write-through (a REOPEN
+   row when step 0 found the task finished and the call passes `reopen`).
 2. Sleep `waitMs`.
-3. Read again. Live holds are HOLD rows with no RELEASE or DONE row of the same nonce and age under
-   `leaseSeconds`.
-4. Held if and only if the first live hold is ours and no DONE appeared. Otherwise write a RELEASE
-   for our nonce and answer `held: false` with the first live holder.
+3. Read again. Live holds are HOLD and REOPEN rows of the current round with no RELEASE or DONE
+   row of the same nonce and age under `leaseSeconds`. A round of a task name ends at its first
+   DONE; the first REOPEN after that DONE starts the next. A path key has one round.
+4. Held if and only if the first live hold is ours and the round is not finished. Otherwise write
+   a RELEASE for our nonce and answer `held: false` with the first live holder.
 
-`release` writes DONE (`finished: true`) or RELEASE for each of the caller's live holds on the key.
+`release` writes DONE (`finished: true`, task names only) or RELEASE for each of the caller's live
+holds on the key.
 `check` is step 3 for each path, without the write. Nothing is ever deleted or updated.
 
 ### MCP tools (toolset `agents`)
@@ -272,9 +303,9 @@ Reads (`classRead`): `search_sessions(term, session_id?, tool?, order?, one_per_
 offset?)`, `find_command(command, limit?, offset?)`, `next_actions(session_id, seq, k?, tool?)`,
 `fetch_records(session_id, seq_from, seq_to)`, `peers(run_id?, agent?, limit?)`. Writes
 (`classCreate`, registered only with `WriteToolsEnabled`): `post(text, run_id?, agent?)`,
-`claim(resource, run_id?, agent?, cwd?)`, `release(resource, finished?, run_id?, agent?)`. The
-dataset is the workspace's `sessionsDataset`; `dataset` is an optional argument. Descriptions are
-the ones in `swarm_mcp.py` `ALL` and `recall_mcp.py` `TOOLS`, with the key echo added to `claim`.
+`claim(resource, run_id?, agent?, cwd?, reopen?)`, `release(resource, finished?, run_id?, agent?,
+cwd?)`. The dataset is the workspace's `sessionsDataset`; `dataset` is an optional argument.
+Descriptions are the ones in `swarm_mcp.py` `ALL` and `recall_mcp.py` `TOOLS`, with the key echo added to `claim`.
 Answers are compact JSON (`compactResult`).
 
 ### Authorisation
@@ -297,7 +328,7 @@ Code usage). Column types are fixed by the first value the lake sees (`docs/agen
 so numbers are written as floats with a decimal point and booleans as booleans from the first row.
 
 Relay dataset (`_ctrlb_relay_<dataset>`): `_timestamp`, `run_id`, `agent`, `session_id`,
-`user_name`, `kind` (`NOTE`, `HOLD`, `RELEASE`, `DONE`, `REFUSED`, `CHECK`), `key`, `resource`,
+`user_name`, `kind` (`NOTE`, `HOLD`, `REOPEN`, `RELEASE`, `DONE`, `REFUSED`, `CHECK`), `key`, `resource`,
 `resource_kind` (`path` | `name`), `nonce`, `text`, `held_by` (on REFUSED and CHECK), `mode` (on
 CHECK). REFUSED and CHECK rows are the audit trail the run view's refusal ticks and the Guard
 handover read; they are written write-through like the rest.
