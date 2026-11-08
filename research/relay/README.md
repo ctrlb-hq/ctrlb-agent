@@ -110,3 +110,7 @@ python3 -I research/relay/swarm_mcp.py
 ```
 
 Give each agent its own `SWARM_AGENT` and one shared `SWARM_RUN`.
+
+## Third-party material
+
+`devbench/contracts.py` and `devbench/features.py` quote a few lines of the readtime and hone projects' source, docs, tests and sample data from [DevBench](https://github.com/open-compass/DevBench), which is licensed under the Apache License 2.0. Those lines are used only to build and judge the benchmark's feature arms. DevBench itself is not included; set `DEVBENCH_SRC` to a checkout.
