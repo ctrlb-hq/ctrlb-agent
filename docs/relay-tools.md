@@ -101,6 +101,8 @@ What the other agents in the run have posted, claimed and released, newest first
 | `limit` | 40 by default, at most 500. |
 | `kind` | Only events of this kind, for example `question`, `handoff` or `brief`. |
 | `open` | `true`: only questions with no answer. `peers(kind="question", open=true)` is an orchestrator's inbox. |
+| `since` | Only events after this `ts` (µs): the `ts` of the newest event you have seen. |
+| `wait_s` | When no event matches yet, wait up to this many seconds (at most 55) for one instead of answering empty. `peers(kind="answer", since=<ts>, wait_s=30)` waits for your answer without a sleep loop. |
 
 Answer: `{you, events: [{agent, kind, resource, key, text, age_s, ts, to?, id?, answered?}]}`. A `QUESTION` event carries its `id`, the agent it asks (`to`) and, once answered, `answered: {agent, ts, text}`. `kind` is `NOTE` for a post, `BRIEF` for a brief, `HOLD`, `REOPEN`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim. `text` is cut at 300 characters. You see your own user's rows unless your role has `relay.read_all`.
 
@@ -126,6 +128,7 @@ An exclusive claim on a resource, a file path or a task name.
 | `cwd` | Your working directory. An absolute path under it is keyed relative to it. |
 | `reopen` | `true` to claim a finished task name anyway and start a new round of work on it. It has no effect on a key that is not finished. |
 | `paths` | Files (or `slot:<name>` slots) that come with the resource: all are taken in one step with it, or none is (at most 32). A task your orchestrator registered brings its files when you leave this out. |
+| `wait_s` | Claim with `wait_s=30` when the task you want is held and you have nothing else to do: the claim waits in line (at most 55 s) and is held as soon as it is your turn. Waiters are served in the order they claimed. |
 
 Answer when the claim is yours:
 
@@ -160,6 +163,20 @@ Answer when the run has registered tasks and none has that name:
 ```json
 {"held": false, "resource": "median", "key": "name:median", "reason": "unknown_task", "suggestion": "task 03 median", "message": "median is not a task of this run. Did you mean \"task 03 median\"? Claim the task by the name your orchestrator registered"}
 ```
+
+Answer to `claim(resource="task 03 median", wait_s=30)` when another agent still held it after 30 s (a claim that got its turn answers `held: true` with `waited_ms`):
+
+```json
+{"held": false, "resource": "task 03 median", "key": "name:task 03 median", "reason": "timed_out", "held_by": "agent-b", "position": 2, "waited_ms": 30000, "message": "task 03 median is still held by agent-b after waiting 30s; nothing was taken. Pick something else, or claim it again with wait_s"}
+```
+
+Answer to a claim of a file that belongs to a registered task you do not hold:
+
+```json
+{"held": false, "resource": "src/median.py", "key": "path:src/median.py", "reason": "belongs_to_task", "task": "task 03 median", "held_by": "agent-b", "message": "src/median.py belongs to the task \"task 03 median\" (agent-b holds it): its files are held through the task. Claim \"task 03 median\" instead, and its files come with it"}
+```
+
+A held claim of a task whose registration lists `ask_about` answers them: `"ask_about": ["which date format the API returns"]`. Ask the task's owner about those before deciding them yourself.
 
 Answer to `claim(resource="slugify", reopen=true)` on that finished task:
 
@@ -269,10 +286,11 @@ For an orchestrator: register a task of the run, with the files that come with i
 | `name` | Required. The task name agents will claim, for example `task 03 median`. Not a file path. |
 | `text` | Required. What the task is. Cut at 2,000 characters. |
 | `paths` | Required. The task's files, at least one, at most 32. |
+| `ask_about` | Optional. The facts or questions whoever takes the task should ask you about (at most 16). `tasks` and a held claim of the task show them. |
 | `cwd` | Your working directory, for absolute paths. |
 | `run_id`, `agent` | Required, or from the headers. |
 
-Answer: `{ok: true, run_id, agent, key, name, paths}`. Registering a name again replaces its text and files.
+Answer: `{ok: true, run_id, agent, key, name, paths, ask_about?}`. Registering a name again replaces its text, files and `ask_about`.
 
 ### tasks
 
@@ -282,7 +300,7 @@ The run's registered tasks and their state now.
 |---|---|
 | `run_id` | Optional, from the header. |
 
-Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round}]}`. `state` is `open`, `held` or `finished` in the task's current round.
+Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round, ask_about?}]}`. `state` is `open`, `held` or `finished` in the task's current round; `ask_about` is what the task's owner wants its holder to ask about.
 
 ### contract
 
@@ -305,9 +323,10 @@ Read the contracts of the run before building on an interface another agent fini
 | Argument | |
 |---|---|
 | `names` | Only these contract names: a list, or one comma-separated string. Left out: every contract of the run. |
-| `run_id` | Optional, from the header. |
+| `run_id`, `agent` | Optional, from the headers. With `agent`, each contract says whether it changed since you last read the contracts. |
+| `since` | When you last read the contracts: the `read_at` of that answer. Left out, your last `contracts` call is used. |
 
-Answer: `{contracts: [{name, key, agent, ts, age_s, text, paths, changed_since}]}`, the newest contract of each name, newest first. `changed_since` lists its files claimed or edited after it was written: read those files before trusting the contract.
+Answer: `{contracts: [{name, key, agent, ts, age_s, text, paths, changed_since, text_since, text_changed_at?, changed_since_read?}], last_read?, read_at?}`, the newest contract of each name, newest first. `changed_since` lists its files claimed or edited after its current text was first written (`text_since`; writing the same text again does not reset it): read those files before trusting the contract. `text_changed_at` is set when the text changed from an earlier version. `changed_since_read` is true when the contract's text or files changed since you last read the contracts: read it again before building on it.
 
 ## Edits need a claim (hold required)
 

@@ -24,7 +24,9 @@ How to read the answers:
 
 - `claim` answers `held: true` with the `key` it stored, for example `name:task 03 median`, and the files that came with it in `paths`, for example `["path:src/median.py"]`. You hold all of them.
 - `held: false` with `reason: unknown_task` means the run has registered tasks and none has that name. Claim again with the `suggestion`, or pick a name from `tasks`.
-- `held: false` with `held_by` means another agent is on it now. Pick another task; do not retry the same resource in a loop.
+- `held: false` with `held_by` means another agent is on it now. Pick another task; do not retry the same resource in a loop. Claim with `wait_s=30` when the task you want is held and you have nothing else to do: the claim waits in line and answers `held: true` as soon as it is your turn, or `held: false` with `reason: timed_out`, `held_by` and your `position` in line.
+- `held: false` with `reason: belongs_to_task` means the file comes with a registered task (`task` in the answer): claim that task instead, and its files come with it.
+- A held claim of a task may answer `ask_about`: facts or questions the task's owner wants you to ask about. `ask` them before deciding them yourself.
 - `held: false` with `finished_by` and `finished_at` means the task is done. Pick another task, unless you were asked to do that task again: then claim its name with `reopen=true`, which starts a new round of work on it.
 - Finish tasks, just release files. A file is never finished: `release` hands it back, so you or another agent can edit it again later. When a task is done, release the task with `finished=true` (the default): its files are handed back with it. The finished task is what stops another agent from doing it again.
 - `release` with `finished=false` hands a task back for others to take.
@@ -33,7 +35,8 @@ How to read the answers:
   - `ask` when you are blocked on something only another agent or the orchestrator can decide. Do not post a QUESTION note.
   - `answer`, with the question's id, when you can settle an open question; `peers(kind="question", open=true)` lists the open ones.
   - `contract` when you finish an interface others will build on (a type, a route, a config shape): its name, the shape in a few lines, and the files that define it. Do not post a CONTRACT note.
-  - `contracts` before you build on another agent's interface; its `changed_since` lists the files changed since it was written.
+  - `contracts` before you build on another agent's interface; its `changed_since` lists the files changed since its text was written, and `changed_since_read` says it changed since you last read the contracts: read it again before building on it.
+  - `peers(kind="answer", since=<ts>, wait_s=30)` waits for an answer (or `kind="handoff"` for a handoff) instead of a sleep loop.
 
   Post a note only for what none of them covers.
 - A shared thing that is not a file, such as the dev server or a port, is claimed as `slot:<name>` and released when you are done with it: `claim(resource="slot:devserver")` before `npm run dev`, `release(resource="slot:devserver")` after. A slot's claim lasts two minutes; claim it again to keep it longer.

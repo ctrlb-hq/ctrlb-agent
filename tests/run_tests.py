@@ -298,7 +298,9 @@ def test_hooks(seeker):
           'you name in one step; ask when you are blocked on something only another agent or the orchestrator can decide; '
           "answer, with the question's id, when you can settle an open question; contract when you finish an interface others "
           'will build on (a type, a route, a config shape), with its name, the shape in a few lines and the files that define '
-          "it; contracts before you build on another agent's interface. Post a note only for what none of them covers." in ctx)
+          "it; contracts before you build on another agent's interface (changed_since lists its files changed since its text "
+          "was written, and changed_since_read says it changed since you last read it: read it again). Post a note only for "
+          "what none of them covers." in ctx)
     check('session-start under 1 s', dt < 1.0, f'{dt:.2f}s')
     p, _ = hook('session-start', I['session_start_compact'], dict(env, CTRLB_RUN='relay-run-7', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
@@ -610,7 +612,8 @@ def test_briefs_wording():
           relay == ['peers', 'post', 'claim', 'release', 'handoff', 'ask', 'answer', 'brief', 'briefs', 'task', 'tasks', 'contract', 'contracts'],
           ','.join(relay))
     check('relay-tools: contract and contracts documented, instead of a CONTRACT note',
-          '{contracts: [{name, key, agent, ts, age_s, text, paths, changed_since}]}' in tools and 'instead of a `CONTRACT:` note' in tools
+          '{contracts: [{name, key, agent, ts, age_s, text, paths, changed_since, text_since, text_changed_at?, changed_since_read?}], last_read?, read_at?}' in tools
+          and 'instead of a `CONTRACT:` note' in tools
           and 'changed_since?}]}' in tools)
     check('relay-tools: peers kind and open, ask and answer documented',
           '| `open` |' in tools and 'peers(kind="question", open=true)' in tools and 'answered: {agent, ts, text}' in tools
@@ -628,7 +631,7 @@ def test_briefs_wording():
     check('relay-tools: rule 3 claims the registered task with its files, and finishes it', registered_rule(tools))
     check('relay-tools: claim documents paths, conflict_key and unknown_task; task and tasks documented',
           '| `paths` |' in tools and '"conflict_key"' in tools and '"reason": "unknown_task"' in tools and '"suggestion"' in tools
-          and '{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round}]}' in tools)
+          and '{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round, ask_about?}]}' in tools)
     http = open(os.path.join(ROOT, 'docs', 'connect-http.md')).read()
     check('connect-http: both briefs routes as curl',
           '-X POST "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/briefs"' in http
@@ -1188,6 +1191,34 @@ def test_validate():
               (v.stdout + v.stderr).strip().splitlines()[-1][:200] if (v.stdout + v.stderr).strip() else '')
 
 
+def test_wait_wording():
+    """Round 3 (Seeker relay-plan decisions 25, 27, 28, 29): the session rule, the relay skill and the tool docs tell
+    the agent to claim with wait_s=30 when the task it wants is held and it has nothing else to do, what
+    belongs_to_task means, that contracts says what changed since it last read them, and to ask about a task's
+    ask_about."""
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import hooks_shared as H
+    rule = H.RELAY
+    wait = 'Claim with wait_s=30 when the task you want is held and you have nothing else to do'
+    check('relay rule: claim with wait_s=30 when the task is held and there is nothing else to do', wait in rule and 'timed_out' in rule)
+    check('relay rule: belongs_to_task means claim the task it names', 'If reason is belongs_to_task' in rule and 'claim that task (task in the answer)' in rule)
+    check('relay rule: contracts changed_since and changed_since_read', 'changed_since_read' in rule and 'changed_since' in rule)
+    check('relay rule: ask about a task\'s ask_about', 'If the claim answers ask_about' in rule)
+    skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+    check('relay skill: wait_s, timed_out and position', 'Claim with `wait_s=30` when the task you want is held and you have nothing else to do' in skill
+          and '`reason: timed_out`' in skill and '`position`' in skill)
+    check('relay skill: belongs_to_task, ask_about, changed_since_read, peers wait_s',
+          '`reason: belongs_to_task`' in skill and '`ask_about`' in skill and '`changed_since_read`' in skill
+          and 'peers(kind="answer", since=<ts>, wait_s=30)' in skill)
+    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
+    check('relay-tools: claim wait_s, the timed_out and belongs_to_task answers, ask_about',
+          '| `wait_s` |' in tools and '"reason": "timed_out"' in tools and '"position": 2' in tools
+          and '"reason": "belongs_to_task"' in tools and '"task": "task 03 median"' in tools and '"ask_about"' in tools)
+    check('relay-tools: peers since and wait_s, task ask_about, contracts since',
+          '| `since` | Only events after this' in tools and '| `ask_about` |' in tools
+          and '| `since` | When you last read the contracts' in tools)
+
+
 def main():
     seeker = Seeker()
     test_layout()
@@ -1200,6 +1231,7 @@ def main():
     test_docs()
     test_release_wording()
     test_briefs_wording()
+    test_wait_wording()
     test_failure_safety(seeker)
     test_config_and_status(seeker)
     test_codex_rows(seeker)
