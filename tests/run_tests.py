@@ -575,8 +575,24 @@ def test_keys():
     bad = [c for c in cases if paths.key(c['resource'], c['cwd'])[0] != c['key']]
     check(f'paths.key passes Seeker keys.json ({len(cases)} cases)', len(cases) >= 40 and not bad,
           '; '.join(f"{c['resource']!r},{c['cwd']!r} -> {paths.key(c['resource'], c['cwd'])[0]!r} want {c['key']!r}" for c in bad[:5]))
-    check('paths.key: kind is path or name as the key says', all(paths.key(c['resource'], c['cwd'])[1] == c['key'].split(':', 1)[0] for c in cases))
-    check('paths.key is idempotent on its own keys', all(paths.key(paths.key(c['resource'], c['cwd'])[0], c['cwd'])[0] == c['key'] for c in cases))
+    check('paths.key: kind is the table row of the key\'s prefix ("" for an invalid resource)',
+          all(paths.key(c['resource'], c['cwd'])[1] == (paths.kind_of(c['key'])['kind'] if c['key'] else '') for c in cases))
+    check('paths.key is idempotent on its own keys', all(paths.key(paths.key(c['resource'], c['cwd'])[0], c['cwd'])[0] == c['key']
+                                                         for c in cases if c['key']))
+    check('keys.json: lib/keys.json (read at run time) is tests/fixtures/keys.json byte for byte',
+          open(os.path.join(ROOT, 'lib', 'keys.json'), 'rb').read() == open(os.path.join(FIX, 'keys.json'), 'rb').read())
+    kinds = {k['prefix']: k for k in paths.KINDS}
+    check('kinds table: path, name, slot, contract with the decided columns',
+          sorted(kinds) == ['contract:', 'name:', 'path:', 'slot:']
+          and kinds['path:']['checked_by_hook'] and not kinds['path:']['finishable']
+          and kinds['name:']['finishable'] and kinds['name:']['reopenable']
+          and kinds['slot:']['leasable'] and kinds['slot:']['default_lease_s'] == 120 and not kinds['slot:']['finishable']
+          and not kinds['contract:']['leasable'])
+    check('kinds: slot lease 120 s, path and name the setting', paths.lease_seconds_for('slot:devserver', 600) == 120
+          and paths.lease_seconds_for('path:a.go', 600) == 600 and paths.lease_seconds_for('name:t', 600) == 600)
+    check('keys: slot:devserver, contract:..., Slot:X is a name, slot: is invalid',
+          paths.key('slot:devserver') == ('slot:devserver', 'slot') and paths.key('contract:seeker-4 routes') == ('contract:seeker-4 routes', 'contract')
+          and paths.key('Slot:X') == ('name:slot:x', 'name') and paths.key('slot:') == ('', ''))
     file_cases = [c for c in cases if c['key'].startswith('path:') and c['key'] != 'path:'
                   and not c['resource'].strip().startswith(('path:', 'name:'))]
     check('edit_path: Seeker keys what the package sends as the key of the path itself',
