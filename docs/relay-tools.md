@@ -1,12 +1,12 @@
 ---
 title: Relay tools
-description: The thirteen tools CtrlB's MCP server gives an agent, their arguments and answers, and the three agent rules to paste into a prompt.
+description: The fifteen tools CtrlB's MCP server gives an agent, their arguments and answers, and the three agent rules to paste into a prompt.
 slug: relay-tools
 ---
 
 # Relay tools
 
-CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent thirteen tools. Four search the session store. Nine are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
+CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent fifteen tools. Four search the session store. Eleven are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
 
 To add the server by hand in Claude Code:
 
@@ -17,7 +17,7 @@ claude mcp add --transport http ctrlb "<your CtrlB URL>/mcp" --header "Authoriza
 - Every call acts as the key's user, with that user's roles and dataset grants.
 - Answers are compact JSON. Times are microseconds since the epoch.
 - Every tool takes an optional `dataset`: the sessions dataset, the workspace's `sessionsDataset` setting (`agent_sessions` unless changed) when left out.
-- `post`, `claim`, `release`, `handoff`, `brief` and `task` write. CtrlB registers them only when the server runs with write tools enabled (`MCP_WRITE_TOOLS_ENABLED`). If an agent has `peers` but no `claim`, ask your CtrlB administrator.
+- `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief` and `task` write. CtrlB registers them only when the server runs with write tools enabled (`MCP_WRITE_TOOLS_ENABLED`). If an agent has `peers` but no `claim`, ask your CtrlB administrator.
 
 ## Run id and agent id
 
@@ -34,7 +34,7 @@ The plugin's `.mcp.json` and the Codex installer send both headers from the envi
 CtrlB Relay: your run id is <run> and your agent id is <agent>. ...
 ```
 
-A call with no run id answers `run_id is required: pass run_id, or connect with the X-CtrlB-Run header set`. `post`, `claim`, `release`, `handoff`, `brief` and `task` need an agent too.
+A call with no run id answers `run_id is required: pass run_id, or connect with the X-CtrlB-Run header set`. `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief` and `task` need an agent too.
 
 ## Session store tools
 
@@ -98,8 +98,10 @@ What the other agents in the run have posted, claimed and released, newest first
 |---|---|
 | `run_id`, `agent` | Optional, from the headers. `agent` only fills `you` in the answer. |
 | `limit` | 40 by default, at most 500. |
+| `kind` | Only events of this kind, for example `question`, `handoff` or `brief`. |
+| `open` | `true`: only questions with no answer. `peers(kind="question", open=true)` is an orchestrator's inbox. |
 
-Answer: `{you, events: [{agent, kind, resource, key, text, age_s, ts}]}`. `kind` is `NOTE` for a post, `BRIEF` for a brief, `HOLD`, `REOPEN`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim. `text` is cut at 300 characters. You see your own user's rows unless your role has `relay.read_all`.
+Answer: `{you, events: [{agent, kind, resource, key, text, age_s, ts, to?, id?, answered?}]}`. A `QUESTION` event carries its `id`, the agent it asks (`to`) and, once answered, `answered: {agent, ts, text}`. `kind` is `NOTE` for a post, `BRIEF` for a brief, `HOLD`, `REOPEN`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim. `text` is cut at 300 characters. You see your own user's rows unless your role has `relay.read_all`.
 
 ### post
 
@@ -203,6 +205,30 @@ Answer when you are not the holder: `{handed: false, resource, key, to, held_by?
 
 - Handing to yourself renews your claim.
 - Hand off to an agent of your own user (an agent id under the same key).
+
+### ask
+
+Ask a question you are blocked on and only another agent or the orchestrator can decide. Do not post a QUESTION note: a note cannot be answered, so nobody can tell whether it is still open.
+
+| Argument | |
+|---|---|
+| `text` | Required. Cut at 2,000 characters. |
+| `to` | The agent id to ask. Leave it out to ask anyone (the orchestrator). |
+| `run_id`, `agent` | Required, or from the headers. |
+
+Answer: `{id, run_id, agent}`. The question stays open until someone calls `answer` with that id.
+
+### answer
+
+Answer an open question by its id, from `peers(kind="question", open=true)` or the run view.
+
+| Argument | |
+|---|---|
+| `id` | Required. The question's id. |
+| `text` | Required. Cut at 2,000 characters. |
+| `run_id`, `agent` | Required, or from the headers. |
+
+Answer: `{ok: true, id, run_id, agent}`. The first answer closes the question; an id that is no question of the run is an error.
 
 ### brief
 
