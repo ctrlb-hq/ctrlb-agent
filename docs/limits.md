@@ -71,8 +71,8 @@ Even in `enforce` mode:
 ## Who sees what
 
 - Each call acts as the key's user, with that user's roles and dataset grants.
-- Session searches, `peers`, the runs list and the run detail show only your own user's rows, unless your role has `relay.read_all`.
-- `post`, `claim`, `release`, the edit check and records uploads need `relay.write`. Changing the Relay settings needs `relay.manage`.
+- Session store reads (the session list, searches, transcripts) show only your own user's sessions, unless your role has `sessions.read_all`. `peers`, the runs list and the run detail show only your own user's rows, unless your role has `relay.read_all`.
+- Records uploads need `sessions.write`. `post`, `claim`, `release` and the edit check need `relay.write`. Changing the Relay settings, which include the sessions dataset, needs `relay.manage`.
 - The MCP server registers `post`, `claim` and `release` only when it runs with write tools enabled.
 - A records row naming another user is refused with `403`, and nothing in that upload is written.
 

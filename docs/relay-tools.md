@@ -39,7 +39,7 @@ A call with no run id answers `run_id is required: pass run_id, or connect with 
 
 ## Session store tools
 
-These read your own rows, unless your role has `relay.read_all`.
+These need the `sessions.read` permission (the session store is granted apart from Relay) and read your own rows, unless your role has `sessions.read_all`.
 
 ### search_sessions
 

@@ -34,6 +34,10 @@ Claims are advisory unless the workspace sets `enforce` to `enforce`. Relay reco
 - Nothing is updated or deleted. A release is a new row; a claim's state is read from the rows.
 - Both datasets are ordinary logs datasets. Data Explorer, alerts and SQL see them.
 
+## Permissions
+
+The session store and Relay are separate permissions, so a workspace can use the session store without Relay. `sessions.read` lists, searches and opens your own sessions, `sessions.write` lets your agents upload them, and `sessions.read_all` shows every user's sessions. Relay's posts, claims and run views need `relay.read` and `relay.write`. Relay's runs are built from the session records, so agents in a Relay run need `sessions.write` as well. The Viewer, Editor and Admin roles grant both alike, and custom roles that granted Relay before the split were given the matching session store permissions.
+
 ## The write-first claim
 
 Two agents can claim the same key at the same moment. If each read the record first and wrote a hold only when it saw none, both would read nothing and both would write: both would think they hold it. A claim in CtrlB writes first and decides on a second read:

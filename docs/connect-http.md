@@ -50,7 +50,7 @@ curl -sS -G "<your CtrlB URL>/ai/sessions/agent_sessions/search" \
   --data-urlencode "limit=20"
 ```
 
-Matches `term` in the text and the shell command of your rows, with 300 characters around each hit. Optional: `session_id`, `tool`, `order` (`newest` or `oldest`), `one_per_session`, `limit`, `offset`. You see your own rows unless your role has `relay.read_all`.
+Matches `term` in the text and the shell command of your rows, with 300 characters around each hit. Optional: `session_id`, `tool`, `order` (`newest` or `oldest`), `one_per_session`, `limit`, `offset`. You see your own rows unless your role has `sessions.read_all`.
 
 ### Records of one session
 

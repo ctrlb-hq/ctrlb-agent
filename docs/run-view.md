@@ -10,7 +10,7 @@ slug: run-view
 
 The run view is where people see what a run's agents did. It is under **AI** in CtrlB, with two pages: **Runs** (`/ai/runs`, and one run at `/ai/runs/<run id>`) and **Connect** (`/ai/connect`). The pages show when the workspace has logs. They use the time range of the other AI pages.
 
-The pages read CtrlB's run endpoints, `GET /ai/relay/<dataset>/runs` and `GET /ai/relay/<dataset>/runs/<run id>`, and the session endpoints for transcripts. You need the `relay.read` permission and access to the sessions dataset. You see your own user's agents unless your role has `relay.read_all`.
+The pages read CtrlB's run endpoints, `GET /ai/relay/<dataset>/runs` and `GET /ai/relay/<dataset>/runs/<run id>`, and the session endpoints for transcripts. You need the `relay.read` permission and access to the sessions dataset, and `sessions.read` to open a transcript. You see your own user's agents unless your role has `relay.read_all`.
 
 ## Runs
 
