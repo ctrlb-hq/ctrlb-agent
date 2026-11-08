@@ -25,8 +25,9 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
          "claim(resource=\"task 03 median\"); tasks lists them). Its files come with it. If held is false with "
          "finished_by, the task is done; if held is false with held_by, another agent has it: pick another. If reason "
          "is unknown_task, claim again with the suggestion. Work only while you hold it. When the task is done, release "
-         "it with finished=true. A file that belongs to no task is claimed by its path. If you were asked to do a "
-         "finished task again, claim its name with reopen=true.")
+         "it with finished=true. A file that belongs to no task is claimed by its path. A shared thing that is not a "
+         "file, such as the dev server or a port, is claimed as slot:<name> and released when you are done with it. If "
+         "you were asked to do a finished task again, claim its name with reopen=true.")
 
 
 def context(event, text):

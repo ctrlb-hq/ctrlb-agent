@@ -283,6 +283,12 @@ def test_hooks(seeker):
     check('session-start: refusals, unknown_task, reopen a finished task',
           'held is false with finished_by, the task is done' in ctx and 'held is false with held_by, another agent has it' in ctx
           and 'If reason is unknown_task, claim again with the suggestion' in ctx and 'claim its name with reopen=true' in ctx)
+    check('session-start: slots for things that are not files', 'is claimed as slot:<name> and released when you are done with it' in ctx
+          and ctx.index('slot:<name>') < ctx.index('reopen=true'))
+    check('relay skill and tools: slots, two-minute lease, never finished',
+          'claimed as `slot:<name>` and released when you are done with it' in open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+          and all(n in open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read() for n in
+                  ('## Slots', '`slot:devserver`', '`slot:port-3000`', '`slot:db-migrate`', '`slot:screenshots`', '`slot:commit`', 'lasts two minutes')))
     check('session-start: names the relay tools, brief, briefs and tasks among them',
           'relay tools (peers, post, claim, release, brief, briefs, tasks)' in ctx)
     check('session-start under 1 s', dt < 1.0, f'{dt:.2f}s')
@@ -894,6 +900,7 @@ def test_codex_hooks(seeker):
     check('codex session-start: claims the registered task, its files come with it', registered_rule(ctx))
     check('codex session-start: names the relay tools, brief, briefs and tasks among them',
           'relay tools (peers, post, claim, release, brief, briefs, tasks)' in ctx)
+    check('codex session-start: slots', 'slot:<name>' in ctx)
     check('codex session-start: release it finished; reopen a finished task',
           'release it with finished=true' in ctx and 'claim its name with reopen=true' in ctx)
     p, _ = chook('session-start', I['session_start'], dict(env, CTRLB_RUN='relay-run-8', CTRLB_AGENT='builder-1'))
