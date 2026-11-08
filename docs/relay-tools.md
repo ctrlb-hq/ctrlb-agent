@@ -1,12 +1,12 @@
 ---
 title: Relay tools
-description: The eight tools CtrlB's MCP server gives an agent, their arguments and answers, and the three agent rules to paste into a prompt.
+description: The ten tools CtrlB's MCP server gives an agent, their arguments and answers, and the three agent rules to paste into a prompt.
 slug: relay-tools
 ---
 
 # Relay tools
 
-CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent eight tools. Four search the session store. Four are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
+CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent ten tools. Four search the session store. Six are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
 
 To add the server by hand in Claude Code:
 
@@ -17,7 +17,7 @@ claude mcp add --transport http ctrlb "<your CtrlB URL>/mcp" --header "Authoriza
 - Every call acts as the key's user, with that user's roles and dataset grants.
 - Answers are compact JSON. Times are microseconds since the epoch.
 - Every tool takes an optional `dataset`: the sessions dataset, the workspace's `sessionsDataset` setting (`agent_sessions` unless changed) when left out.
-- `post`, `claim` and `release` write. CtrlB registers them only when the server runs with write tools enabled (`MCP_WRITE_TOOLS_ENABLED`). If an agent has `peers` but no `claim`, ask your CtrlB administrator.
+- `post`, `claim`, `release` and `brief` write. CtrlB registers them only when the server runs with write tools enabled (`MCP_WRITE_TOOLS_ENABLED`). If an agent has `peers` but no `claim`, ask your CtrlB administrator.
 
 ## Run id and agent id
 
@@ -34,7 +34,7 @@ The plugin's `.mcp.json` and the Codex installer send both headers from the envi
 CtrlB Relay: your run id is <run> and your agent id is <agent>. ...
 ```
 
-A call with no run id answers `run_id is required: pass run_id, or connect with the X-CtrlB-Run header set`. `post`, `claim` and `release` need an agent too.
+A call with no run id answers `run_id is required: pass run_id, or connect with the X-CtrlB-Run header set`. `post`, `claim`, `release` and `brief` need an agent too.
 
 ## Session store tools
 
@@ -99,7 +99,7 @@ What the other agents in the run have posted, claimed and released, newest first
 | `run_id`, `agent` | Optional, from the headers. `agent` only fills `you` in the answer. |
 | `limit` | 40 by default, at most 500. |
 
-Answer: `{you, events: [{agent, kind, resource, key, text, age_s, ts}]}`. `kind` is `NOTE` for a post, `HOLD`, `REOPEN`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim. `text` is cut at 300 characters. You see your own user's rows unless your role has `relay.read_all`.
+Answer: `{you, events: [{agent, kind, resource, key, text, age_s, ts}]}`. `kind` is `NOTE` for a post, `BRIEF` for a brief, `HOLD`, `REOPEN`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim. `text` is cut at 300 characters. You see your own user's rows unless your role has `relay.read_all`.
 
 ### post
 
@@ -166,6 +166,35 @@ Answer: `{released, finished, resource, key, message?}`. `released` counts your 
 
 If you claimed an absolute path with `cwd`, release it with the same `cwd`, or release the `key` the claim answered, for example `path:src/app.py`.
 
+### brief
+
+A short note about a file or document you read, keyed by that resource, so the other agents of the run can read the brief instead of reading the whole file again.
+
+| Argument | |
+|---|---|
+| `resource` | Required. The file path or document name the brief is about. It is keyed exactly as `claim` keys it. |
+| `text` | Required. Up to a few hundred words: what the resource is for, what it exports or decides, and what not to touch. Cut at 2,000 characters. |
+| `cwd` | Your working directory. An absolute path under it is keyed relative to it. |
+| `run_id`, `agent` | Required, or from the headers. |
+
+Answer: `{ok: true, run_id, agent, key, resource}`.
+
+- A brief is not a claim and reserves nothing: anyone can write one at any time, and the newest one for a key is what `briefs` returns.
+- Write a brief after reading a file you will edit, or one that other agents will need.
+
+### briefs
+
+The newest brief of each resource in the run, newest first. Call it before reading a file or document that other agents may already have read.
+
+| Argument | |
+|---|---|
+| `resources` | The resources to look up: a list, or one comma-separated string, at most 200, keyed as `claim` keys them. Left out: the newest brief of every resource in the run. |
+| `limit` | 40 by default, at most 200. |
+| `cwd` | Your working directory, for absolute paths. |
+| `run_id` | Optional, from the header. |
+
+Answer: `{briefs: [{key, resource, agent, text, ts, age_s}]}`. A resource with no brief is left out of the answer. You see your own user's briefs unless your role has `relay.read_all`.
+
 ## The three agent rules
 
 These are the rules from the research, worded for the relay tools. Paste them into the agent's system prompt or `AGENTS.md`, or run `/ctrlb-agent:relay <run id>` in Claude Code, which loads them as a skill.
@@ -188,3 +217,9 @@ wait
 ```
 
 In the research, rule 3 is the one that cut duplicate work from 27 of 96 tasks to 1. Claim the file path a task names, not a description of the task: two descriptions of one task are two keys.
+
+To have agents share what they read, add this paragraph to the rules:
+
+```text
+Before reading a file or document that other agents of the run may also need, call briefs for it and read the brief first. After reading a file you will edit, or one that others need, post a brief for it with up to a few hundred words: what it is for, what it exports or decides, and what not to touch.
+```
