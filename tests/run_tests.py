@@ -3,7 +3,7 @@
 Seeker is a local fake that answers with the synthetic responses in tests/fixtures/seeker/ (relay-plan section 4).
 Nothing is sent anywhere else, Claude is never called, and no real config is read: every CTRLB_* variable from the
 calling environment is dropped and CTRLB_HOME points into tests/work/."""
-import base64, glob, http.server, json, os, re, shutil, socket, stat, subprocess, sys, threading, time
+import base64, glob, hashlib, http.server, json, os, re, shutil, socket, stat, subprocess, sys, threading, time
 sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1219,6 +1219,100 @@ def test_wait_wording():
           and '| `since` | When you last read the contracts' in tools)
 
 
+def test_done_evidence(seeker):
+    """Seeker decisions 30 and 31: the v6 rule text tells the agent to call done with the command it ran; the
+    PostToolUse hook remembers the agent's last test-looking Bash command, its exit code and last output line, and when
+    done (or a finished release) is refused for evidence it quotes that command, without calling Seeker or filling the
+    evidence in; a done drops the agent's tokens like a release."""
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import hooks_shared as H
+    rule = H.RELAY
+    v6 = ("When the task's test passes, call done on the task name with the command you ran and its result. "
+          "A task is finished only when the record shows what was checked.")
+    check('relay rule v6: call done with the command you ran; finished only when the record shows the check', v6 in rule)
+    check('relay rule v6: every earlier sentence kept', registered_rule(rule) and 'Claim with wait_s=30' in rule
+          and 'If reason is belongs_to_task' in rule and 'changed_since_read' in rule and 'If the claim answers ask_about' in rule
+          and rule.index('release it with finished=true') < rule.index(v6))
+    tests = ['pytest -q tests/test_x.py', 'python -m pytest', 'python3 -m unittest discover', 'cd app && go test ./...',
+             'npm test', 'npm run test -- --watch=false', 'cargo test --quiet', 'make test', 'make -C sub test', 'python -m unittest -v']
+    not_tests = ['ls -la', 'pip install pytest', 'npm install', 'cat pytest.ini', 'go build ./...', 'make build', 'git status']
+    check('test commands: pytest, unittest, go test, npm test, cargo test, make test are tests',
+          all(H.is_test_command(c) for c in tests), ', '.join(c for c in tests if not H.is_test_command(c)))
+    check('test commands: installs, reads and builds are not', not any(H.is_test_command(c) for c in not_tests),
+          ', '.join(c for c in not_tests if H.is_test_command(c)))
+    check('bash result: stdout object is exit 0 with the last line; an error text carries its exit code',
+          H.bash_result({'stdout': 'a\n3 passed in 0.01s\n\n', 'stderr': ''}) == (0, '3 passed in 0.01s')
+          and H.bash_result('Error: Exit code 2\nE   assert 1 == 2\nFAILED t.py') == (2, 'FAILED t.py')
+          and H.bash_result('Exit code 1\nboom') == (1, 'boom'))
+
+    home = os.path.join(WORK, 'home-done')
+    shutil.rmtree(home, ignore_errors=True)
+    env = base_env(seeker.url, home)
+    base = {'session_id': SID, 'transcript_path': '', 'cwd': '/work/dash', 'hook_event_name': 'PostToolUse'}
+    seeker.reset()
+    p, _ = hook('post-tool', dict(base, tool_name='Bash', tool_use_id='b1', tool_input={'command': 'pytest -q tests/test_lat.py'},
+                                  tool_response={'stdout': '...\n4 passed in 0.03s\n', 'stderr': '', 'interrupted': False}), env)
+    check('post-tool Bash test: no output, no Seeker call', p.returncode == 0 and not p.stdout.strip() and not seeker.calls, p.stdout + p.stderr)
+    hook('post-tool', dict(base, tool_name='Bash', tool_use_id='b2', tool_input={'command': 'ls src'}, tool_response={'stdout': 'a.py'}), env)
+    refusal = {'done': False, 'resource': 'task 07 latency', 'key': 'name:task 07 latency', 'reason': 'evidence_required',
+               'message': 'say which command you ran and its exit code'}
+    done_in = dict(base, tool_name='mcp__ctrlb__done', tool_use_id='d1', tool_input={'resource': 'task 07 latency'},
+                   tool_response=[{'type': 'text', 'text': json.dumps(refusal)}])
+    p, _ = hook('post-tool', done_in, env)
+    ctx = out_of(p).get('additionalContext', '')
+    check('post-tool done refused for evidence: quotes the last test command, its exit code and the call to make',
+          out_of(p).get('hookEventName') == 'PostToolUse' and '`pytest -q tests/test_lat.py` (exit code 0)' in ctx
+          and 'done(resource="task 07 latency"' in ctx and '"summary": "4 passed in 0.03s"' in ctx and 'ls src' not in ctx, ctx[:300])
+    check('post-tool done refused: Seeker is not called and nothing is filled in for the agent', not seeker.calls)
+    # A failing run that only the transcript shows (no PostToolUse for it) is newer: it is the one quoted.
+    tr = os.path.join(WORK, 'done-transcript.jsonl')
+    with open(tr, 'w') as fh:
+        fh.write(json.dumps({'type': 'assistant', 'timestamp': '2099-01-01T00:00:00.000Z', 'message': {'role': 'assistant', 'content': [
+            {'type': 'tool_use', 'id': 'x1', 'name': 'Bash', 'input': {'command': 'go test ./...'}}]}}) + '\n')
+        fh.write(json.dumps({'type': 'user', 'timestamp': '2099-01-01T00:00:01.000Z', 'message': {'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'x1', 'is_error': True, 'content': 'Exit code 1\n--- FAIL: TestLat\nFAIL\tdash/lat'}]}}) + '\n')
+    p, _ = hook('post-tool', dict(done_in, transcript_path=tr), env)
+    ctx = out_of(p).get('additionalContext', '')
+    check('post-tool done refused: a newer failing run in the transcript is quoted with its exit code',
+          '`go test ./...` (exit code 1)' in ctx and 'otherwise run the task\'s test first' in ctx, ctx[:300])
+    rel_in = dict(base, tool_name='mcp__ctrlb__release', tool_use_id='r1', tool_input={'resource': 'task 07 latency'},
+                  tool_response=[{'type': 'text', 'text': json.dumps({'released': 0, 'finished': False, 'resource': 'task 07 latency',
+                                                                      'key': 'name:task 07 latency', 'reason': 'evidence_required',
+                                                                      'deprecated': 'finished is replaced by done(resource)'})}])
+    p, _ = hook('post-tool', rel_in, env)
+    check('post-tool release refused for evidence: the same hint', '`pytest -q tests/test_lat.py` (exit code 0)' in out_of(p).get('additionalContext', ''))
+    fresh = base_env(seeker.url, os.path.join(WORK, 'home-done-empty'))
+    p, _ = hook('post-tool', done_in, fresh)
+    check('post-tool done refused with no test run seen: tells the agent to run the test first',
+          "Run the task's test, then call done(" in out_of(p).get('additionalContext', ''))
+    # A done that finished the task: no output, and the task's tokens are dropped like a release's.
+    hook('post-tool', dict(base, tool_name='mcp__ctrlb__claim', tool_use_id='c1', tool_input={'resource': 'task 07 latency'},
+                           tool_response=[{'type': 'text', 'text': json.dumps({'held': True, 'key': 'name:task 07 latency',
+                                                                               'paths': ['path:src/panels/Latency.tsx'], 'token': 'tok-9'})}]), env)
+    tok_file = os.path.join(home, 'state', 'tokens-' + hashlib.sha1(f'{SID}\0{SID}'.encode()).hexdigest() + '.json')
+
+    def tokens():
+        try:
+            return json.load(open(tok_file))
+        except (OSError, ValueError):
+            return {}
+    had = tokens().get('path:src/panels/Latency.tsx')
+    p, _ = hook('post-tool', dict(done_in, tool_response=[{'type': 'text', 'text': json.dumps(
+        {'done': True, 'resource': 'task 07 latency', 'key': 'name:task 07 latency', 'paths': ['path:src/panels/Latency.tsx']})}]), env)
+    gone = tokens().get('path:src/panels/Latency.tsx')
+    check('post-tool done: no output, the task\'s tokens dropped', not p.stdout.strip() and had and not gone, f'{had} {gone}')
+    hk = load('../../plugin/hooks/hooks.json')['hooks']['PostToolUse']
+    check('hooks.json: a second PostToolUse group for Bash and the done tool', len(hk) == 2
+          and hk[1].get('matcher') == 'Bash|mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'
+          and hk[1]['hooks'][0]['command'].endswith('hook.py" post-tool'))
+    skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+    check('relay skill: done with evidence, evidence_required', 'call `done`' in skill and '`evidence`' in skill
+          and '`reason: evidence_required`' in skill)
+    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
+    check('relay-tools: done, its evidence and refusal, stalled tasks', '#### done (finish a task)' in tools and '| `evidence` |' in tools
+          and '"reason": "evidence_required"' in tools and '`stalled`' in tools)
+
+
 def main():
     seeker = Seeker()
     test_layout()
@@ -1232,6 +1326,7 @@ def main():
     test_release_wording()
     test_briefs_wording()
     test_wait_wording()
+    test_done_evidence(seeker)
     test_failure_safety(seeker)
     test_config_and_status(seeker)
     test_codex_rows(seeker)

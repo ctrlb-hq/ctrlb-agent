@@ -2,7 +2,9 @@
 the edit check of decision 7. Both harnesses take the same output shapes: hookSpecificOutput with additionalContext
 (SessionStart, SubagentStart, PreToolUse) and, on PreToolUse, permissionDecision "deny" with a non-empty
 permissionDecisionReason."""
+import datetime
 import json
+import re
 import time
 import common
 from paths import PATH, edit_paths as normalise_edit_paths, key as resource_key
@@ -30,7 +32,8 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
          "reason is belongs_to_task, the file comes with a registered task: claim that task (task in the answer) "
          "instead. If the claim answers ask_about, ask the task's owner about those before deciding them yourself. "
          "Work only while you hold it. When the task is done, release "
-         "it with finished=true. A file that belongs to no task is claimed by its path. A shared thing that is not a "
+         "it with finished=true. When the task's test passes, call done on the task name with the command you ran and "
+         "its result. A task is finished only when the record shows what was checked. A file that belongs to no task is claimed by its path. A shared thing that is not a "
          "file, such as the dev server or a port, is claimed as slot:<name> and released when you are done with it. Use "
          "the coordination tools before a prose note: handoff when you must leave a task you hold, so it moves to the "
          "agent you name in one step; ask when you are blocked on something only another agent or the orchestrator "
@@ -125,7 +128,7 @@ def _deny(reason):
 def _tool_answer(resp):
     """The JSON answer of an MCP tool from a PostToolUse tool_response: a dict, a list of content blocks, a dict with
     content, or text."""
-    if isinstance(resp, dict) and ('held' in resp or 'handed' in resp or 'released' in resp):
+    if isinstance(resp, dict) and ('held' in resp or 'handed' in resp or 'released' in resp or 'done' in resp):
         return resp
     if isinstance(resp, dict):
         resp = resp.get('content', resp.get('text', ''))
@@ -153,7 +156,136 @@ def record_tokens(run, agent, tool, answer):
     if name == 'claim' and answer.get('held') is True and answer.get('token'):
         state.put(keys, answer['token'])
         return keys
-    if name == 'handoff' and answer.get('handed') is True or name == 'release' and answer.get('released'):
+    if (name == 'handoff' and answer.get('handed') is True or name == 'release' and answer.get('released')
+            or name == 'done' and answer.get('done') is True):
         state.drop(keys)
         return keys
     return []
+
+
+# ---------------------------------------------------------------- done and its evidence (Seeker decision 30)
+
+# A test-looking command: pytest, python -m pytest / unittest, go test, npm (run) test, cargo test, make test.
+TEST_COMMAND = re.compile(r'(?:^|[\s;&|(`])(?:pytest|py\.test|python[0-9.]*\s+-m\s+(?:pytest|unittest)|go\s+test|npm\s+(?:run\s+)?test'
+                          r'|cargo\s+test|make\s+(?:\S+\s+)*test)(?:$|[\s;&|)`])')
+EXIT_CODE = re.compile(r'^\s*(?:Error:\s*)?Exit code (-?\d+)')
+SUMMARY_MAX = 300
+COMMAND_MAX = 500
+
+
+# Installing a test tool is not running a test.
+INSTALL_COMMAND = re.compile(r'\b(?:pip[0-9.]*|uv|poetry|pipx|apt(?:-get)?|brew|npm|yarn|pnpm|cargo|go)\s+(?:install|add|i|get)\b')
+
+
+def is_test_command(cmd):
+    return isinstance(cmd, str) and bool(TEST_COMMAND.search(cmd)) and not INSTALL_COMMAND.search(cmd)
+
+
+def _last_line(text):
+    for ln in reversed((text or '').splitlines()):
+        if ln.strip():
+            return ln.strip()[:SUMMARY_MAX]
+    return ''
+
+
+def bash_result(resp):
+    """(exit code, last output line) of a Bash tool_response: an object with stdout and stderr (the command exited
+    0; an explicit exit code field wins), or the error text of a failed call, whose first line is "Exit code N"."""
+    if isinstance(resp, list):
+        resp = ''.join(b.get('text', '') if isinstance(b, dict) else str(b) for b in resp)
+    if isinstance(resp, dict):
+        code = 0
+        for k in ('exit_code', 'exitCode', 'returnCode', 'code'):
+            if isinstance(resp.get(k), int) and not isinstance(resp.get(k), bool):
+                code = resp[k]
+                break
+        return code, _last_line(resp.get('stdout') or '') or _last_line(resp.get('stderr') or '')
+    if isinstance(resp, str):
+        m = EXIT_CODE.match(resp)
+        rest = resp[m.end():] if m else resp
+        return (int(m.group(1)) if m else None), _last_line(rest)
+    return None, ''
+
+
+def record_test(run, agent, command, code, line):
+    """Remember the agent's last test command, its exit code and last output line (per run and agent)."""
+    if not run or not agent or not is_test_command(command):
+        return None
+    rec = dict(command=command.strip()[:COMMAND_MAX], exit_code=code, summary=line, ts=time.time())
+    common.LastTest(run, agent).put(rec)
+    return rec
+
+
+def last_test_in_transcript(path):
+    """The newest test-looking Bash call of a transcript and its result: {command, exit_code, summary, ts}, or None.
+    A failed call's result is an error whose first line is "Exit code N"."""
+    if not path:
+        return None
+    calls, best = {}, None
+    try:
+        fh = open(path, errors='replace')
+    except OSError:
+        return None
+    with fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            msg = rec.get('message') if isinstance(rec, dict) else None
+            if not isinstance(msg, dict) or not isinstance(msg.get('content'), list):
+                continue
+            for b in msg['content']:
+                if not isinstance(b, dict):
+                    continue
+                if b.get('type') == 'tool_use' and b.get('name') == 'Bash':
+                    cmd = (b.get('input') or {}).get('command') or ''
+                    if is_test_command(cmd):
+                        calls[b.get('id')] = cmd
+                elif b.get('type') == 'tool_result' and b.get('tool_use_id') in calls:
+                    c = b.get('content')
+                    text = c if isinstance(c, str) else ''.join(x.get('text', '') for x in c or [] if isinstance(x, dict))
+                    m = EXIT_CODE.match(text)
+                    code = int(m.group(1)) if m else (None if b.get('is_error') else 0)
+                    best = dict(command=calls[b['tool_use_id']].strip()[:COMMAND_MAX], exit_code=code,
+                                summary=_last_line(text[m.end():] if m else text), ts=_epoch(rec.get('timestamp')))
+    return best
+
+
+def _epoch(ts):
+    try:
+        return datetime.datetime.fromisoformat(str(ts).replace('Z', '+00:00')).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def evidence_hint(run, agent, answer, transcript='', keys=()):
+    """When done (or a finished release) was refused for evidence, the PostToolUse output that shows the agent the
+    last test command it ran, so it can call done again with it. Never fills evidence in. None otherwise."""
+    if not isinstance(answer, dict) or answer.get('reason') != 'evidence_required':
+        return None
+    found = None
+    for r, a in [(run, agent)] + list(keys):
+        if r and a:
+            try:
+                found = common.LastTest(r, a).get()
+            except Exception:
+                found = None
+            if found:
+                break
+    # The transcript has failed runs too (a failing Bash call may not reach PostToolUse): the newer of the two wins.
+    seen = last_test_in_transcript(transcript)
+    if seen and (not found or (seen.get('ts') or 0) >= (found.get('ts') or 0)):
+        found = seen
+    resource = answer.get('resource') or answer.get('key') or '<the task name>'
+    head = f'CtrlB Relay (run {run}): {resource} was not marked finished: this run requires evidence.'
+    if not found:
+        return context('PostToolUse', f'{head} Run the task\'s test, then call done(resource="{resource}", run_id="{run}", '
+                                      f'agent="{agent}", evidence={{"command": <the command>, "exit_code": <its exit code>, '
+                                      f'"summary": <one line of its output>}}).')
+    ev = {'command': found['command'], 'exit_code': found.get('exit_code'), 'summary': found.get('summary') or ''}
+    said = f"`{found['command']}` (exit code {found.get('exit_code') if found.get('exit_code') is not None else 'unknown'})"
+    return context('PostToolUse', f'{head} The last test command you ran was {said}. If that is the task\'s check and it '
+                                  f'passed, call done(resource="{resource}", run_id="{run}", agent="{agent}", '
+                                  f'evidence={json.dumps(ev)}); otherwise run the task\'s test first. Report only a check '
+                                  f'you ran.')

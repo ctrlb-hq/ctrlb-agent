@@ -202,6 +202,26 @@ class TokenState:
         return self._locked(lambda d: ({k: d[k] for k in keys if isinstance(d.get(k), str)}, False))
 
 
+class LastTest(TokenState):
+    """The last test-looking Bash command of one agent of one run, its exit code and last output line, from the
+    PostToolUse hook (Seeker decision 30): {command, exit_code, summary, ts}. Quoted back to the agent when done is
+    refused for evidence; never sent as evidence by the hook."""
+
+    def __init__(self, run, agent):
+        super().__init__(run, agent)
+        self.file = self.file.replace(os.sep + 'tokens-', os.sep + 'lasttest-')
+
+    def put(self, rec):
+        def fn(d):
+            d.clear()
+            d.update(rec)
+            return None, True
+        return self._locked(fn)
+
+    def get(self):
+        return self._locked(lambda d: (dict(d) if d.get('command') else None, False))
+
+
 class FileState:
     """Upload progress for one transcript file: byte offset, line count, last timestamp, tool names by id, message
     ids already counted for tokens, and the last cumulative cost seen. Used as a context manager it holds the

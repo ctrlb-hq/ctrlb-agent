@@ -62,6 +62,7 @@ Both are computed when the page reads the run. There are no alerts on them.
 |---|---|
 | Duplicate edit | Two or more agents have an edit on the same key. Edits are session rows of `Edit`, `Write`, `MultiEdit`, `NotebookEdit` or `apply_patch`, keyed from their `paths` the way claims are keyed. |
 | Silent agent | The run is live and an agent has written nothing for `silentAfterSeconds` (120 by default, a workspace setting). |
+| Stalled task | A registered task is held (or its holder's lease ran out) and not finished, and its holder has written no relay row on the task or its files and edited none of its files for `stallAfterSeconds` (300 by default). Computed for finished runs too. The API answers it as `detectors.stalled` and `stalled_tasks`; the page's Stalled badge is not built yet. |
 
 Edits made from a shell (`sed -i`, a redirect, `git checkout`) have no `paths`, so the duplicate-edit detector does not see them.
 
@@ -97,3 +98,5 @@ The workspace's Relay settings, read with `GET /ai/relay/settings` and changed w
 | `leaseSeconds` | 600 | How long a claim lasts unless released (60 to 86,400) |
 | `enforce` | `advisory` | `off`, `advisory` or `enforce`: what the edit hook does when another agent holds the file. See [Limits](limits.md). |
 | `silentAfterSeconds` | 120 | When an agent of a live run counts as silent |
+| `stallAfterSeconds` | 300 | When a held, unfinished task with no progress from its holder counts as stalled |
+| `evidenceRequired` | `false` | `done` on a task (and a finished release) is refused unless it names the command that was run |
