@@ -22,15 +22,17 @@ SUBAGENT = ("You are a subagent of session {sid}. That session's full record, in
 
 RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other agents in this run may be working in "
          "the same files. Pass run_id=\"{run}\" and agent=\"{agent}\" to the ctrlb relay tools (peers, post, claim, "
-         "release, handoff, ask, answer, brief, briefs, tasks). Claim the task by the name your orchestrator registered (for example "
+         "release, handoff, ask, answer, brief, briefs, tasks, contract, contracts). Claim the task by the name your orchestrator registered (for example "
          "claim(resource=\"task 03 median\"); tasks lists them). Its files come with it. If held is false with "
          "finished_by, the task is done; if held is false with held_by, another agent has it: pick another. If reason "
          "is unknown_task, claim again with the suggestion. Work only while you hold it. When the task is done, release "
          "it with finished=true. A file that belongs to no task is claimed by its path. A shared thing that is not a "
          "file, such as the dev server or a port, is claimed as slot:<name> and released when you are done with it. When you "
          "are blocked on something only another agent or the orchestrator can decide, call ask. Do not post a "
-         "QUESTION note. When you can answer an open question, call answer with its id. If you were asked to do a "
-         "finished task again, claim its name with reopen=true.")
+         "QUESTION note. When you can answer an open question, call answer with its id. When you finish an "
+         "interface others will build on (a type, a route, a config shape), call contract with its name, the shape in "
+         "a few lines, and the files that define it. Before building on one, call contracts. If you were asked to do "
+         "a finished task again, claim its name with reopen=true.")
 
 
 def context(event, text):
