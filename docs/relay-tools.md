@@ -1,12 +1,12 @@
 ---
 title: Relay tools
-description: The twelve tools CtrlB's MCP server gives an agent, their arguments and answers, and the three agent rules to paste into a prompt.
+description: The thirteen tools CtrlB's MCP server gives an agent, their arguments and answers, and the three agent rules to paste into a prompt.
 slug: relay-tools
 ---
 
 # Relay tools
 
-CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent twelve tools. Four search the session store. Eight are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
+CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent thirteen tools. Four search the session store. Nine are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
 
 To add the server by hand in Claude Code:
 
@@ -17,7 +17,7 @@ claude mcp add --transport http ctrlb "<your CtrlB URL>/mcp" --header "Authoriza
 - Every call acts as the key's user, with that user's roles and dataset grants.
 - Answers are compact JSON. Times are microseconds since the epoch.
 - Every tool takes an optional `dataset`: the sessions dataset, the workspace's `sessionsDataset` setting (`agent_sessions` unless changed) when left out.
-- `post`, `claim`, `release`, `brief` and `task` write. CtrlB registers them only when the server runs with write tools enabled (`MCP_WRITE_TOOLS_ENABLED`). If an agent has `peers` but no `claim`, ask your CtrlB administrator.
+- `post`, `claim`, `release`, `handoff`, `brief` and `task` write. CtrlB registers them only when the server runs with write tools enabled (`MCP_WRITE_TOOLS_ENABLED`). If an agent has `peers` but no `claim`, ask your CtrlB administrator.
 
 ## Run id and agent id
 
@@ -34,7 +34,7 @@ The plugin's `.mcp.json` and the Codex installer send both headers from the envi
 CtrlB Relay: your run id is <run> and your agent id is <agent>. ...
 ```
 
-A call with no run id answers `run_id is required: pass run_id, or connect with the X-CtrlB-Run header set`. `post`, `claim`, `release`, `brief` and `task` need an agent too.
+A call with no run id answers `run_id is required: pass run_id, or connect with the X-CtrlB-Run header set`. `post`, `claim`, `release`, `handoff`, `brief` and `task` need an agent too.
 
 ## Session store tools
 
@@ -184,6 +184,24 @@ Give a claim back, or mark a task done. Finish tasks, just release files.
 Answer: `{released, finished, resource, key, message?, paths?}`. `paths` lists the files of a task (or of a claim made with `paths`) handed back with it. `released` counts your live holds on the key. It is 0 when you held none, for example after the lease ran out; then nothing is written and the key is not done. Claim it again, then release it. On a file path `finished` is always `false`, and when you asked for `finished=true` the `message` says the file was handed back instead.
 
 If you claimed an absolute path with `cwd`, release it with the same `cwd`, or release the `key` the claim answered, for example `path:src/app.py`.
+
+### handoff
+
+Hand a claim you hold to another agent of the run in one step. From then on it holds it, and you do not; no third agent can take it in between, as it could if you released it and the other agent claimed it.
+
+| Argument | |
+|---|---|
+| `resource` | Required. The resource as you claimed it. A task you hold with its files is handed with its files. |
+| `to` | Required. The agent id to hand it to. |
+| `cwd` | The working directory the claim was made with, if any. |
+| `run_id`, `agent` | Required, or from the headers. |
+
+Answer when handed: `{handed: true, resource, key, to, lease_until, token, paths?}`. `lease_until` is the receiver's; the receiver can renew by claiming the resource again.
+
+Answer when you are not the holder: `{handed: false, resource, key, to, held_by?, message}`. Nothing is written.
+
+- Handing to yourself renews your claim.
+- Hand off to an agent of your own user (an agent id under the same key).
 
 ### brief
 

@@ -560,10 +560,13 @@ def test_briefs_wording():
     tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
     sections = re.findall(r'^### (\w+)$', tools, re.M)
     relay = sections[sections.index('peers'):] if 'peers' in sections else []
-    check('relay-tools: eight relay tools, brief, briefs, task and tasks documented after release',
-          relay == ['peers', 'post', 'claim', 'release', 'brief', 'briefs', 'task', 'tasks'], ','.join(relay))
-    check('relay-tools: twelve tools, brief and task write, briefs answers the newest brief per key',
-          'gives an agent twelve tools' in tools and '`post`, `claim`, `release`, `brief` and `task` write' in tools
+    check('relay-tools: nine relay tools, handoff after release, then brief, briefs, task and tasks',
+          relay == ['peers', 'post', 'claim', 'release', 'handoff', 'brief', 'briefs', 'task', 'tasks'], ','.join(relay))
+    check('relay-tools: handoff documents to, handed and held_by',
+          '| `to` |' in tools and '{handed: true, resource, key, to, lease_until, token, paths?}' in tools
+          and '{handed: false, resource, key, to, held_by?, message}' in tools)
+    check('relay-tools: thirteen tools, handoff, brief and task write, briefs answers the newest brief per key',
+          'gives an agent thirteen tools' in tools and '`post`, `claim`, `release`, `handoff`, `brief` and `task` write' in tools
           and '{briefs: [{key, resource, agent, text, ts, age_s, paths?}]}' in tools and '`BRIEF` for a brief' in tools)
     check('relay-tools: the briefs paragraph for the rules', 'call briefs for it and read the brief first' in tools)
     check('relay-tools: rule 3 claims the registered task with its files, and finishes it', registered_rule(tools))
