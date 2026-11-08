@@ -217,9 +217,11 @@ def test_layout():
           and ent[0]['source'] == './plugin')
     hk = load('../../plugin/hooks/hooks.json')['hooks']
     events = {'SessionStart': 'session-start', 'SubagentStart': 'subagent-start', 'PreCompact': 'flush', 'SessionEnd': 'flush',
-              'Stop': 'upload', 'SubagentStop': 'upload', 'PreToolUse': 'pre-tool'}
+              'Stop': 'upload', 'SubagentStop': 'upload', 'PreToolUse': 'pre-tool', 'PostToolUse': 'post-tool'}
     ok = set(hk) == set(events) and all(hk[e][0]['hooks'][0]['command'].endswith('hook.py" ' + m) for e, m in events.items())
-    check('hooks.json: the six hooks plus PreToolUse, each with its mode', ok, ','.join(sorted(hk)))
+    check('hooks.json: the six hooks plus PreToolUse and PostToolUse, each with its mode', ok, ','.join(sorted(hk)))
+    check('hooks.json: PostToolUse matcher is the ctrlb claim, handoff and release tools',
+          hk['PostToolUse'][0].get('matcher') == 'mcp__ctrlb__claim|mcp__ctrlb__handoff|mcp__ctrlb__release')
     check('hooks.json: PreToolUse matcher Edit|Write|MultiEdit|NotebookEdit',
           hk['PreToolUse'][0].get('matcher') == 'Edit|Write|MultiEdit|NotebookEdit')
     check('hooks.json: every command runs python3 -I', all(h['command'].startswith('python3 -I ') for e in hk.values() for g in e for h in g['hooks']))
@@ -489,6 +491,29 @@ def test_pre_tool(seeker):
         p, _ = run('enforce', name)
         check(f'pre-tool {name[9:]}: path checked and denied', seeker.calls and seeker.calls[0]['body']['paths'] == [want]
               and out_of(p).get('permissionDecision') == 'deny')
+    # Fencing (decision 21): lapsed, unheld and stale_round name the reason and the claim call.
+    for state, said in (('enforce_lapsed', 'your lease on src/panels/Latency.tsx ran out at'),
+                        ('enforce_unheld', 'src/panels/Latency.tsx is not held; claim it before editing (unheld)'),
+                        ('enforce_stale_round', 'you held task 07 latency in round 1; round 2 belongs to agent-b (stale_round)')):
+        p, _ = run(state)
+        reason = out_of(p).get('permissionDecisionReason', '')
+        check(f'pre-tool {state[8:]}: deny naming the reason and the claim call', out_of(p).get('permissionDecision') == 'deny'
+              and said in reason and f'Call claim(resource="src/panels/Latency.tsx", run_id="{SID}", agent="{SID}")' in reason, reason[:200])
+    p, _ = run('advisory_unheld')
+    o = out_of(p)
+    check('pre-tool advisory unheld: context, not a deny', 'permissionDecision' not in o and '(unheld)' in o.get('additionalContext', ''))
+    # Tokens: a claim's answer seen after the tool is kept, sent with the check, dropped by the release.
+    seeker.reset()
+    p, _ = hook('post-tool', I['post_tool_claim'], env)
+    check('post-tool claim: no output, no Seeker call', p.returncode == 0 and not p.stdout.strip() and not seeker.calls)
+    run('allow')
+    body = seeker.calls[0]['body'] if seeker.calls else {}
+    check('pre-tool sends the token of the held task for its file', body.get('tokens') == {'src/panels/Latency.tsx': 'tok-round-1'},
+          json.dumps(body))
+    hook('post-tool', I['post_tool_release'], env)
+    run('allow')
+    body = seeker.calls[0]['body'] if seeker.calls else {}
+    check('post-tool release drops the tokens', 'tokens' not in body, json.dumps(body))
     p, _ = run('enforce', 'pre_tool_subagent_edit', dict(env, CTRLB_RUN='relay-run-7'))
     c = seeker.calls[0] if seeker.calls else {}
     check('pre-tool in a subagent: CTRLB_RUN in the route, agent-<id> as agent', c.get('path') == '/ai/relay/agent_sessions/runs/relay-run-7/check'
@@ -568,6 +593,9 @@ def test_briefs_wording():
     relay = sections[sections.index('peers'):] if 'peers' in sections else []
     check('relay-tools: nine relay tools, handoff after release, then brief, briefs, task and tasks',
           relay == ['peers', 'post', 'claim', 'release', 'handoff', 'brief', 'briefs', 'task', 'tasks'], ','.join(relay))
+    check('relay-tools: hold required, its four reasons and the claim token',
+          '## Edits need a claim (hold required)' in tools and all(f'| `{r}` |' in tools for r in ('held', 'lapsed', 'unheld', 'stale_round'))
+          and 'A held claim answers `token`' in tools)
     check('relay-tools: handoff documents to, handed and held_by',
           '| `to` |' in tools and '{handed: true, resource, key, to, lease_until, token, paths?}' in tools
           and '{handed: false, resource, key, to, held_by?, message}' in tools)
@@ -945,6 +973,10 @@ def test_codex_hooks(seeker):
           o.get('permissionDecision') == 'deny' and 'agent-b' in reason and p.returncode == 0
           and f'claim(resource="src/panels/Latency.tsx", run_id="{CSID}", agent="{CSID}")' in reason, reason[:160])
     check('codex pre-tool never answers ask', '"ask"' not in p.stdout)
+    p, _ = run('enforce_lapsed')
+    reason = out_of(p).get('permissionDecisionReason', '')
+    check('codex pre-tool lapsed: deny naming the reason and the claim call', out_of(p).get('permissionDecision') == 'deny'
+          and '(lapsed)' in reason and f'Call claim(resource="src/panels/Latency.tsx", run_id="{CSID}", agent="{CSID}")' in reason, reason[:160])
     p, _ = run('enforce_allow')
     check('codex pre-tool enforce with no conflict: no output', not p.stdout.strip())
     p, _ = run('self', e=dict(env, CTRLB_AGENT=SID))      # the 'self' answer names SID as the holder

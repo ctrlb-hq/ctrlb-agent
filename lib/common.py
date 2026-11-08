@@ -132,11 +132,14 @@ def ingest_records(cfg, rows, timeout=20):
     return request(cfg, 'POST', f"/ai/sessions/{_seg(cfg['dataset'])}/records", rows, timeout=timeout)
 
 
-def check(cfg, run, agent, paths, cwd='', timeout=2):
-    """POST /ai/relay/{dataset}/runs/{run}/check: {mode, allowed, conflicts: [{path, key, held_by, lease_until}]}."""
+def check(cfg, run, agent, paths, cwd='', timeout=2, tokens=None):
+    """POST /ai/relay/{dataset}/runs/{run}/check: {mode, allowed, conflicts: [{path, key, held_by, lease_until, reason,
+    lapsed_at?, message?}], renewed?}. tokens maps a path (as sent) to the token its claim answered."""
     body = dict(agent=agent, paths=list(paths))
     if cwd:
         body['cwd'] = cwd
+    if tokens:
+        body['tokens'] = dict(tokens)
     return request(cfg, 'POST', f"/ai/relay/{_seg(cfg['dataset'])}/runs/{_seg(run)}/check", body, timeout=timeout)
 
 
@@ -148,6 +151,55 @@ def runs(cfg, status='all', limit=5, timeout=15):
 
 def host():
     return socket.gethostname()
+
+
+class TokenState:
+    """The hold tokens of one agent of one run: {key: token}, from the claim and handoff answers the PostToolUse hook
+    sees, sent with the pre-tool check. A JSON file under the plugin's state directory, held exclusively (fcntl) while
+    it is read and written. Tokens are hold nonces, not secrets."""
+
+    def __init__(self, run, agent):
+        d = os.path.join(HOME, 'state')
+        os.makedirs(d, exist_ok=True)
+        name = hashlib.sha1(f'{run}\0{agent}'.encode()).hexdigest()
+        self.file = os.path.join(d, f'tokens-{name}.json')
+
+    def _locked(self, fn):
+        with open(self.file + '.mutex', 'w') as mx:
+            fcntl.flock(mx, fcntl.LOCK_EX)
+            try:
+                try:
+                    with open(self.file) as fh:
+                        data = json.load(fh)
+                except Exception:
+                    data = {}
+                if not isinstance(data, dict):
+                    data = {}
+                out, changed = fn(data)
+                if changed:
+                    tmp = self.file + '.tmp'
+                    with open(tmp, 'w') as fh:
+                        json.dump(data, fh)
+                    os.replace(tmp, self.file)
+                return out
+            finally:
+                fcntl.flock(mx, fcntl.LOCK_UN)
+
+    def put(self, keys, token):
+        def fn(d):
+            for k in keys:
+                d[k] = token
+            if len(d) > 2000:
+                for k in list(d)[:-1000]:
+                    del d[k]
+            return None, True
+        return self._locked(fn)
+
+    def drop(self, keys):
+        return self._locked(lambda d: (None, bool([d.pop(k) for k in keys if k in d])))
+
+    def get(self, keys):
+        return self._locked(lambda d: ({k: d[k] for k in keys if isinstance(d.get(k), str)}, False))
 
 
 class FileState:

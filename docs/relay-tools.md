@@ -168,6 +168,7 @@ Answer to `claim(resource="slugify", reopen=true)` on that finished task:
 - `key` is what the claim is held under. A resource with a `/` or a file extension is a path: `./` is dropped, `//`, `/./` and `..` are resolved, and the `cwd` prefix is removed. Anything else is a name, lower-cased with its whitespace collapsed. A file with no extension, such as `Makefile`, is a name unless you write `path:Makefile`.
 - Only a task name can be finished. A file path is never finished, so `finished_by` never appears on a `path:` key.
 - `reopen=true` on a finished task writes a `REOPEN` row that starts a new round of work. If two agents reopen at once, one holds it and the other is refused with `held_by`. The earlier rounds stay in the record.
+- A held claim answers `token`, the nonce of your hold. The Claude Code plugin keeps it and sends it with the edit check, so CtrlB can tell you when a task you held was reopened by another agent (`stale_round`).
 - The claim lasts until `lease_until` (10 minutes by default) unless it is released. Claiming a key you already hold renews it: `held: true, renewed: true`, with the `lease_until` of the new hold.
 
 ### release
@@ -255,6 +256,19 @@ The run's registered tasks and their state now.
 | `run_id` | Optional, from the header. |
 
 Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round}]}`. `state` is `open`, `held` or `finished` in the task's current round.
+
+## Edits need a claim (hold required)
+
+When the workspace turns on `holdRequired` with `enforce`, the plugin's edit check refuses an edit of a file you do not hold, and names the reason and the claim call to make:
+
+| Reason | When | Do |
+|---|---|---|
+| `held` | Another agent holds the file. | Leave it to its holder and pick other work. |
+| `lapsed` | You held the file, your lease ran out, and nobody holds it now. | Claim it again, then edit. |
+| `unheld` | Nobody holds the file and you never claimed it (or you released it). | Claim it before editing. |
+| `stale_round` | You held the file's task in an earlier round, and another agent reopened it. | Leave it to the round's holder. |
+
+An edit of a file you hold past half its lease renews the claim, so a long edit session does not run out. In `advisory` mode the same reasons come back as a note and the edit goes ahead.
 
 ## Slots
 
