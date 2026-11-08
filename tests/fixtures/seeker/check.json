@@ -1,18 +1,18 @@
 {
-  "synthetic": "Built by hand from relay-plan section 4 (Relay, check), not recorded from a running Seeker. Replace with a recording once Seeker Task 4 serves the route.",
+  "synthetic": "Built by hand from relay-plan section 4 (Relay, check), not recorded from a running Seeker. Replace with a recording once Seeker Task 4 serves the route. The lapsed, unheld and stale_round answers follow Seeker decision 21 (feat/relay-coordination); their shapes match Seeker's CheckConflict.",
   "route": "POST /ai/relay/{dataset}/runs/{run}/check",
   "request": {"agent": "5f0c7a52-0000-4000-8000-000000000001", "paths": ["src/panels/Latency.tsx"], "cwd": "/work/dash"},
   "responses": {
     "allow": {"status": 200, "body": {"mode": "advisory", "allowed": true, "conflicts": []}},
-    "advisory": {"status": 200, "body": {"mode": "advisory", "allowed": true, "conflicts": [
-      {"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "agent-b", "lease_until": 1793000000000000}]}},
-    "enforce": {"status": 200, "body": {"mode": "enforce", "allowed": false, "conflicts": [
-      {"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "agent-b", "lease_until": 1793000000000000}]}},
+    "advisory": {"status": 200, "body": {"mode": "advisory", "allowed": true, "conflicts": [{"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "agent-b", "lease_until": 1793000000000000, "reason": "held"}]}},
+    "enforce": {"status": 200, "body": {"mode": "enforce", "allowed": false, "conflicts": [{"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "agent-b", "lease_until": 1793000000000000, "reason": "held"}]}},
     "enforce_allow": {"status": 200, "body": {"mode": "enforce", "allowed": true, "conflicts": []}},
-    "off": {"status": 200, "body": {"mode": "off", "allowed": true, "conflicts": [
-      {"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "agent-b", "lease_until": 1793000000000000}]}},
-    "self": {"status": 200, "body": {"mode": "enforce", "allowed": false, "conflicts": [
-      {"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "5f0c7a52-0000-4000-8000-000000000001", "lease_until": 1793000000000000}]}},
-    "error": {"status": 500, "body": {"error": "lake unavailable"}}
+    "off": {"status": 200, "body": {"mode": "off", "allowed": true, "conflicts": [{"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "agent-b", "lease_until": 1793000000000000, "reason": "held"}]}},
+    "self": {"status": 200, "body": {"mode": "enforce", "allowed": false, "conflicts": [{"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "5f0c7a52-0000-4000-8000-000000000001", "lease_until": 1793000000000000, "reason": "held"}]}},
+    "error": {"status": 500, "body": {"error": "lake unavailable"}},
+    "enforce_lapsed": {"status": 200, "body": {"mode": "enforce", "allowed": false, "conflicts": [{"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "", "lease_until": 0, "reason": "lapsed", "lapsed_at": 1793000000000000, "message": "your lease on src/panels/Latency.tsx ran out at 2026-10-25T10:13:20Z; claim it again"}]}},
+    "enforce_unheld": {"status": 200, "body": {"mode": "enforce", "allowed": false, "conflicts": [{"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "", "lease_until": 0, "reason": "unheld", "message": "src/panels/Latency.tsx is not held; claim it before editing"}]}},
+    "enforce_stale_round": {"status": 200, "body": {"mode": "enforce", "allowed": false, "conflicts": [{"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "agent-b", "lease_until": 1793000000000000, "reason": "stale_round", "message": "you held task 07 latency in round 1; round 2 belongs to agent-b"}]}},
+    "advisory_unheld": {"status": 200, "body": {"mode": "advisory", "allowed": true, "conflicts": [{"path": "src/panels/Latency.tsx", "key": "path:src/panels/Latency.tsx", "held_by": "", "lease_until": 0, "reason": "unheld", "message": "src/panels/Latency.tsx is not held; claim it before editing"}]}}
   }
 }

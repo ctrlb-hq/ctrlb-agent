@@ -9,7 +9,7 @@ for _lib in (os.path.join(_HERE, '..', 'lib'), os.path.join(_HERE, '..', '..', '
         sys.path.insert(0, _lib)
         break
 import common, rows_claude  # noqa: E402
-from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, context as _context, decide  # noqa: E402
+from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, context as _context, decide, record_tokens, _tool_answer  # noqa: E402
 
 SYNC_S, ASYNC_S = 5, 90
 
@@ -43,6 +43,19 @@ def pre_tool(cfg, inp):
                   inp.get('cwd') or '')
 
 
+def post_tool(cfg, inp):
+    """Decision 21: after a ctrlb claim, handoff or release, keep the agent's hold tokens for the pre-tool check.
+    Writes nothing to the transcript and prints nothing."""
+    tool = inp.get('tool_name') or ''
+    if not tool.startswith('mcp__') or tool.rsplit('__', 1)[-1] not in ('claim', 'handoff', 'release'):
+        return []
+    sid = inp.get('session_id') or ''
+    args = inp.get('tool_input') if isinstance(inp.get('tool_input'), dict) else {}
+    run = args.get('run_id') or common.run_id(cfg, sid)
+    agent = args.get('agent') or common.agent_name(cfg, sid, inp.get('agent_id') or '')
+    return record_tokens(run, agent, tool, _tool_answer(inp.get('tool_response')))
+
+
 def _alarm(*_):
     raise TimeoutError(f'pre-tool over {CHECK_S}s')
 
@@ -74,6 +87,11 @@ def main():
         upload(cfg, inp, SYNC_S)
     elif mode == 'upload':
         upload(cfg, inp, ASYNC_S)
+    elif mode == 'post-tool':
+        try:
+            post_tool(cfg, inp)
+        except Exception as e:
+            common.log(f"post-tool: {type(e).__name__}: {str(e)[:200]}")
     elif mode == 'pre-tool':
         try:
             out = pre_tool(cfg, inp)

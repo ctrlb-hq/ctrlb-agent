@@ -1,16 +1,187 @@
 {
-  "_note": "Claude Code hook inputs (stdin JSON), in the shapes Claude Code 2.1.318 sends. The tests replace {transcript} and {subagent_transcript} with the copied fixture paths.",
-  "session_start": {"session_id": "5f0c7a52-0000-4000-8000-000000000001", "transcript_path": "{transcript}", "cwd": "/work/dash", "permission_mode": "default", "hook_event_name": "SessionStart", "source": "startup"},
-  "session_start_compact": {"session_id": "5f0c7a52-0000-4000-8000-000000000001", "transcript_path": "{transcript}", "cwd": "/work/dash", "permission_mode": "default", "hook_event_name": "SessionStart", "source": "compact"},
-  "subagent_start": {"session_id": "5f0c7a52-0000-4000-8000-000000000001", "transcript_path": "{transcript}", "cwd": "/work/dash", "permission_mode": "default", "hook_event_name": "SubagentStart", "agent_id": "def456", "agent_type": "Explore"},
-  "stop": {"session_id": "5f0c7a52-0000-4000-8000-000000000001", "transcript_path": "{transcript}", "cwd": "/work/dash", "permission_mode": "default", "hook_event_name": "Stop", "stop_hook_active": false},
-  "subagent_stop": {"session_id": "5f0c7a52-0000-4000-8000-000000000001", "transcript_path": "{transcript}", "cwd": "/work/dash", "permission_mode": "default", "hook_event_name": "SubagentStop", "agent_id": "abc123", "agent_type": "Explore", "agent_transcript_path": "{subagent_transcript}", "stop_hook_active": false},
-  "pre_compact": {"session_id": "5f0c7a52-0000-4000-8000-000000000001", "transcript_path": "{transcript}", "cwd": "/work/dash", "permission_mode": "default", "hook_event_name": "PreCompact", "trigger": "manual", "custom_instructions": null},
-  "session_end": {"session_id": "5f0c7a52-0000-4000-8000-000000000001", "transcript_path": "{transcript}", "cwd": "/work/dash", "permission_mode": "default", "hook_event_name": "SessionEnd", "reason": "other"},
-  "pre_tool_edit": {"session_id": "5f0c7a52-0000-4000-8000-000000000001", "transcript_path": "{transcript}", "cwd": "/work/dash", "permission_mode": "default", "hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_use_id": "t3", "tool_input": {"file_path": "/work/dash/src/panels/Latency.tsx", "old_string": "export {}", "new_string": "export function Latency() {}"}},
-  "pre_tool_write": {"session_id": "5f0c7a52-0000-4000-8000-000000000001", "transcript_path": "{transcript}", "cwd": "/work/dash", "permission_mode": "default", "hook_event_name": "PreToolUse", "tool_name": "Write", "tool_use_id": "t4", "tool_input": {"file_path": "/work/dash/src/panels/index.ts", "content": "export * from './Latency';\n"}},
-  "pre_tool_multiedit": {"session_id": "5f0c7a52-0000-4000-8000-000000000001", "transcript_path": "{transcript}", "cwd": "/work/dash", "permission_mode": "default", "hook_event_name": "PreToolUse", "tool_name": "MultiEdit", "tool_use_id": "t5", "tool_input": {"file_path": "/work/dash/src/panels/Latency.test.tsx", "edits": [{"old_string": "todo", "new_string": "done"}]}},
-  "pre_tool_notebook": {"session_id": "5f0c7a52-0000-4000-8000-000000000001", "transcript_path": "{transcript}", "cwd": "/work/dash", "permission_mode": "default", "hook_event_name": "PreToolUse", "tool_name": "NotebookEdit", "tool_use_id": "t6", "tool_input": {"notebook_path": "/work/dash/notebooks/latency.ipynb", "cell_id": "c1", "new_source": "print(1)"}},
-  "pre_tool_subagent_edit": {"session_id": "5f0c7a52-0000-4000-8000-000000000001", "transcript_path": "{transcript}", "cwd": "/work/dash", "permission_mode": "default", "hook_event_name": "PreToolUse", "agent_id": "abc123", "agent_type": "general-purpose", "tool_name": "Edit", "tool_use_id": "t9", "tool_input": {"file_path": "/work/dash/src/panels/Latency.tsx", "old_string": "a", "new_string": "b"}},
-  "pre_tool_read": {"session_id": "5f0c7a52-0000-4000-8000-000000000001", "transcript_path": "{transcript}", "cwd": "/work/dash", "permission_mode": "default", "hook_event_name": "PreToolUse", "tool_name": "Read", "tool_use_id": "t2", "tool_input": {"file_path": "/work/dash/src/components/ChartCard.tsx"}}
+ "_note": "Claude Code hook inputs (stdin JSON), in the shapes Claude Code 2.1.318 sends. The tests replace {transcript} and {subagent_transcript} with the copied fixture paths. post_tool_claim and post_tool_release: PostToolUse after the ctrlb claim and release tools, tool_response as MCP content blocks (written by hand from the hook docs).",
+ "session_start": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "SessionStart",
+  "source": "startup"
+ },
+ "session_start_compact": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "SessionStart",
+  "source": "compact"
+ },
+ "subagent_start": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "SubagentStart",
+  "agent_id": "def456",
+  "agent_type": "Explore"
+ },
+ "stop": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false
+ },
+ "subagent_stop": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "SubagentStop",
+  "agent_id": "abc123",
+  "agent_type": "Explore",
+  "agent_transcript_path": "{subagent_transcript}",
+  "stop_hook_active": false
+ },
+ "pre_compact": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PreCompact",
+  "trigger": "manual",
+  "custom_instructions": null
+ },
+ "session_end": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "SessionEnd",
+  "reason": "other"
+ },
+ "pre_tool_edit": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Edit",
+  "tool_use_id": "t3",
+  "tool_input": {
+   "file_path": "/work/dash/src/panels/Latency.tsx",
+   "old_string": "export {}",
+   "new_string": "export function Latency() {}"
+  }
+ },
+ "pre_tool_write": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_use_id": "t4",
+  "tool_input": {
+   "file_path": "/work/dash/src/panels/index.ts",
+   "content": "export * from './Latency';\n"
+  }
+ },
+ "pre_tool_multiedit": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "MultiEdit",
+  "tool_use_id": "t5",
+  "tool_input": {
+   "file_path": "/work/dash/src/panels/Latency.test.tsx",
+   "edits": [
+    {
+     "old_string": "todo",
+     "new_string": "done"
+    }
+   ]
+  }
+ },
+ "pre_tool_notebook": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "NotebookEdit",
+  "tool_use_id": "t6",
+  "tool_input": {
+   "notebook_path": "/work/dash/notebooks/latency.ipynb",
+   "cell_id": "c1",
+   "new_source": "print(1)"
+  }
+ },
+ "pre_tool_subagent_edit": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "agent_id": "abc123",
+  "agent_type": "general-purpose",
+  "tool_name": "Edit",
+  "tool_use_id": "t9",
+  "tool_input": {
+   "file_path": "/work/dash/src/panels/Latency.tsx",
+   "old_string": "a",
+   "new_string": "b"
+  }
+ },
+ "pre_tool_read": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Read",
+  "tool_use_id": "t2",
+  "tool_input": {
+   "file_path": "/work/dash/src/components/ChartCard.tsx"
+  }
+ },
+ "post_tool_claim": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__ctrlb__claim",
+  "tool_use_id": "t9",
+  "tool_input": {
+   "resource": "task 07 latency"
+  },
+  "tool_response": [
+   {
+    "type": "text",
+    "text": "{\"held\": true, \"resource\": \"task 07 latency\", \"key\": \"name:task 07 latency\", \"lease_until\": 1793000600000000, \"paths\": [\"path:src/panels/Latency.tsx\"], \"token\": \"tok-round-1\"}"
+   }
+  ]
+ },
+ "post_tool_release": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__ctrlb__release",
+  "tool_use_id": "t10",
+  "tool_input": {
+   "resource": "task 07 latency"
+  },
+  "tool_response": [
+   {
+    "type": "text",
+    "text": "{\"released\": 1, \"finished\": true, \"resource\": \"task 07 latency\", \"key\": \"name:task 07 latency\", \"paths\": [\"path:src/panels/Latency.tsx\"]}"
+   }
+  ]
+ }
 }
