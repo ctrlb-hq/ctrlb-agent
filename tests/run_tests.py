@@ -291,8 +291,11 @@ def test_hooks(seeker):
           'claimed as `slot:<name>` and released when you are done with it' in open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
           and all(n in open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read() for n in
                   ('## Slots', '`slot:devserver`', '`slot:port-3000`', '`slot:db-migrate`', '`slot:screenshots`', '`slot:commit`', 'lasts two minutes')))
-    check('session-start: names the relay tools, brief, briefs and tasks among them',
-          'relay tools (peers, post, claim, release, brief, briefs, tasks)' in ctx)
+    check('session-start: names the relay tools, handoff, ask, answer, brief, briefs and tasks among them',
+          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks)' in ctx)
+    check('session-start: ask when blocked, never a QUESTION note; answer open questions',
+          'When you are blocked on something only another agent or the orchestrator can decide, call ask. Do not post a QUESTION note. '
+          'When you can answer an open question, call answer with its id.' in ctx)
     check('session-start under 1 s', dt < 1.0, f'{dt:.2f}s')
     p, _ = hook('session-start', I['session_start_compact'], dict(env, CTRLB_RUN='relay-run-7', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
@@ -583,24 +586,28 @@ def test_briefs_wording():
     """Briefs (Seeker relay-plan decision 16): the skill and the tool docs tell the agent to read the brief of a
     shared file before reading the file, and to leave one after reading a file it edits or others need."""
     skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
-    check('relay skill: lists brief, briefs and tasks among the tools',
-          '`peers`, `post`, `claim`, `release`, `brief`, `briefs`, `tasks`' in skill)
+    check('relay skill: lists the relay tools, ask and answer among them; ask rather than a QUESTION note',
+          '`peers`, `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `briefs`, `tasks`' in skill
+          and 'call `ask`. Do not post a QUESTION note. When you can answer an open question, call `answer` with its id' in skill)
     check('relay skill: call briefs before reading a shared file, post a brief after reading one',
           'call `briefs` with it' in skill and 'post a `brief` for it' in skill and 'up to a few hundred words' in skill
           and 'what it exports or decides, and what not to touch' in skill and 'not a claim and reserves nothing' in skill)
     tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
     sections = re.findall(r'^### (\w+)$', tools, re.M)
     relay = sections[sections.index('peers'):] if 'peers' in sections else []
-    check('relay-tools: nine relay tools, handoff after release, then brief, briefs, task and tasks',
-          relay == ['peers', 'post', 'claim', 'release', 'handoff', 'brief', 'briefs', 'task', 'tasks'], ','.join(relay))
+    check('relay-tools: eleven relay tools, handoff, ask and answer after release, then brief, briefs, task and tasks',
+          relay == ['peers', 'post', 'claim', 'release', 'handoff', 'ask', 'answer', 'brief', 'briefs', 'task', 'tasks'], ','.join(relay))
+    check('relay-tools: peers kind and open, ask and answer documented',
+          '| `open` |' in tools and 'peers(kind="question", open=true)' in tools and 'answered: {agent, ts, text}' in tools
+          and 'Answer: `{id, run_id, agent}`' in tools and 'Do not post a QUESTION note' in tools)
     check('relay-tools: hold required, its four reasons and the claim token',
           '## Edits need a claim (hold required)' in tools and all(f'| `{r}` |' in tools for r in ('held', 'lapsed', 'unheld', 'stale_round'))
           and 'A held claim answers `token`' in tools)
     check('relay-tools: handoff documents to, handed and held_by',
           '| `to` |' in tools and '{handed: true, resource, key, to, lease_until, token, paths?}' in tools
           and '{handed: false, resource, key, to, held_by?, message}' in tools)
-    check('relay-tools: thirteen tools, handoff, brief and task write, briefs answers the newest brief per key',
-          'gives an agent thirteen tools' in tools and '`post`, `claim`, `release`, `handoff`, `brief` and `task` write' in tools
+    check('relay-tools: fifteen tools, handoff, ask, answer, brief and task write, briefs answers the newest brief per key',
+          'gives an agent fifteen tools' in tools and '`post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief` and `task` write' in tools
           and '{briefs: [{key, resource, agent, text, ts, age_s, paths?}]}' in tools and '`BRIEF` for a brief' in tools)
     check('relay-tools: the briefs paragraph for the rules', 'call briefs for it and read the brief first' in tools)
     check('relay-tools: rule 3 claims the registered task with its files, and finishes it', registered_rule(tools))
@@ -926,8 +933,8 @@ def test_codex_hooks(seeker):
     check('codex session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {CSID}' in ctx and f'run id is {CSID}' in ctx and f'agent id is {CSID}' in ctx and p.returncode == 0, f'{dt:.2f}s')
     check('codex session-start: claims the registered task, its files come with it', registered_rule(ctx))
-    check('codex session-start: names the relay tools, brief, briefs and tasks among them',
-          'relay tools (peers, post, claim, release, brief, briefs, tasks)' in ctx)
+    check('codex session-start: names the relay tools, ask and answer among them',
+          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks)' in ctx and 'call ask' in ctx)
     check('codex session-start: slots', 'slot:<name>' in ctx)
     check('codex session-start: release it finished; reopen a finished task',
           'release it with finished=true' in ctx and 'claim its name with reopen=true' in ctx)
