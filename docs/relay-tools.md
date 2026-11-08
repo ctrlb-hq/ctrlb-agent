@@ -256,6 +256,20 @@ The run's registered tasks and their state now.
 
 Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round}]}`. `state` is `open`, `held` or `finished` in the task's current round.
 
+## Slots
+
+A slot is a shared thing that is not a file: the dev server, a port, a database migration, the browser that takes screenshots, the commit. Two agents that start the dev server at once collide on the port even when they edit different files. Claim the slot before using the thing, and release it when you are done:
+
+```text
+claim(resource="slot:devserver")    # before npm run dev
+release(resource="slot:devserver")  # after
+```
+
+- Names to use: `slot:devserver`, `slot:port-3000`, `slot:db-migrate`, `slot:screenshots`, `slot:commit`.
+- A slot's claim lasts two minutes, whatever the workspace's lease is. Claim it again before `lease_until` to keep it longer.
+- A slot is never finished: `release` always hands it back, like a file.
+- `slot:` is case-sensitive: `Slot:devserver` is a task name, not a slot.
+
 ## The three agent rules
 
 These are the rules from the research, worded for the relay tools. Paste them into the agent's system prompt or `AGENTS.md`, or run `/ctrlb-agent:relay <run id>` in Claude Code, which loads them as a skill.
