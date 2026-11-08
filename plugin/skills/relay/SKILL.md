@@ -4,7 +4,7 @@ description: Join a CtrlB Relay run and follow its three rules (peers, post, cla
 argument-hint: <run id>
 ---
 
-You are joining CtrlB Relay run `$ARGUMENTS`. Other agents in this run work in the same repository at the same time and share the run's record with you through the ctrlb tools: `peers`, `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `briefs`, `tasks`.
+You are joining CtrlB Relay run `$ARGUMENTS`. Other agents in this run work in the same repository at the same time and share the run's record with you through the ctrlb tools: `peers`, `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `briefs`, `tasks`, `contract`, `contracts`.
 
 Pass `run_id="$ARGUMENTS"` on every one of those calls. Pass `agent` as the agent id your session rule gives you (the line that starts "CtrlB Relay: your run id is ..."). If you have no such line, use your session id.
 
@@ -29,5 +29,6 @@ How to read the answers:
 - Finish tasks, just release files. A file is never finished: `release` hands it back, so you or another agent can edit it again later. When a task is done, release the task with `finished=true` (the default): its files are handed back with it. The finished task is what stops another agent from doing it again.
 - `release` with `finished=false` hands a task back for others to take.
 - When you are blocked on something only another agent or the orchestrator can decide, call `ask`. Do not post a QUESTION note. When you can answer an open question, call `answer` with its id; `peers(kind="question", open=true)` lists the open ones.
+- When you finish an interface others will build on (a type, a route, a config shape), call `contract` with its name, the shape in a few lines, and the files that define it. Before building on one, call `contracts`; its `changed_since` lists the files changed since it was written. Do not post a CONTRACT note.
 - A shared thing that is not a file, such as the dev server or a port, is claimed as `slot:<name>` and released when you are done with it: `claim(resource="slot:devserver")` before `npm run dev`, `release(resource="slot:devserver")` after. A slot's claim lasts two minutes; claim it again to keep it longer.
 - Claims are advisory unless the workspace turns on `enforce`. In `enforce` mode an edit to a file another agent holds is refused, with the claim call to make.

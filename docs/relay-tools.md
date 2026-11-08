@@ -1,12 +1,12 @@
 ---
 title: Relay tools
-description: The fifteen tools CtrlB's MCP server gives an agent, their arguments and answers, and the three agent rules to paste into a prompt.
+description: The seventeen tools CtrlB's MCP server gives an agent, their arguments and answers, and the three agent rules to paste into a prompt.
 slug: relay-tools
 ---
 
 # Relay tools
 
-CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent fifteen tools. Four search the session store. Eleven are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
+CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent seventeen tools. Four search the session store. Thirteen are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
 
 To add the server by hand in Claude Code:
 
@@ -17,7 +17,7 @@ claude mcp add --transport http ctrlb "<your CtrlB URL>/mcp" --header "Authoriza
 - Every call acts as the key's user, with that user's roles and dataset grants.
 - Answers are compact JSON. Times are microseconds since the epoch.
 - Every tool takes an optional `dataset`: the sessions dataset, the workspace's `sessionsDataset` setting (`agent_sessions` unless changed) when left out.
-- `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief` and `task` write. CtrlB registers them only when the server runs with write tools enabled (`MCP_WRITE_TOOLS_ENABLED`). If an agent has `peers` but no `claim`, ask your CtrlB administrator.
+- `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `task` and `contract` write. CtrlB registers them only when the server runs with write tools enabled (`MCP_WRITE_TOOLS_ENABLED`). If an agent has `peers` but no `claim`, ask your CtrlB administrator.
 
 ## Run id and agent id
 
@@ -34,7 +34,7 @@ The plugin's `.mcp.json` and the Codex installer send both headers from the envi
 CtrlB Relay: your run id is <run> and your agent id is <agent>. ...
 ```
 
-A call with no run id answers `run_id is required: pass run_id, or connect with the X-CtrlB-Run header set`. `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief` and `task` need an agent too.
+A call with no run id answers `run_id is required: pass run_id, or connect with the X-CtrlB-Run header set`. `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `task` and `contract` need an agent too.
 
 ## Session store tools
 
@@ -257,7 +257,7 @@ The newest brief of each resource in the run, newest first. Call it before readi
 | `cwd` | Your working directory, for absolute paths. |
 | `run_id` | Optional, from the header. |
 
-Answer: `{briefs: [{key, resource, agent, text, ts, age_s, paths?}]}`. A resource with no brief is left out of the answer. You see your own user's briefs unless your role has `relay.read_all`.
+Answer: `{briefs: [{key, resource, agent, text, ts, age_s, paths?, changed_since?}]}`. A brief that names files (`paths`) also carries `changed_since`, those of its files claimed or edited after it. A resource with no brief is left out of the answer. You see your own user's briefs unless your role has `relay.read_all`.
 
 ### task
 
@@ -282,6 +282,31 @@ The run's registered tasks and their state now.
 | `run_id` | Optional, from the header. |
 
 Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round}]}`. `state` is `open`, `held` or `finished` in the task's current round.
+
+### contract
+
+When you finish an interface others will build on (a type, a route, a config shape), write its contract: the shape in a few lines, and the files that define it. Use it instead of a `CONTRACT:` note: a note names no files, so nobody sees when the interface changes after it.
+
+| Argument | |
+|---|---|
+| `name` | Required. The interface's name, for example `seeker-4 routes`. It is keyed `contract:<name>`. |
+| `text` | Required. The shape in a few lines. Cut at 2,000 characters. |
+| `paths` | Required. The files that define it, at least one, at most 32. |
+| `cwd` | Your working directory, for absolute paths. |
+| `run_id`, `agent` | Required, or from the headers. |
+
+Answer: `{ok: true, run_id, agent, key, paths}`. Writing a name again replaces its contract. A contract is never claimed.
+
+### contracts
+
+Read the contracts of the run before building on an interface another agent finished.
+
+| Argument | |
+|---|---|
+| `names` | Only these contract names: a list, or one comma-separated string. Left out: every contract of the run. |
+| `run_id` | Optional, from the header. |
+
+Answer: `{contracts: [{name, key, agent, ts, age_s, text, paths, changed_since}]}`, the newest contract of each name, newest first. `changed_since` lists its files claimed or edited after it was written: read those files before trusting the contract.
 
 ## Edits need a claim (hold required)
 

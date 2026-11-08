@@ -291,8 +291,11 @@ def test_hooks(seeker):
           'claimed as `slot:<name>` and released when you are done with it' in open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
           and all(n in open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read() for n in
                   ('## Slots', '`slot:devserver`', '`slot:port-3000`', '`slot:db-migrate`', '`slot:screenshots`', '`slot:commit`', 'lasts two minutes')))
-    check('session-start: names the relay tools, handoff, ask, answer, brief, briefs and tasks among them',
-          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks)' in ctx)
+    check('session-start: names the relay tools, contract and contracts among them',
+          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts)' in ctx)
+    check('session-start: write a contract when an interface is done, read contracts before building on one',
+          'When you finish an interface others will build on (a type, a route, a config shape), call contract with its name, the shape '
+          'in a few lines, and the files that define it. Before building on one, call contracts.' in ctx)
     check('session-start: ask when blocked, never a QUESTION note; answer open questions',
           'When you are blocked on something only another agent or the orchestrator can decide, call ask. Do not post a QUESTION note. '
           'When you can answer an open question, call answer with its id.' in ctx)
@@ -587,7 +590,8 @@ def test_briefs_wording():
     shared file before reading the file, and to leave one after reading a file it edits or others need."""
     skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
     check('relay skill: lists the relay tools, ask and answer among them; ask rather than a QUESTION note',
-          '`peers`, `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `briefs`, `tasks`' in skill
+          '`peers`, `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `briefs`, `tasks`, `contract`, `contracts`' in skill
+          and 'call `contract` with its name' in skill and 'Before building on one, call `contracts`' in skill
           and 'call `ask`. Do not post a QUESTION note. When you can answer an open question, call `answer` with its id' in skill)
     check('relay skill: call briefs before reading a shared file, post a brief after reading one',
           'call `briefs` with it' in skill and 'post a `brief` for it' in skill and 'up to a few hundred words' in skill
@@ -595,8 +599,12 @@ def test_briefs_wording():
     tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
     sections = re.findall(r'^### (\w+)$', tools, re.M)
     relay = sections[sections.index('peers'):] if 'peers' in sections else []
-    check('relay-tools: eleven relay tools, handoff, ask and answer after release, then brief, briefs, task and tasks',
-          relay == ['peers', 'post', 'claim', 'release', 'handoff', 'ask', 'answer', 'brief', 'briefs', 'task', 'tasks'], ','.join(relay))
+    check('relay-tools: thirteen relay tools, handoff, ask and answer after release, then brief, briefs, task, tasks, contract, contracts',
+          relay == ['peers', 'post', 'claim', 'release', 'handoff', 'ask', 'answer', 'brief', 'briefs', 'task', 'tasks', 'contract', 'contracts'],
+          ','.join(relay))
+    check('relay-tools: contract and contracts documented, instead of a CONTRACT note',
+          '{contracts: [{name, key, agent, ts, age_s, text, paths, changed_since}]}' in tools and 'instead of a `CONTRACT:` note' in tools
+          and 'changed_since?}]}' in tools)
     check('relay-tools: peers kind and open, ask and answer documented',
           '| `open` |' in tools and 'peers(kind="question", open=true)' in tools and 'answered: {agent, ts, text}' in tools
           and 'Answer: `{id, run_id, agent}`' in tools and 'Do not post a QUESTION note' in tools)
@@ -606,9 +614,9 @@ def test_briefs_wording():
     check('relay-tools: handoff documents to, handed and held_by',
           '| `to` |' in tools and '{handed: true, resource, key, to, lease_until, token, paths?}' in tools
           and '{handed: false, resource, key, to, held_by?, message}' in tools)
-    check('relay-tools: fifteen tools, handoff, ask, answer, brief and task write, briefs answers the newest brief per key',
-          'gives an agent fifteen tools' in tools and '`post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief` and `task` write' in tools
-          and '{briefs: [{key, resource, agent, text, ts, age_s, paths?}]}' in tools and '`BRIEF` for a brief' in tools)
+    check('relay-tools: seventeen tools, the writes listed, briefs answers the newest brief per key',
+          'gives an agent seventeen tools' in tools and '`post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `task` and `contract` write' in tools
+          and '{briefs: [{key, resource, agent, text, ts, age_s, paths?, changed_since?}]}' in tools and '`BRIEF` for a brief' in tools)
     check('relay-tools: the briefs paragraph for the rules', 'call briefs for it and read the brief first' in tools)
     check('relay-tools: rule 3 claims the registered task with its files, and finishes it', registered_rule(tools))
     check('relay-tools: claim documents paths, conflict_key and unknown_task; task and tasks documented',
@@ -934,7 +942,7 @@ def test_codex_hooks(seeker):
           and f'session_id {CSID}' in ctx and f'run id is {CSID}' in ctx and f'agent id is {CSID}' in ctx and p.returncode == 0, f'{dt:.2f}s')
     check('codex session-start: claims the registered task, its files come with it', registered_rule(ctx))
     check('codex session-start: names the relay tools, ask and answer among them',
-          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks)' in ctx and 'call ask' in ctx)
+          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts)' in ctx and 'call ask' in ctx)
     check('codex session-start: slots', 'slot:<name>' in ctx)
     check('codex session-start: release it finished; reopen a finished task',
           'release it with finished=true' in ctx and 'claim its name with reopen=true' in ctx)
