@@ -21,12 +21,11 @@ SUBAGENT = ("You are a subagent of session {sid}. That session's full record, in
 
 RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other agents in this run may be working in "
          "the same files. Pass run_id=\"{run}\" and agent=\"{agent}\" to the ctrlb relay tools (peers, post, claim, "
-         "release, brief, briefs). Before starting a task, claim its name as the task list gives it (for example "
-         "claim(resource=\"task 03 median\")). If held is false with finished_by, the task is done; pick another. If "
-         "held is false with held_by, another agent is on it; pick another. Then claim the file path the task names "
-         "(for example claim(resource=\"src/median.py\")). Work only while you hold both. When the task is done, "
-         "release the file; it is handed back, because a file is never finished. Then release the task name with "
-         "finished=true. That is what stops another agent from doing the task again. If you were asked to do a "
+         "release, brief, briefs, tasks). Claim the task by the name your orchestrator registered (for example "
+         "claim(resource=\"task 03 median\"); tasks lists them). Its files come with it. If held is false with "
+         "finished_by, the task is done; if held is false with held_by, another agent has it: pick another. If reason "
+         "is unknown_task, claim again with the suggestion. Work only while you hold it. When the task is done, release "
+         "it with finished=true. A file that belongs to no task is claimed by its path. If you were asked to do a "
          "finished task again, claim its name with reopen=true.")
 
 
