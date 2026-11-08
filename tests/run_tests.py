@@ -264,6 +264,8 @@ def test_hooks(seeker):
     check('session-start: finish tasks, just release files, and reopen a finished task',
           'Finish tasks, just release files' in ctx and 'a file path is never finished' in ctx
           and 'finished=true only when releasing a task name' in ctx and 'reopen=true' in ctx)
+    check('session-start: names the relay tools, brief and briefs among them',
+          'relay tools (peers, post, claim, release, brief, briefs)' in ctx)
     check('session-start under 1 s', dt < 1.0, f'{dt:.2f}s')
     p, _ = hook('session-start', I['session_start_compact'], dict(env, CTRLB_RUN='relay-run-7', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
@@ -525,6 +527,30 @@ def test_release_wording():
     lim = open(os.path.join(ROOT, 'docs', 'limits.md')).read()
     check('limits: a file path is never done; reopen starts a new round; no "use a new run id"',
           'A file path is never done' in lim and 'reopen=true' in lim and 'use a new run id' not in lim)
+
+
+def test_briefs_wording():
+    """Briefs (Seeker relay-plan decision 16): the skill and the tool docs tell the agent to read the brief of a
+    shared file before reading the file, and to leave one after reading a file it edits or others need."""
+    skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+    check('relay skill: lists brief and briefs among the tools',
+          '`peers`, `post`, `claim`, `release`, `brief`, `briefs`' in skill)
+    check('relay skill: call briefs before reading a shared file, post a brief after reading one',
+          'call `briefs` with it' in skill and 'post a `brief` for it' in skill and 'up to a few hundred words' in skill
+          and 'what it exports or decides, and what not to touch' in skill and 'not a claim and reserves nothing' in skill)
+    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
+    sections = re.findall(r'^### (\w+)$', tools, re.M)
+    relay = sections[sections.index('peers'):] if 'peers' in sections else []
+    check('relay-tools: six relay tools, brief and briefs documented after release',
+          relay == ['peers', 'post', 'claim', 'release', 'brief', 'briefs'], ','.join(relay))
+    check('relay-tools: ten tools, brief writes, briefs answers the newest brief per key',
+          'gives an agent ten tools' in tools and '`post`, `claim`, `release` and `brief` write' in tools
+          and '{briefs: [{key, resource, agent, text, ts, age_s}]}' in tools and '`BRIEF` for a brief' in tools)
+    check('relay-tools: the briefs paragraph for the rules', 'call briefs for it and read the brief first' in tools)
+    http = open(os.path.join(ROOT, 'docs', 'connect-http.md')).read()
+    check('connect-http: both briefs routes as curl',
+          '-X POST "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/briefs"' in http
+          and '/runs/demo-run-1/briefs?resources=' in http and '`brief` and `briefs`' in http)
 
 
 def test_keys():
@@ -824,6 +850,8 @@ def test_codex_hooks(seeker):
     check('codex session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {CSID}' in ctx and f'run id is {CSID}' in ctx and f'agent id is {CSID}' in ctx and p.returncode == 0, f'{dt:.2f}s')
     check('codex session-start: tells the agent to claim the file path a task names', 'claim with the file path the task names' in ctx)
+    check('codex session-start: names the relay tools, brief and briefs among them',
+          'relay tools (peers, post, claim, release, brief, briefs)' in ctx)
     check('codex session-start: finish tasks, just release files, and reopen a finished task',
           'Finish tasks, just release files' in ctx and 'finished=true only when releasing a task name' in ctx and 'reopen=true' in ctx)
     p, _ = chook('session-start', I['session_start'], dict(env, CTRLB_RUN='relay-run-8', CTRLB_AGENT='builder-1'))
@@ -1067,6 +1095,7 @@ def main():
     test_edit_keys_across_harnesses(seeker)
     test_docs()
     test_release_wording()
+    test_briefs_wording()
     test_failure_safety(seeker)
     test_config_and_status(seeker)
     test_codex_rows(seeker)

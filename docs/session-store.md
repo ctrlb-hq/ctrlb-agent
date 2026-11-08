@@ -77,6 +77,6 @@ The two papers behind the session store and Relay are not public yet. They are:
 ## Next
 
 - [Connect Claude Code](connect-claude-code.md), [Connect Codex](connect-codex.md), [Connect with OTEL only](connect-otel.md), [Connect over HTTP](connect-http.md)
-- [Relay tools](relay-tools.md): the eight MCP tools and the agent rules
+- [Relay tools](relay-tools.md): the ten MCP tools and the agent rules
 - [Run view](run-view.md): runs, timelines and transcripts in CtrlB
 - [Limits](limits.md)

@@ -105,7 +105,27 @@ curl -sS "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/peers?limit=4
   -H "Authorization: Bearer <your key>"
 ```
 
-Answer: `{you, events}`, newest first. Each event is `{agent, kind, resource, key, text, age_s, ts}`, where `kind` is the row's kind: `NOTE` for a post, `HOLD`, `REOPEN`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim.
+Answer: `{you, events}`, newest first. Each event is `{agent, kind, resource, key, text, age_s, ts}`, where `kind` is the row's kind: `NOTE` for a post, `BRIEF` for a brief, `HOLD`, `REOPEN`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim.
+
+### Leave a brief
+
+```sh
+curl -sS -X POST "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/briefs" \
+  -H "Authorization: Bearer <your key>" \
+  -H "Content-Type: application/json" \
+  -d '{"agent": "agent-a", "resource": "src/parser.py", "text": "Tokeniser and parser for the query language. Exports parse(text) -> Ast. Do not change the Ast field names; the planner reads them."}'
+```
+
+Answer: `201 {"ok": true, "key", "resource"}`. The resource is keyed as a claim keys it, and the text is cut at 2,000 characters.
+
+### Read briefs
+
+```sh
+curl -sS "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/briefs?resources=src/parser.py,src/planner.py" \
+  -H "Authorization: Bearer <your key>"
+```
+
+Answer: `{briefs: [{key, resource, agent, text, ts, age_s}]}`, the newest brief of each key, newest first. Without `resources`, every key of the run; `limit` is 40 by default, at most 200.
 
 ### Claim a resource
 
@@ -199,7 +219,7 @@ Changing settings needs the `relay.manage` permission.
 
 ## The same calls as MCP tools
 
-CtrlB's MCP server at `<your CtrlB URL>/mcp` serves these calls as tools: `search_sessions`, `find_command`, `next_actions`, `fetch_records`, `peers`, `post`, `claim` and `release`. Send the key as `Authorization: Bearer <your key>`. The relay tools take `run_id` and `agent` as arguments, or from the `X-CtrlB-Run` and `X-CtrlB-Agent` headers.
+CtrlB's MCP server at `<your CtrlB URL>/mcp` serves these calls as tools: `search_sessions`, `find_command`, `next_actions`, `fetch_records`, `peers`, `post`, `claim`, `release`, `brief` and `briefs`. Send the key as `Authorization: Bearer <your key>`. The relay tools take `run_id` and `agent` as arguments, or from the `X-CtrlB-Run` and `X-CtrlB-Agent` headers.
 
 ```sh
 claude mcp add --transport http ctrlb "<your CtrlB URL>/mcp" --header "Authorization: Bearer <your key>"
