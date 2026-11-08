@@ -1,10 +1,10 @@
 """Tests of the research prototype swarm_mcp.py against Seeker's rules.
 
   parity  read_key on every case of Seeker's tests/fixtures/key_states.json (the same file Go's ReadKey passes), the
-          belongs_to_task decision on its cases with a claim (decision 27), and relay_paths.key on every case of
-          tests/fixtures/keys.json
+          belongs_to_task decision on its cases with a claim (decision 27), DONE rows with evidence folding as without
+          (decision 30), and relay_paths.key on every case of tests/fixtures/keys.json
   live    claim, release, reopen, the read-your-write guard, the late finish, waiting in line (wait_s) and registered
-          tasks (belongs_to_task) against the lake (stream swarm_board, a fresh run id); skipped when the lake does not
+          tasks (belongs_to_task), done with evidence against the lake (stream swarm_board, a fresh run id); skipped when the lake does not
           answer
 
 Usage: FIXTURES=<seeker>/tests/fixtures python3 -I test_swarm_mcp.py
@@ -95,6 +95,28 @@ class Parity(unittest.TestCase):
             M.bundle_keys('name:t', ['name:other'])
         with self.assertRaises(ValueError):
             M.bundle_keys('name:t', [f'f{i}.py' for i in range(33)])
+
+    def test_evidence_ignored(self):
+        """Seeker decision 30: the fixture's DONE rows with evidence in text fold as they do without it."""
+        cases = [c for c in fixture('key_states.json')['cases'] if any(r.get('text') for r in c['rows'])]
+        if not cases:
+            self.skipTest(f'{FIXTURES} predates decision 30 (no DONE row with evidence); use a fixture from feat/relay-done-stall')
+        self.assertGreaterEqual(len(cases), 2)
+        for c in cases:
+            plain = [{k: v for k, v in r.items() if k != 'text'} for r in c['rows']]
+            a = M.read_key([dict(r) for r in c['rows']], c['now_us'], c['lease_s'], key=c['key'])
+            b = M.read_key(plain, c['now_us'], c['lease_s'], key=c['key'])
+            with self.subTest(c['name']):
+                self.assertEqual({k: [sig(r) for r in v] if isinstance(v, list) else sig(v) for k, v in a.items()},
+                                 {k: [sig(r) for r in v] if isinstance(v, list) else sig(v) for k, v in b.items()})
+
+    def test_evidence_shape(self):
+        self.assertEqual(M._evidence({'command': ' pytest -q ', 'exit_code': 0, 'summary': '1 passed', 'x': 1}),
+                         {'command': 'pytest -q', 'exit_code': 0, 'summary': '1 passed'})
+        self.assertEqual(M._evidence('all green'), {'summary': 'all green'})
+        self.assertEqual(M._evidence(None), {})
+        with self.assertRaises(ValueError):
+            M.done('src/x.py', {'command': 'pytest'})
 
     def test_keys(self):
         cases = fixture('keys.json')['cases']
@@ -209,6 +231,32 @@ class Live(unittest.TestCase):
         rel = self.as_agent('a', M.release, 'task late', True)
         self.assertEqual((rel['released'], rel['finished'], rel.get('finished_after_lease')), (1, True, True))
         self.assertEqual(self.as_agent('b', M.claim, 'task late').get('finished_by'), 'a')
+
+    def test_done_with_evidence(self):
+        self.assertTrue(self.as_agent('a', M.claim, 'Task Ev')['held'])
+        got = self.as_agent('a', M.done, 'task ev', {'command': 'pytest -q', 'exit_code': 0, 'summary': '2 passed'})
+        self.assertEqual((got['done'], got['evidence']), (True, {'command': 'pytest -q', 'exit_code': 0, 'summary': '2 passed'}))
+        time.sleep(0.05)
+        rows = L.search(M.STREAM, f"SELECT kind, text FROM {M.STREAM} WHERE run_id = '{M.RUN}' AND kind = 'DONE'", size=10, timeout=10)
+        self.assertEqual([r.get('text') for r in rows], ['{"command":"pytest -q","exit_code":0,"summary":"2 passed"}'])
+        self.assertEqual(self.as_agent('b', M.claim, 'task ev').get('finished_by'), 'a')
+        # The alias: release with finished still finishes a task (no evidence).
+        self.assertTrue(self.as_agent('b', M.claim, 'task alias')['held'])
+        self.assertTrue(self.as_agent('b', M.release, 'task alias', True)['finished'])
+
+    def test_evidence_required(self):
+        M.EVIDENCE_REQUIRED = True
+        try:
+            self.assertTrue(self.as_agent('a', M.claim, 'task req')['held'])
+            got = self.as_agent('a', M.done, 'task req', 'it works')
+            self.assertEqual((got['done'], got['reason']), (False, 'evidence_required'))
+            got = self.as_agent('a', M.release, 'task req', True)
+            self.assertEqual((got['released'], got['reason']), (0, 'evidence_required'))
+            time.sleep(0.05)
+            self.assertEqual([r['kind'] for r in M.hold_rows('name:task req')], ['HOLD'])
+            self.assertTrue(self.as_agent('a', M.done, 'task req', {'command': 'go test ./...', 'exit_code': 0})['done'])
+        finally:
+            M.EVIDENCE_REQUIRED = False
 
     def test_handoff(self):
         self.assertTrue(self.as_agent('a', M.claim, 'src/h.py')['held'])

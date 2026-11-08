@@ -1,0 +1,8 @@
+# Data and results the harness reads or writes; none of it is shipped (README.md, Environment).
+results/
+template/
+devbench/sets/
+devbench-src/
+devbench-venv/
+relay_proof_features.json
+__pycache__/

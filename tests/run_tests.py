@@ -576,9 +576,10 @@ def test_release_wording():
     """Seeker never finishes a file path (relay-plan decision 15): no agent-facing text may tell agents to release
     with finished=true as the rule for every claim, and the tool docs carry reopen."""
     old = re.compile(r'(call|then) `?release`? with `?finished=true`?', re.I)
+    # research/: the harness keeps the rules its earlier arms were measured with, word for word
     files = [f for f in glob.glob(os.path.join(ROOT, '**', '*'), recursive=True)
              if os.path.isfile(f) and f.endswith(('.md', '.py', '.json')) and '/tests/' not in f and '/.git/' not in f
-             and not f.endswith('relay-plan.md')]
+             and not f.endswith('relay-plan.md') and not os.path.relpath(f, ROOT).startswith('research' + os.sep)]
     bad = [os.path.relpath(f, ROOT) for f in files if old.search(open(f, errors='replace').read())]
     check('no agent-facing text says to release with finished=true for every claim', not bad, ', '.join(bad))
     tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()

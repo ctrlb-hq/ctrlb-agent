@@ -10,7 +10,11 @@ CTRLB_ORG, CTRLB_AUTH. Standard library only.
                              write-first claim: write HOLD (or REOPEN) on the resource and on each of paths in one
                              write, wait, read each key's rows; held iff the first live hold of the current round is
                              ours on every deciding key. wait_s (at most 55) waits in line instead of refusing
-  release(resource, finished?)  hand back (RELEASE) or, for a task name, finish (DONE); a bundle's files go with it
+  release(resource, finished?)  hand back (RELEASE) or, for a task name, finish (DONE); a bundle's files go with it;
+                             finished is the alias of done
+  done(resource, evidence?)  finish a task name (DONE) with the evidence of its check {command, exit_code, summary} as
+                             the DONE row's text (Seeker decision 30); SWARM_EVIDENCE_REQUIRED=1 refuses one that
+                             names no command, and a finished release, with reason evidence_required
   task(name, text, paths)    register a task with its files (a BRIEF on the task name with paths)
   tasks()                    the run's registered tasks with their state
   brief(resource, text)      a note about a file or document read, keyed as claims key it (a BRIEF row)
@@ -42,6 +46,8 @@ RUN, AGENT = os.environ.get('SWARM_RUN', ''), os.environ.get('SWARM_AGENT', '')
 WAIT_MS = int(os.environ.get('SWARM_WAIT_MS', '20'))
 LEASE_S = int(os.environ.get('SWARM_LEASE_S', '600'))
 EXPOSE = [t for t in os.environ.get('SWARM_TOOLS', 'peers,post,claim,release').split(',') if t]
+EVIDENCE_REQUIRED = os.environ.get('SWARM_EVIDENCE_REQUIRED', '') == '1'
+EVIDENCE_REQUIRED_MESSAGE = 'say which command you ran and its exit code'
 
 HOLDS = ('HOLD', 'REOPEN')
 KIND_RANK = {'HOLD': 0, 'REOPEN': 1, 'RELEASE': 2, 'DONE': 3, 'HANDOFF': 4}
@@ -686,10 +692,59 @@ def tasks():
 
 def release(resource, finished=True):
     """Close our holds on resource: DONE on a task name when finished, else RELEASE. A bundle's other keys (the paths
-    of our hold on the resource key) are handed back first."""
+    of our hold on the resource key) are handed back first. finished=true on a task name is the alias of done (no
+    evidence); under SWARM_EVIDENCE_REQUIRED it is refused."""
     key, kind = relay_paths.key(resource)
     _holdable(resource, key)
+    if finished and EVIDENCE_REQUIRED and relay_paths.kind_of(key)['finishable']:
+        return json.dumps(dict(released=0, finished=False, resource=resource, key=key, reason='evidence_required',
+                               message=EVIDENCE_REQUIRED_MESSAGE + ': call done(resource, evidence) with the command '
+                                                                   'you ran; nothing was written',
+                               deprecated='finished is replaced by done(resource)'))
     return json.dumps(_release(resource, finished))
+
+
+def _evidence(evidence):
+    """Seeker's RelayEvidence: an object {command, exit_code, summary} or free text (the summary), trimmed and cut
+    (command 500 bytes, summary 300), as the compact JSON Go writes (fields in that order, no spaces)."""
+    if evidence is None:
+        return {}
+    if isinstance(evidence, str):
+        evidence = {'summary': evidence}
+    if not isinstance(evidence, dict):
+        raise ValueError('evidence must be an object {command, exit_code, summary} or text')
+    out = {}
+    if str(evidence.get('command') or '').strip():
+        out['command'] = str(evidence['command']).strip().encode()[:500].decode(errors='ignore')
+    if isinstance(evidence.get('exit_code'), (int, float)) and not isinstance(evidence.get('exit_code'), bool):
+        out['exit_code'] = int(evidence['exit_code'])
+    if str(evidence.get('summary') or '').strip():
+        out['summary'] = str(evidence['summary']).strip().encode()[:300].decode(errors='ignore')
+    return out
+
+
+def done(resource, evidence=None):
+    """Finish a task name with the evidence of its check (Seeker relay.Done): the finished release, with the evidence
+    as the DONE rows' text; read_key never reads it. A file path is never done."""
+    key, kind = relay_paths.key(resource)
+    _holdable(resource, key)
+    if not relay_paths.kind_of(key)['finishable']:
+        raise ValueError(f"{'a file path' if kind == 'path' else 'a ' + kind} is never done: release it")
+    ev = _evidence(evidence)
+    out = dict(done=False, resource=resource, key=key)
+    if EVIDENCE_REQUIRED and not ev.get('command'):
+        out.update(reason='evidence_required', message=EVIDENCE_REQUIRED_MESSAGE)
+        return json.dumps(out)
+    rel = _release(resource, True, json.dumps(ev, separators=(',', ':')) if ev else '')
+    out['done'] = rel['finished']
+    for k in ('finished_after_lease', 'message', 'paths'):
+        if k in rel:
+            out[k] = rel[k]
+    if out['done'] and ev:
+        out['evidence'] = ev
+    if not out['done'] and 'message' not in out:
+        out['message'] = f'{resource} was not marked finished: you hold no claim on it in its current round, or it is finished'
+    return json.dumps(out)
 
 
 def _release_bundle(h):
@@ -705,7 +760,7 @@ def _release_bundle(h):
     return out
 
 
-def _release(resource, finished):
+def _release(resource, finished, done_text=''):
     key, kind = relay_paths.key(resource)
     st = read_key(hold_rows(key), now_us(), LEASE_S, key)
     is_path = not relay_paths.kind_of(key)['finishable']
@@ -714,7 +769,7 @@ def _release(resource, finished):
     others = []
     for r in mine:
         others += _release_bundle(r)
-        write(row_kind, resource, key, nonce=r['nonce'])
+        write(row_kind, resource, key, text=done_text if row_kind == 'DONE' else '', nonce=r['nonce'])
     out = dict(released=len(mine), finished=row_kind == 'DONE' and bool(mine), resource=resource, key=key)
     if finished and is_path and mine:
         what = 'file path' if kind == 'path' else kind
@@ -730,7 +785,7 @@ def _release(resource, finished):
         elif own:
             newest = max(own, key=lambda r: int(r['ts']))
             others += _release_bundle(newest)
-            write('DONE', resource, key, nonce=newest['nonce'])
+            write('DONE', resource, key, text=done_text, nonce=newest['nonce'])
             out.update(released=1, finished=True, finished_after_lease=True,
                        message=f'{resource} is marked finished; your lease had run out, but nobody else claimed it in '
                                f'the meantime')
@@ -780,7 +835,15 @@ ALL = dict(
                  description='Release a claim you hold. On a task name, finished=true (the default) marks the task '
                              'done so nobody claims it again; finished=false hands it back. A file path is always '
                              'handed back, never finished: files are edited again in later rounds of work. The files '
-                             'claimed with a task are handed back with it.'),
+                             'claimed with a task are handed back with it. To finish a task, call done instead.'),
+    done=dict(fn=done, required=['resource'],
+              properties=dict(resource=S, evidence={'type': 'object', 'properties': dict(
+                  command=S, exit_code={'type': 'integer'}, summary=S)}),
+              description='Finish a task you hold, when its test passes: evidence {command, exit_code, summary} is the '
+                          'test or check command you ran, its exit code and one line of its output. Later claims of '
+                          'the task are refused unless they pass reopen=true. done=false with reason '
+                          'evidence_required: call done again with the command you ran. A file path is never done: '
+                          'release it.'),
 )
 ALL.update(
     brief=dict(fn=brief, required=['resource', 'text'], properties=dict(resource=S, text=S),
