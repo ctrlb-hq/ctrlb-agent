@@ -190,6 +190,12 @@ def planted():
 
 # ---------------------------------------------------------------- tests
 
+def task_claim_first(text, name_claim, file_claim):
+    """The rule text names the task-name claim before the file claim, and both exist."""
+    i, j = text.find(name_claim), text.find(file_claim)
+    return 0 <= i < j
+
+
 def test_layout():
     pj = load('../../plugin/.claude-plugin/plugin.json')
     check('plugin.json: name ctrlb-agent, version 0.2.0', pj.get('name') == 'ctrlb-agent' and pj.get('version') == '0.2.0')
@@ -216,10 +222,12 @@ def test_layout():
           all(s.startswith('---\n') and f'\nname: {n}\n' in s for n, s in skills.items()))
     relay = skills['relay']
     check('relay skill: run id argument and the three rules', '$ARGUMENTS' in relay and all(f'\n{i}. ' in relay for i in (1, 2, 3))
-          and 'call `claim` with the file path' in relay)
-    check('relay skill: finish tasks, just release files; reopen a finished task',
-          'Finish tasks, just release files' in relay and 'A file path is never finished' in relay and '`reopen=true`' in relay
-          and 'call `release` with `finished=true`' not in relay)
+          and 'Work only while you hold both' in relay)
+    check('relay skill: rule 3 claims the task name before the file path',
+          task_claim_first(relay, 'claim its name as the task list gives it', 'Then claim the file path the task names'))
+    check('relay skill: release the file, then finish the name; reopen a finished task',
+          'release the file, then release the task name with `finished=true`' in relay and 'Finish tasks, just release files' in relay
+          and 'A file is never finished' in relay and '`reopen=true`' in relay and 'call `release` with `finished=true`' not in relay)
     check('no stdio recall server shipped', not glob.glob(os.path.join(ROOT, '**', 'recall_mcp.py'), recursive=True))
     check('plugin/lib and plugin/bin point at the shared lib and bin',
           os.path.realpath(os.path.join(ROOT, 'plugin', 'lib')) == os.path.join(ROOT, 'lib')
@@ -260,10 +268,13 @@ def test_hooks(seeker):
     ctx = o.get('additionalContext', '')
     check('session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {SID}' in ctx and f'run id is {SID}' in ctx and f'agent id is {SID}' in ctx and p.returncode == 0)
-    check('session-start: tells the agent to claim the file path a task names', 'claim with the file path the task names' in ctx)
-    check('session-start: finish tasks, just release files, and reopen a finished task',
-          'Finish tasks, just release files' in ctx and 'a file path is never finished' in ctx
-          and 'finished=true only when releasing a task name' in ctx and 'reopen=true' in ctx)
+    check('session-start: claims the task name before the file path, and works only while holding both',
+          task_claim_first(ctx, 'claim its name as the task list gives it', 'Then claim the file path the task names')
+          and 'Work only while you hold both' in ctx)
+    check('session-start: release the file, then finish the task name; refusals; reopen a finished task',
+          'release the file; it is handed back, because a file is never finished' in ctx
+          and 'Then release the task name with finished=true' in ctx and 'held is false with finished_by, the task is done' in ctx
+          and 'held is false with held_by, another agent is on it' in ctx and 'claim its name with reopen=true' in ctx)
     check('session-start: names the relay tools, brief and briefs among them',
           'relay tools (peers, post, claim, release, brief, briefs)' in ctx)
     check('session-start under 1 s', dt < 1.0, f'{dt:.2f}s')
@@ -547,6 +558,9 @@ def test_briefs_wording():
           'gives an agent ten tools' in tools and '`post`, `claim`, `release` and `brief` write' in tools
           and '{briefs: [{key, resource, agent, text, ts, age_s}]}' in tools and '`BRIEF` for a brief' in tools)
     check('relay-tools: the briefs paragraph for the rules', 'call briefs for it and read the brief first' in tools)
+    check('relay-tools: rule 3 claims the task name before the file path, and finishes the name',
+          task_claim_first(tools, 'claim its name as the task list gives it', 'Then claim the file path the task names')
+          and 'release the file, then release the task name with finished=true' in tools)
     http = open(os.path.join(ROOT, 'docs', 'connect-http.md')).read()
     check('connect-http: both briefs routes as curl',
           '-X POST "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/briefs"' in http
@@ -849,11 +863,12 @@ def test_codex_hooks(seeker):
     ctx = o.get('additionalContext', '')
     check('codex session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {CSID}' in ctx and f'run id is {CSID}' in ctx and f'agent id is {CSID}' in ctx and p.returncode == 0, f'{dt:.2f}s')
-    check('codex session-start: tells the agent to claim the file path a task names', 'claim with the file path the task names' in ctx)
+    check('codex session-start: claims the task name before the file path',
+          task_claim_first(ctx, 'claim its name as the task list gives it', 'Then claim the file path the task names'))
     check('codex session-start: names the relay tools, brief and briefs among them',
           'relay tools (peers, post, claim, release, brief, briefs)' in ctx)
-    check('codex session-start: finish tasks, just release files, and reopen a finished task',
-          'Finish tasks, just release files' in ctx and 'finished=true only when releasing a task name' in ctx and 'reopen=true' in ctx)
+    check('codex session-start: release the file, then finish the task name; reopen a finished task',
+          'Then release the task name with finished=true' in ctx and 'claim its name with reopen=true' in ctx)
     p, _ = chook('session-start', I['session_start'], dict(env, CTRLB_RUN='relay-run-8', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
     check('codex session-start: CTRLB_RUN and CTRLB_AGENT win', 'run id is relay-run-8' in ctx and 'agent id is builder-1' in ctx)

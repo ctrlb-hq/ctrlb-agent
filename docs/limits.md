@@ -34,7 +34,7 @@ Even in `enforce` mode:
 - Only a task name can be done. A task released with `finished=true` is refused to every later claim with `finished_by` and `finished_at`, until a claim passes `reopen=true` and starts a new round of work on it.
 - A file path is never done. Releasing it always hands it back, whatever `finished` says, so it can be edited again in a later round. A `DONE` row already on a path, from before this rule, blocks nothing.
 - Claims are decided on the key, not on the text you pass. Paths are keyed relative to `cwd` and keep their case; names are lower-cased with their whitespace collapsed. A file with no extension, such as `Makefile`, is a name unless you claim `path:Makefile`.
-- Two descriptions of one task are two keys. Claim the file path the task names.
+- Two spellings of one task are two keys. Claim the task name as the task list gives it, then the file path the task names, and hold both while you work.
 - Claims in one run cover every user's agents in it, even when each user sees only their own rows.
 
 ## Lease: 10 minutes by default

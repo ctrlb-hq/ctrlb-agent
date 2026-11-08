@@ -21,12 +21,13 @@ SUBAGENT = ("You are a subagent of session {sid}. That session's full record, in
 
 RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other agents in this run may be working in "
          "the same files. Pass run_id=\"{run}\" and agent=\"{agent}\" to the ctrlb relay tools (peers, post, claim, "
-         "release, brief, briefs). Before starting a task, call claim with the file path the task names (for example "
-         "claim(resource=\"src/app.py\")), not a description of the task; work on it only if held is true, otherwise "
-         "pick other work. Finish tasks, just release files: when you are done with a file, call release on it, and "
-         "it is handed back for later rounds of work (a file path is never finished). Pass finished=true only when "
-         "releasing a task name, to mark the task done. If a task name is refused as finished and you were asked to "
-         "work on it again, claim it with reopen=true to start a new round.")
+         "release, brief, briefs). Before starting a task, claim its name as the task list gives it (for example "
+         "claim(resource=\"task 03 median\")). If held is false with finished_by, the task is done; pick another. If "
+         "held is false with held_by, another agent is on it; pick another. Then claim the file path the task names "
+         "(for example claim(resource=\"src/median.py\")). Work only while you hold both. When the task is done, "
+         "release the file; it is handed back, because a file is never finished. Then release the task name with "
+         "finished=true. That is what stops another agent from doing the task again. If you were asked to do a "
+         "finished task again, claim its name with reopen=true.")
 
 
 def context(event, text):
