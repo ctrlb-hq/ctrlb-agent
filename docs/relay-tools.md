@@ -202,7 +202,7 @@ These are the rules from the research, worded for the relay tools. Paste them in
 ```text
 1. Other agents are working in this same directory right now. Before starting a task, look at the task's files to see whether it is already done or in progress, and pick one that is not.
 2. Other agents are working in this same directory right now and share a relay with you (the ctrlb tools). Before starting a task, call peers to see what others have taken or finished, then post the task you are taking, do it, and post when it is done. Never take a task another agent has posted.
-3. Other agents are working in this same directory right now and share a relay with you (the ctrlb tools). Before starting a task, call claim with the file path the task names; work on it only if held is true, otherwise claim a different task. When its test passes, call release on it.
+3. Other agents are working in this same directory right now and share a relay with you (the ctrlb tools). Before starting a task, claim its name as the task list gives it (for example claim(resource="task 03 median")). If held is false, pick another task. Then claim the file path the task names (for example claim(resource="src/median.py")). Work only while you hold both. When the task is done, release the file, then release the task name with finished=true.
 ```
 
 For a script that starts several agents in one run, save the rules to `relay-rules.txt` and give every agent the same run id:
@@ -216,7 +216,7 @@ done
 wait
 ```
 
-In the research, rule 3 is the one that cut duplicate work from 27 of 96 tasks to 1. Claim the file path a task names, not a description of the task: two descriptions of one task are two keys.
+In the research, rule 3 is the one that cut duplicate work from 27 of 96 tasks to 1. An agent holds two claims while it works: the task name and the file. The file is handed back when the task is done, so another agent can edit it later; the task name, released with `finished=true`, is what stops another agent from doing the task again. Claim the task name as the task list gives it: two spellings of one task are two keys.
 
 To have agents share what they read, add this paragraph to the rules:
 
