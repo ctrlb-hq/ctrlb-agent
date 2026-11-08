@@ -1,12 +1,12 @@
 ---
 title: Relay tools
-description: The ten tools CtrlB's MCP server gives an agent, their arguments and answers, and the three agent rules to paste into a prompt.
+description: The twelve tools CtrlB's MCP server gives an agent, their arguments and answers, and the three agent rules to paste into a prompt.
 slug: relay-tools
 ---
 
 # Relay tools
 
-CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent ten tools. Four search the session store. Six are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
+CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent twelve tools. Four search the session store. Eight are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
 
 To add the server by hand in Claude Code:
 
@@ -17,7 +17,7 @@ claude mcp add --transport http ctrlb "<your CtrlB URL>/mcp" --header "Authoriza
 - Every call acts as the key's user, with that user's roles and dataset grants.
 - Answers are compact JSON. Times are microseconds since the epoch.
 - Every tool takes an optional `dataset`: the sessions dataset, the workspace's `sessionsDataset` setting (`agent_sessions` unless changed) when left out.
-- `post`, `claim`, `release` and `brief` write. CtrlB registers them only when the server runs with write tools enabled (`MCP_WRITE_TOOLS_ENABLED`). If an agent has `peers` but no `claim`, ask your CtrlB administrator.
+- `post`, `claim`, `release`, `brief` and `task` write. CtrlB registers them only when the server runs with write tools enabled (`MCP_WRITE_TOOLS_ENABLED`). If an agent has `peers` but no `claim`, ask your CtrlB administrator.
 
 ## Run id and agent id
 
@@ -34,7 +34,7 @@ The plugin's `.mcp.json` and the Codex installer send both headers from the envi
 CtrlB Relay: your run id is <run> and your agent id is <agent>. ...
 ```
 
-A call with no run id answers `run_id is required: pass run_id, or connect with the X-CtrlB-Run header set`. `post`, `claim`, `release` and `brief` need an agent too.
+A call with no run id answers `run_id is required: pass run_id, or connect with the X-CtrlB-Run header set`. `post`, `claim`, `release`, `brief` and `task` need an agent too.
 
 ## Session store tools
 
@@ -122,6 +122,7 @@ An exclusive claim on a resource, a file path or a task name.
 | `run_id`, `agent` | Required, or from the headers. |
 | `cwd` | Your working directory. An absolute path under it is keyed relative to it. |
 | `reopen` | `true` to claim a finished task name anyway and start a new round of work on it. It has no effect on a key that is not finished. |
+| `paths` | Files (or `slot:<name>` slots) that come with the resource: all are taken in one step with it, or none is (at most 32). A task your orchestrator registered brings its files when you leave this out. |
 
 Answer when the claim is yours:
 
@@ -137,6 +138,24 @@ Answer when another agent holds it, or it is done:
 
 ```json
 {"held": false, "resource": "slugify", "key": "name:slugify", "finished_by": "agent-b", "finished_at": 1793000300000000, "message": "slugify was already finished by agent-b at 2026-11-07T10:05:00Z. If you were asked to work on it again, claim it with reopen=true to start a new round of work; otherwise pick something else"}
+```
+
+Answer to `claim(resource="task 03 median")` when the orchestrator registered that task with its file:
+
+```json
+{"held": true, "resource": "task 03 median", "key": "name:task 03 median", "lease_until": 1793000600000000, "paths": ["path:src/median.py"]}
+```
+
+Answer when a file of the task is held by another agent: nothing is taken.
+
+```json
+{"held": false, "resource": "task 03 median", "key": "name:task 03 median", "paths": ["path:src/median.py"], "held_by": "agent-b", "conflict_key": "path:src/median.py", "message": "task 03 median was not claimed: path:src/median.py, which comes with it, is already held by agent-b; nothing was taken. Pick something else"}
+```
+
+Answer when the run has registered tasks and none has that name:
+
+```json
+{"held": false, "resource": "median", "key": "name:median", "reason": "unknown_task", "suggestion": "task 03 median", "message": "median is not a task of this run. Did you mean \"task 03 median\"? Claim the task by the name your orchestrator registered"}
 ```
 
 Answer to `claim(resource="slugify", reopen=true)` on that finished task:
@@ -162,7 +181,7 @@ Give a claim back, or mark a task done. Finish tasks, just release files.
 | `cwd` | The working directory the claim was made with, if any. |
 | `run_id`, `agent` | Required, or from the headers. |
 
-Answer: `{released, finished, resource, key, message?}`. `released` counts your live holds on the key. It is 0 when you held none, for example after the lease ran out; then nothing is written and the key is not done. Claim it again, then release it. On a file path `finished` is always `false`, and when you asked for `finished=true` the `message` says the file was handed back instead.
+Answer: `{released, finished, resource, key, message?, paths?}`. `paths` lists the files of a task (or of a claim made with `paths`) handed back with it. `released` counts your live holds on the key. It is 0 when you held none, for example after the lease ran out; then nothing is written and the key is not done. Claim it again, then release it. On a file path `finished` is always `false`, and when you asked for `finished=true` the `message` says the file was handed back instead.
 
 If you claimed an absolute path with `cwd`, release it with the same `cwd`, or release the `key` the claim answered, for example `path:src/app.py`.
 
@@ -193,7 +212,31 @@ The newest brief of each resource in the run, newest first. Call it before readi
 | `cwd` | Your working directory, for absolute paths. |
 | `run_id` | Optional, from the header. |
 
-Answer: `{briefs: [{key, resource, agent, text, ts, age_s}]}`. A resource with no brief is left out of the answer. You see your own user's briefs unless your role has `relay.read_all`.
+Answer: `{briefs: [{key, resource, agent, text, ts, age_s, paths?}]}`. A resource with no brief is left out of the answer. You see your own user's briefs unless your role has `relay.read_all`.
+
+### task
+
+For an orchestrator: register a task of the run, with the files that come with it. A claim of the task then takes its files in the same step, and a claim of a task name the run did not register is refused with `reason: unknown_task` and the likeliest registered name as `suggestion`.
+
+| Argument | |
+|---|---|
+| `name` | Required. The task name agents will claim, for example `task 03 median`. Not a file path. |
+| `text` | Required. What the task is. Cut at 2,000 characters. |
+| `paths` | Required. The task's files, at least one, at most 32. |
+| `cwd` | Your working directory, for absolute paths. |
+| `run_id`, `agent` | Required, or from the headers. |
+
+Answer: `{ok: true, run_id, agent, key, name, paths}`. Registering a name again replaces its text and files.
+
+### tasks
+
+The run's registered tasks and their state now.
+
+| Argument | |
+|---|---|
+| `run_id` | Optional, from the header. |
+
+Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round}]}`. `state` is `open`, `held` or `finished` in the task's current round.
 
 ## The three agent rules
 
@@ -202,7 +245,7 @@ These are the rules from the research, worded for the relay tools. Paste them in
 ```text
 1. Other agents are working in this same directory right now. Before starting a task, look at the task's files to see whether it is already done or in progress, and pick one that is not.
 2. Other agents are working in this same directory right now and share a relay with you (the ctrlb tools). Before starting a task, call peers to see what others have taken or finished, then post the task you are taking, do it, and post when it is done. Never take a task another agent has posted.
-3. Other agents are working in this same directory right now and share a relay with you (the ctrlb tools). Before starting a task, claim its name as the task list gives it (for example claim(resource="task 03 median")). If held is false, pick another task. Then claim the file path the task names (for example claim(resource="src/median.py")). Work only while you hold both. When the task is done, release the file, then release the task name with finished=true.
+3. Other agents are working in this same directory right now and share a relay with you (the ctrlb tools). Claim the task by the name your orchestrator registered (for example claim(resource="task 03 median"); tasks lists them). Its files come with it. If held is false, pick another task. Work only while you hold it. When the task is done, release it with finished=true. A file that belongs to no task is claimed by its path.
 ```
 
 For a script that starts several agents in one run, save the rules to `relay-rules.txt` and give every agent the same run id:
@@ -216,7 +259,7 @@ done
 wait
 ```
 
-In the research, rule 3 is the one that cut duplicate work from 27 of 96 tasks to 1. An agent holds two claims while it works: the task name and the file. The file is handed back when the task is done, so another agent can edit it later; the task name, released with `finished=true`, is what stops another agent from doing the task again. Claim the task name as the task list gives it: two spellings of one task are two keys.
+In the research, rule 3 is the one that cut duplicate work from 27 of 96 tasks to 1. Register the run's tasks first, from the orchestrator or the script that starts the agents (`task(name, text, paths)` for each, or `POST .../briefs` with `paths`): a claim of a registered task then takes the task and its files in one step, so no two agents can each hold half of it, and a misspelled task name is refused with the registered one as `suggestion`. The files are handed back when the task is released, so another agent can edit them later; the task, released with `finished=true`, is what stops another agent from doing it again.
 
 To have agents share what they read, add this paragraph to the rules:
 
