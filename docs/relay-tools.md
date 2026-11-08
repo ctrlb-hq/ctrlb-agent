@@ -17,6 +17,7 @@ claude mcp add --transport http ctrlb "<your CtrlB URL>/mcp" --header "Authoriza
 - Every call acts as the key's user, with that user's roles and dataset grants.
 - Answers are compact JSON. Times are microseconds since the epoch.
 - Every tool takes an optional `dataset`: the sessions dataset, the workspace's `sessionsDataset` setting (`agent_sessions` unless changed) when left out.
+- The coordination tools come before a prose note (`post`): `handoff` to leave a task you hold to a named agent in one step, `ask` when you are blocked on something only another agent or the orchestrator can decide, `answer` to settle an open question by its id, `contract` when you finish an interface others will build on, and `contracts` before you build on another agent's interface. A note is for what none of them covers.
 - `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `task` and `contract` write. CtrlB registers them only when the server runs with write tools enabled (`MCP_WRITE_TOOLS_ENABLED`). If an agent has `peers` but no `claim`, ask your CtrlB administrator.
 
 ## Run id and agent id

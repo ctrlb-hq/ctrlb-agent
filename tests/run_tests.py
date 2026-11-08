@@ -293,12 +293,12 @@ def test_hooks(seeker):
                   ('## Slots', '`slot:devserver`', '`slot:port-3000`', '`slot:db-migrate`', '`slot:screenshots`', '`slot:commit`', 'lasts two minutes')))
     check('session-start: names the relay tools, contract and contracts among them',
           'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts)' in ctx)
-    check('session-start: write a contract when an interface is done, read contracts before building on one',
-          'When you finish an interface others will build on (a type, a route, a config shape), call contract with its name, the shape '
-          'in a few lines, and the files that define it. Before building on one, call contracts.' in ctx)
-    check('session-start: ask when blocked, never a QUESTION note; answer open questions',
-          'When you are blocked on something only another agent or the orchestrator can decide, call ask. Do not post a QUESTION note. '
-          'When you can answer an open question, call answer with its id.' in ctx)
+    check('session-start: the coordination tools before a prose note, one sentence each',
+          'Use the coordination tools before a prose note: handoff when you must leave a task you hold, so it moves to the agent '
+          'you name in one step; ask when you are blocked on something only another agent or the orchestrator can decide; '
+          "answer, with the question's id, when you can settle an open question; contract when you finish an interface others "
+          'will build on (a type, a route, a config shape), with its name, the shape in a few lines and the files that define '
+          "it; contracts before you build on another agent's interface. Post a note only for what none of them covers." in ctx)
     check('session-start under 1 s', dt < 1.0, f'{dt:.2f}s')
     p, _ = hook('session-start', I['session_start_compact'], dict(env, CTRLB_RUN='relay-run-7', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
@@ -591,8 +591,15 @@ def test_briefs_wording():
     skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
     check('relay skill: lists the relay tools, ask and answer among them; ask rather than a QUESTION note',
           '`peers`, `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `briefs`, `tasks`, `contract`, `contracts`' in skill
-          and 'call `contract` with its name' in skill and 'Before building on one, call `contracts`' in skill
-          and 'call `ask`. Do not post a QUESTION note. When you can answer an open question, call `answer` with its id' in skill)
+          and 'Use the coordination tools before a prose note (`post`)' in skill
+          and '- `handoff` when you must leave a task you hold' in skill
+          and '- `ask` when you are blocked on something only another agent or the orchestrator can decide. Do not post a QUESTION note.' in skill
+          and "- `answer`, with the question's id, when you can settle an open question" in skill
+          and '- `contract` when you finish an interface others will build on' in skill
+          and "- `contracts` before you build on another agent's interface" in skill
+          and 'Post a note only for what none of them covers.' in skill)
+    check('relay-tools: the coordination tools come before a prose note',
+          'The coordination tools come before a prose note (`post`)' in open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read())
     check('relay skill: call briefs before reading a shared file, post a brief after reading one',
           'call `briefs` with it' in skill and 'post a `brief` for it' in skill and 'up to a few hundred words' in skill
           and 'what it exports or decides, and what not to touch' in skill and 'not a claim and reserves nothing' in skill)
@@ -942,7 +949,8 @@ def test_codex_hooks(seeker):
           and f'session_id {CSID}' in ctx and f'run id is {CSID}' in ctx and f'agent id is {CSID}' in ctx and p.returncode == 0, f'{dt:.2f}s')
     check('codex session-start: claims the registered task, its files come with it', registered_rule(ctx))
     check('codex session-start: names the relay tools, ask and answer among them',
-          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts)' in ctx and 'call ask' in ctx)
+          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts)' in ctx
+          and 'Use the coordination tools before a prose note: handoff when' in ctx and '; ask when you are blocked' in ctx)
     check('codex session-start: slots', 'slot:<name>' in ctx)
     check('codex session-start: release it finished; reopen a finished task',
           'release it with finished=true' in ctx and 'claim its name with reopen=true' in ctx)
