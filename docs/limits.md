@@ -78,7 +78,8 @@ Even in `enforce` mode:
 
 ## What the run view does not do
 
-- The detectors (duplicate edits, silent agents) are computed when the page reads the run. There are no alerts on them.
+- The detectors (duplicate edits, silent agents, stalled tasks) are computed when the page reads the run. There are no alerts on them.
+- `done` evidence is what the agent says it ran. CtrlB does not run the command or check the exit code; the session record shows whether the agent ran it.
 - Edits made from a shell have no `paths` column, so the duplicate-edit detector does not see them.
 - Cost is shown for Claude Code sessions, from their `cost_usd`. Codex sessions record tokens only.
 

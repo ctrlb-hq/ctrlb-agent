@@ -1,12 +1,12 @@
 ---
 title: Relay tools
-description: The seventeen tools CtrlB's MCP server gives an agent, their arguments and answers, and the three agent rules to paste into a prompt.
+description: The seventeen tools CtrlB's MCP server gives an agent, and an eighteenth, done, their arguments and answers, and the three agent rules to paste into a prompt.
 slug: relay-tools
 ---
 
 # Relay tools
 
-CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent seventeen tools. Four search the session store. Thirteen are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
+CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent seventeen tools, and an eighteenth, `done`, that finishes a task with the evidence of its check. Four search the session store. Thirteen, and `done`, are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
 
 To add the server by hand in Claude Code:
 
@@ -18,7 +18,7 @@ claude mcp add --transport http ctrlb "<your CtrlB URL>/mcp" --header "Authoriza
 - Answers are compact JSON. Times are microseconds since the epoch.
 - Every tool takes an optional `dataset`: the sessions dataset, the workspace's `sessionsDataset` setting (`agent_sessions` unless changed) when left out.
 - The coordination tools come before a prose note (`post`): `handoff` to leave a task you hold to a named agent in one step, `ask` when you are blocked on something only another agent or the orchestrator can decide, `answer` to settle an open question by its id, `contract` when you finish an interface others will build on, and `contracts` before you build on another agent's interface. A note is for what none of them covers.
-- `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `task` and `contract` write. CtrlB registers them only when the server runs with write tools enabled (`MCP_WRITE_TOOLS_ENABLED`). If an agent has `peers` but no `claim`, ask your CtrlB administrator.
+- `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `task` and `contract` write, and so does `done`. CtrlB registers them only when the server runs with write tools enabled (`MCP_WRITE_TOOLS_ENABLED`). If an agent has `peers` but no `claim`, ask your CtrlB administrator.
 
 ## Run id and agent id
 
@@ -35,7 +35,7 @@ The plugin's `.mcp.json` and the Codex installer send both headers from the envi
 CtrlB Relay: your run id is <run> and your agent id is <agent>. ...
 ```
 
-A call with no run id answers `run_id is required: pass run_id, or connect with the X-CtrlB-Run header set`. `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `task` and `contract` need an agent too.
+A call with no run id answers `run_id is required: pass run_id, or connect with the X-CtrlB-Run header set`. `post`, `claim`, `release`, `done`, `handoff`, `ask`, `answer`, `brief`, `task` and `contract` need an agent too.
 
 ## Session store tools
 
@@ -206,6 +206,33 @@ Answer: `{released, finished, resource, key, message?, paths?}`. `paths` lists t
 
 If you claimed an absolute path with `cwd`, release it with the same `cwd`, or release the `key` the claim answered, for example `path:src/app.py`.
 
+`finished` is replaced by `done`: a release that finishes a task name answers `"deprecated": "finished is replaced by done(resource)"`, and a workspace that requires evidence refuses it with `"reason": "evidence_required"` and writes nothing. Finish tasks with `done`.
+
+#### done (finish a task)
+
+Finish a task you hold, when its test passes, and say what you checked. A task is finished only when the record shows what was checked.
+
+| Argument | |
+|---|---|
+| `resource` | Required. The task name as you claimed it. A file path is never done: release it (`a file path is never done: release it`). |
+| `evidence` | `{command, exit_code, summary}`: the test or check command you ran, its exit code, and one line of its output (at most 300 characters). Free text is kept as the summary. |
+| `cwd` | The working directory the claim was made with, if any. |
+| `run_id`, `agent` | Required, or from the headers. |
+
+```text
+done(resource="task 03 median", evidence={"command": "pytest -q tests/test_median.py", "exit_code": 0, "summary": "4 passed in 0.03s"})
+```
+
+Answer: `{done, resource, key, evidence?, finished_after_lease?, paths?, message?}`. `done: true` finishes the task: later claims are refused with `finished_by` unless they pass `reopen=true`, and its files are handed back with it (`paths`). The evidence is stored with the finish, and `tasks` and the run view show it.
+
+When the workspace requires evidence (the `evidenceRequired` setting), a done that does not name the command is refused, and nothing is written:
+
+```json
+{"done": false, "resource": "task 03 median", "key": "name:task 03 median", "reason": "evidence_required", "message": "say which command you ran and its exit code"}
+```
+
+Call `done` again with the command you ran. The Claude Code plugin remembers your last test command (`pytest`, `python -m unittest`, `go test`, `npm test`, `cargo test`, `make test`), its exit code and last output line, and quotes it after such a refusal so you can repeat the call with it; it never fills the evidence in for you. Codex gets the refusal only.
+
 ### handoff
 
 Hand a claim you hold to another agent of the run in one step. From then on it holds it, and you do not; no third agent can take it in between, as it could if you released it and the other agent claimed it.
@@ -300,7 +327,7 @@ The run's registered tasks and their state now.
 |---|---|
 | `run_id` | Optional, from the header. |
 
-Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round, ask_about?}]}`. `state` is `open`, `held` or `finished` in the task's current round; `ask_about` is what the task's owner wants its holder to ask about.
+Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round, ask_about?}]}`. `state` is `open`, `held` or `finished` in the task's current round; `ask_about` is what the task's owner wants its holder to ask about. Each task also carries `evidence` (`{command, exit_code, summary}`, what the `done` that finished it says was checked) when it was finished with evidence, and `stalled`: `true` when it is held (or its holder's lease ran out) and not finished, and its holder wrote nothing on it and edited none of its files for the workspace's `stallAfterSeconds` (300 by default). The run view counts them as `stalled_tasks`.
 
 ### contract
 

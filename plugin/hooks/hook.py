@@ -9,7 +9,8 @@ for _lib in (os.path.join(_HERE, '..', 'lib'), os.path.join(_HERE, '..', '..', '
         sys.path.insert(0, _lib)
         break
 import common, rows_claude  # noqa: E402
-from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, context as _context, decide, record_tokens, _tool_answer  # noqa: E402
+from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, context as _context, decide, record_tokens, _tool_answer,  # noqa: E402
+                          bash_result, evidence_hint, is_test_command, record_test)
 
 SYNC_S, ASYNC_S = 5, 90
 
@@ -44,16 +45,26 @@ def pre_tool(cfg, inp):
 
 
 def post_tool(cfg, inp):
-    """Decision 21: after a ctrlb claim, handoff or release, keep the agent's hold tokens for the pre-tool check.
-    Writes nothing to the transcript and prints nothing."""
+    """Decision 21: after a ctrlb claim, handoff, release or done, keep the agent's hold tokens for the pre-tool check.
+    Decision 30: after a test-looking Bash command, remember it, its exit code and last output line; after a done (or
+    a finished release) refused for evidence, return the context that quotes that command so the agent can call done
+    with it. Returns the hook output, or None (nothing printed)."""
     tool = inp.get('tool_name') or ''
-    if not tool.startswith('mcp__') or tool.rsplit('__', 1)[-1] not in ('claim', 'handoff', 'release'):
-        return []
     sid = inp.get('session_id') or ''
     args = inp.get('tool_input') if isinstance(inp.get('tool_input'), dict) else {}
-    run = args.get('run_id') or common.run_id(cfg, sid)
-    agent = args.get('agent') or common.agent_name(cfg, sid, inp.get('agent_id') or '')
-    return record_tokens(run, agent, tool, _tool_answer(inp.get('tool_response')))
+    own_run, own_agent = common.run_id(cfg, sid), common.agent_name(cfg, sid, inp.get('agent_id') or '')
+    if tool == 'Bash':
+        if is_test_command(args.get('command')):
+            code, line = bash_result(inp.get('tool_response'))
+            record_test(own_run, own_agent, args['command'], code, line)
+        return None
+    if not tool.startswith('mcp__') or tool.rsplit('__', 1)[-1] not in ('claim', 'handoff', 'release', 'done'):
+        return None
+    run = args.get('run_id') or own_run
+    agent = args.get('agent') or own_agent
+    answer = _tool_answer(inp.get('tool_response'))
+    record_tokens(run, agent, tool, answer)
+    return evidence_hint(run, agent, answer, inp.get('transcript_path') or '', keys=[(own_run, own_agent)])
 
 
 def _alarm(*_):
@@ -89,7 +100,7 @@ def main():
         upload(cfg, inp, ASYNC_S)
     elif mode == 'post-tool':
         try:
-            post_tool(cfg, inp)
+            out = post_tool(cfg, inp)
         except Exception as e:
             common.log(f"post-tool: {type(e).__name__}: {str(e)[:200]}")
     elif mode == 'pre-tool':
