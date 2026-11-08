@@ -32,8 +32,10 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
          "reason is belongs_to_task, the file comes with a registered task: claim that task (task in the answer) "
          "instead. If the claim answers ask_about, ask the task's owner about those before deciding them yourself. "
          "Work only while you hold it. When the task is done, release "
-         "it with finished=true. When the task's test passes, call done on the task name with the command you ran and "
-         "its result. A task is finished only when the record shows what was checked. A file that belongs to no task is claimed by its path. A shared thing that is not a "
+         "it with finished=true. Run the task's test command (tasks and claim show it as test); when it passes, call "
+         "done on the task name with that command, its exit code and its last output line as the evidence. When the "
+         "task has no test command, give the check you ran. A task is finished only when the record shows what was "
+         "checked. A file that belongs to no task is claimed by its path. A shared thing that is not a "
          "file, such as the dev server or a port, is claimed as slot:<name> and released when you are done with it. Use "
          "the coordination tools before a prose note: handoff when you must leave a task you hold, so it moves to the "
          "agent you name in one step; ask when you are blocked on something only another agent or the orchestrator "
@@ -259,9 +261,34 @@ def _epoch(ts):
         return 0.0
 
 
+# Seeker decision 32: an evidence_required refusal of a task with a test command carries it as "test", and its message
+# ends with this marker and the command.
+TASK_TEST_MARKER = "; the task's test command is: "
+
+
+def refusal_test(answer):
+    """The task's test command an evidence_required refusal quotes: its "test", else the end of its message after
+    TASK_TEST_MARKER. '' when it quotes none."""
+    test = answer.get('test')
+    if isinstance(test, str) and test.strip():
+        return test.strip()
+    msg = answer.get('message')
+    if isinstance(msg, str) and TASK_TEST_MARKER in msg:
+        return msg.rsplit(TASK_TEST_MARKER, 1)[1].strip()
+    return ''
+
+
+def names_test(command, test):
+    """Whether a command names the task's test (Seeker's rule: the test, each run of white space as one space,
+    appears in the command so spaced)."""
+    t = ' '.join((test or '').split())
+    return bool(t) and t in ' '.join((command or '').split())
+
+
 def evidence_hint(run, agent, answer, transcript='', keys=()):
     """When done (or a finished release) was refused for evidence, the PostToolUse output that shows the agent the
-    last test command it ran, so it can call done again with it. Never fills evidence in. None otherwise."""
+    task's test command when the refusal quotes one, else the last test command it ran, so it can call done again
+    with it. Never fills evidence in. None otherwise."""
     if not isinstance(answer, dict) or answer.get('reason') != 'evidence_required':
         return None
     found = None
@@ -279,12 +306,25 @@ def evidence_hint(run, agent, answer, transcript='', keys=()):
         found = seen
     resource = answer.get('resource') or answer.get('key') or '<the task name>'
     head = f'CtrlB Relay (run {run}): {resource} was not marked finished: this run requires evidence.'
+    test = refusal_test(answer)
+    if test and not (found and names_test(found.get('command'), test)):
+        # The task's own test wins over whatever the agent ran last.
+        ran = f" The last test command you ran, `{found['command']}`, is not it." if found else ''
+        return context('PostToolUse', f'{head} The task\'s test command is `{test}`.{ran} Run it; when it passes, call '
+                                      f'done(resource="{resource}", run_id="{run}", agent="{agent}", evidence={{"command": '
+                                      f'{json.dumps(test)}, "exit_code": <its exit code>, "summary": <its last output line>}}). '
+                                      f'Report only a check you ran.')
     if not found:
         return context('PostToolUse', f'{head} Run the task\'s test, then call done(resource="{resource}", run_id="{run}", '
                                       f'agent="{agent}", evidence={{"command": <the command>, "exit_code": <its exit code>, '
                                       f'"summary": <one line of its output>}}).')
     ev = {'command': found['command'], 'exit_code': found.get('exit_code'), 'summary': found.get('summary') or ''}
     said = f"`{found['command']}` (exit code {found.get('exit_code') if found.get('exit_code') is not None else 'unknown'})"
+    if test:
+        return context('PostToolUse', f'{head} The last test command you ran was {said}, the task\'s test. If it passed, '
+                                      f'call done(resource="{resource}", run_id="{run}", agent="{agent}", '
+                                      f'evidence={json.dumps(ev)}); otherwise fix the task and run it again. Report only '
+                                      f'a check you ran.')
     return context('PostToolUse', f'{head} The last test command you ran was {said}. If that is the task\'s check and it '
                                   f'passed, call done(resource="{resource}", run_id="{run}", agent="{agent}", '
                                   f'evidence={json.dumps(ev)}); otherwise run the task\'s test first. Report only a check '
