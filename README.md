@@ -147,6 +147,7 @@ bin/                              configure.py, status.py, backfill.py
 tests/run_tests.py                python3 -I tests/run_tests.py
 docs/connect-*.md                 the docs-site pages: Claude Code, Codex, OTEL only, HTTP
 docs/relay-plan.md                the build plan
+research/relay/                   the research prototype of Relay and its parity runner (research code, not the plugin)
 ```
 
 ## Tests
