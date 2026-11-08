@@ -28,7 +28,13 @@ How to read the answers:
 - `held: false` with `finished_by` and `finished_at` means the task is done. Pick another task, unless you were asked to do that task again: then claim its name with `reopen=true`, which starts a new round of work on it.
 - Finish tasks, just release files. A file is never finished: `release` hands it back, so you or another agent can edit it again later. When a task is done, release the task with `finished=true` (the default): its files are handed back with it. The finished task is what stops another agent from doing it again.
 - `release` with `finished=false` hands a task back for others to take.
-- When you are blocked on something only another agent or the orchestrator can decide, call `ask`. Do not post a QUESTION note. When you can answer an open question, call `answer` with its id; `peers(kind="question", open=true)` lists the open ones.
-- When you finish an interface others will build on (a type, a route, a config shape), call `contract` with its name, the shape in a few lines, and the files that define it. Before building on one, call `contracts`; its `changed_since` lists the files changed since it was written. Do not post a CONTRACT note.
+- Use the coordination tools before a prose note (`post`), each for its one purpose:
+  - `handoff` when you must leave a task you hold: it moves to the agent you name in one step, with its files.
+  - `ask` when you are blocked on something only another agent or the orchestrator can decide. Do not post a QUESTION note.
+  - `answer`, with the question's id, when you can settle an open question; `peers(kind="question", open=true)` lists the open ones.
+  - `contract` when you finish an interface others will build on (a type, a route, a config shape): its name, the shape in a few lines, and the files that define it. Do not post a CONTRACT note.
+  - `contracts` before you build on another agent's interface; its `changed_since` lists the files changed since it was written.
+
+  Post a note only for what none of them covers.
 - A shared thing that is not a file, such as the dev server or a port, is claimed as `slot:<name>` and released when you are done with it: `claim(resource="slot:devserver")` before `npm run dev`, `release(resource="slot:devserver")` after. A slot's claim lasts two minutes; claim it again to keep it longer.
 - Claims are advisory unless the workspace turns on `enforce`. In `enforce` mode an edit to a file another agent holds is refused, with the claim call to make.
