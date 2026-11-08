@@ -1220,19 +1220,24 @@ def test_wait_wording():
 
 
 def test_done_evidence(seeker):
-    """Seeker decisions 30 and 31: the v6 rule text tells the agent to call done with the command it ran; the
+    """Seeker decisions 30 to 32: the v7 rule text tells the agent to run the task's test command and give it, its
+    exit code and its last output line as the done evidence (the check it ran when the task has none); the
     PostToolUse hook remembers the agent's last test-looking Bash command, its exit code and last output line, and when
     done (or a finished release) is refused for evidence it quotes that command, without calling Seeker or filling the
-    evidence in; a done drops the agent's tokens like a release."""
+    evidence in, and prefers the task's test command when the refusal quotes it; a done drops the agent's tokens
+    like a release."""
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import hooks_shared as H
     rule = H.RELAY
-    v6 = ("When the task's test passes, call done on the task name with the command you ran and its result. "
-          "A task is finished only when the record shows what was checked.")
-    check('relay rule v6: call done with the command you ran; finished only when the record shows the check', v6 in rule)
-    check('relay rule v6: every earlier sentence kept', registered_rule(rule) and 'Claim with wait_s=30' in rule
+    v7 = ("Run the task's test command (tasks and claim show it as test); when it passes, call done on the task name "
+          "with that command, its exit code and its last output line as the evidence. When the task has no test "
+          "command, give the check you ran. A task is finished only when the record shows what was checked.")
+    check('relay rule v7: run the task\'s test command and give it as the done evidence; the check you ran when there is none',
+          v7 in rule)
+    check('relay rule v7: the v6 sentence is replaced', "call done on the task name with the command you ran and its result" not in rule)
+    check('relay rule v7: every earlier sentence kept', registered_rule(rule) and 'Claim with wait_s=30' in rule
           and 'If reason is belongs_to_task' in rule and 'changed_since_read' in rule and 'If the claim answers ask_about' in rule
-          and rule.index('release it with finished=true') < rule.index(v6))
+          and rule.index('release it with finished=true') < rule.index(v7))
     tests = ['pytest -q tests/test_x.py', 'python -m pytest', 'python3 -m unittest discover', 'cd app && go test ./...',
              'npm test', 'npm run test -- --watch=false', 'cargo test --quiet', 'make test', 'make -C sub test', 'python -m unittest -v']
     not_tests = ['ls -la', 'pip install pytest', 'npm install', 'cat pytest.ini', 'go build ./...', 'make build', 'git status']
@@ -1285,6 +1290,29 @@ def test_done_evidence(seeker):
     p, _ = hook('post-tool', done_in, fresh)
     check('post-tool done refused with no test run seen: tells the agent to run the test first',
           "Run the task's test, then call done(" in out_of(p).get('additionalContext', ''))
+    # Seeker decision 32: the refusal quotes the task's test command. It wins over a last test command that is not it.
+    task_test = 'python3 -m pytest tests/test_lat.py'
+    quoted = dict(refusal, test=task_test, message=refusal['message'] + "; the task's test command is: " + task_test)
+    p, _ = hook('post-tool', dict(done_in, transcript_path=tr, tool_response=[{'type': 'text', 'text': json.dumps(quoted)}]), env)
+    ctx = out_of(p).get('additionalContext', '')
+    check('post-tool done refused quoting the task\'s test: shows that test, not the last other test command',
+          f"The task's test command is `{task_test}`." in ctx and 'The last test command you ran, `go test ./...`, is not it.' in ctx
+          and f'"command": "{task_test}"' in ctx and '<its exit code>' in ctx, ctx[:400])
+    only_msg = dict(quoted)
+    del only_msg['test']
+    p, _ = hook('post-tool', dict(done_in, tool_response=[{'type': 'text', 'text': json.dumps(only_msg)}]), fresh)
+    ctx = out_of(p).get('additionalContext', '')
+    check('post-tool done refused: the test is read from the message when the answer has no test field',
+          f"The task's test command is `{task_test}`. Run it;" in ctx, ctx[:300])
+    hook('post-tool', dict(base, tool_name='Bash', tool_use_id='b3', tool_input={'command': 'cd /work/dash && ' + task_test + ' -q'},
+                           tool_response={'stdout': '...\n2 passed in 0.01s\n', 'stderr': ''}), fresh)
+    p, _ = hook('post-tool', dict(done_in, tool_response=[{'type': 'text', 'text': json.dumps(quoted)}]), fresh)
+    ctx = out_of(p).get('additionalContext', '')
+    check('post-tool done refused: a last test command that runs the task\'s test is quoted with its result',
+          f'`cd /work/dash && {task_test} -q` (exit code 0), the task\'s test' in ctx and '"summary": "2 passed in 0.01s"' in ctx, ctx[:400])
+    check('names_test: white space collapsed, a cd before and a flag after still match',
+          H.names_test('cd x &&  python3 -m pytest   tests/test_lat.py -q', task_test) and not H.names_test('python3 -I -c "x"', task_test)
+          and not H.names_test('pytest', ''))
     # A done that finished the task: no output, and the task's tokens are dropped like a release's.
     hook('post-tool', dict(base, tool_name='mcp__ctrlb__claim', tool_use_id='c1', tool_input={'resource': 'task 07 latency'},
                            tool_response=[{'type': 'text', 'text': json.dumps({'held': True, 'key': 'name:task 07 latency',
@@ -1308,9 +1336,15 @@ def test_done_evidence(seeker):
     skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
     check('relay skill: done with evidence, evidence_required', 'call `done`' in skill and '`evidence`' in skill
           and '`reason: evidence_required`' in skill)
+    check('relay skill: the task\'s test command shown by tasks and claim is the done evidence',
+          "Run the task's test command (`tasks` and `claim` show it as `test`)" in skill and 'give the check you ran' in skill
+          and 'When the refusal carries `test`' in skill)
     tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
     check('relay-tools: done, its evidence and refusal, stalled tasks', '#### done (finish a task)' in tools and '| `evidence` |' in tools
           and '"reason": "evidence_required"' in tools and '`stalled`' in tools)
+    check('relay-tools: task test, the claim and tasks answers, the refusal\'s test, evidence_matches_test',
+          '| `test` | Optional. The command that tests the task' in tools and '"test": "python3 -m pytest tests/test_median.py"' in tools
+          and "`test` when the task's registration names one" in tools and '`evidence_matches_test`' in tools and '`done_with_task_test`' in tools)
 
 
 def main():

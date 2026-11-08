@@ -178,6 +178,8 @@ Answer to a claim of a file that belongs to a registered task you do not hold:
 
 A held claim of a task whose registration lists `ask_about` answers them: `"ask_about": ["which date format the API returns"]`. Ask the task's owner about those before deciding them yourself.
 
+A held claim of a task whose registration names a test command answers it: `"test": "python3 -m pytest tests/test_median.py"`. Run it before you call `done`, and give it as the evidence's `command`.
+
 Answer to `claim(resource="slugify", reopen=true)` on that finished task:
 
 ```json
@@ -210,7 +212,7 @@ If you claimed an absolute path with `cwd`, release it with the same `cwd`, or r
 
 #### done (finish a task)
 
-Finish a task you hold, when its test passes, and say what you checked. A task is finished only when the record shows what was checked.
+Finish a task you hold, when its test passes, and say what you checked. Run the task's test command (`tasks` and `claim` show it as `test`) and give that command, its exit code and its last output line as the evidence; when the task has no test command, give the check you ran. A task is finished only when the record shows what was checked.
 
 | Argument | |
 |---|---|
@@ -220,18 +222,18 @@ Finish a task you hold, when its test passes, and say what you checked. A task i
 | `run_id`, `agent` | Required, or from the headers. |
 
 ```text
-done(resource="task 03 median", evidence={"command": "pytest -q tests/test_median.py", "exit_code": 0, "summary": "4 passed in 0.03s"})
+done(resource="task 03 median", evidence={"command": "python3 -m pytest tests/test_median.py", "exit_code": 0, "summary": "4 passed in 0.03s"})
 ```
 
-Answer: `{done, resource, key, evidence?, finished_after_lease?, paths?, message?}`. `done: true` finishes the task: later claims are refused with `finished_by` unless they pass `reopen=true`, and its files are handed back with it (`paths`). The evidence is stored with the finish, and `tasks` and the run view show it.
+Answer: `{done, resource, key, evidence?, finished_after_lease?, paths?, message?, test?}`. `done: true` finishes the task: later claims are refused with `finished_by` unless they pass `reopen=true`, and its files are handed back with it (`paths`). The evidence is stored with the finish, and `tasks` and the run view show it. A done whose command is not the task's test is still accepted; the run view records `evidence_matches_test: false` for it and counts the tasks finished with their own test as `done_with_task_test`.
 
 When the workspace requires evidence (the `evidenceRequired` setting), a done that does not name the command is refused, and nothing is written:
 
 ```json
-{"done": false, "resource": "task 03 median", "key": "name:task 03 median", "reason": "evidence_required", "message": "say which command you ran and its exit code"}
+{"done": false, "resource": "task 03 median", "key": "name:task 03 median", "reason": "evidence_required", "message": "say which command you ran and its exit code; the task's test command is: python3 -m pytest tests/test_median.py", "test": "python3 -m pytest tests/test_median.py"}
 ```
 
-Call `done` again with the command you ran. The Claude Code plugin remembers your last test command (`pytest`, `python -m unittest`, `go test`, `npm test`, `cargo test`, `make test`), its exit code and last output line, and quotes it after such a refusal so you can repeat the call with it; it never fills the evidence in for you. Codex gets the refusal only.
+`test` (and the end of the message) is the task's test command, when its registration names one: run it and call `done` again with it. Otherwise call `done` again with the command you ran. The Claude Code plugin remembers your last test command (`pytest`, `python -m unittest`, `go test`, `npm test`, `cargo test`, `make test`), its exit code and last output line, and quotes it after such a refusal so you can repeat the call with it; when the refusal carries the task's `test` and your last test command is not it, it shows the task's test instead and tells you to run it. It never fills the evidence in for you. Codex gets the refusal only.
 
 ### handoff
 
@@ -314,10 +316,11 @@ For an orchestrator: register a task of the run, with the files that come with i
 | `text` | Required. What the task is. Cut at 2,000 characters. |
 | `paths` | Required. The task's files, at least one, at most 32. |
 | `ask_about` | Optional. The facts or questions whoever takes the task should ask you about (at most 16). `tasks` and a held claim of the task show them. |
+| `test` | Optional. The command that tests the task, for example `python3 -m pytest tests/test_median.py` (one line, at most 500 bytes). `tasks` and a held claim of the task show it, and its holder gives it as `done`'s evidence. |
 | `cwd` | Your working directory, for absolute paths. |
 | `run_id`, `agent` | Required, or from the headers. |
 
-Answer: `{ok: true, run_id, agent, key, name, paths, ask_about?}`. Registering a name again replaces its text, files and `ask_about`.
+Answer: `{ok: true, run_id, agent, key, name, paths, ask_about?, test?}`. Registering a name again replaces its text, files, `ask_about` and `test`.
 
 ### tasks
 
@@ -327,7 +330,7 @@ The run's registered tasks and their state now.
 |---|---|
 | `run_id` | Optional, from the header. |
 
-Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round, ask_about?}]}`. `state` is `open`, `held` or `finished` in the task's current round; `ask_about` is what the task's owner wants its holder to ask about. Each task also carries `evidence` (`{command, exit_code, summary}`, what the `done` that finished it says was checked) when it was finished with evidence, and `stalled`: `true` when it is held (or its holder's lease ran out) and not finished, and its holder wrote nothing on it and edited none of its files for the workspace's `stallAfterSeconds` (300 by default). The run view counts them as `stalled_tasks`.
+Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round, ask_about?}]}`, and `test` when the task's registration names one. `state` is `open`, `held` or `finished` in the task's current round; `ask_about` is what the task's owner wants its holder to ask about; `test` is the command that tests the task. A finished task with a `test` also carries `evidence_matches_test`: whether its done's command named that test. Each task also carries `evidence` (`{command, exit_code, summary}`, what the `done` that finished it says was checked) when it was finished with evidence, and `stalled`: `true` when it is held (or its holder's lease ran out) and not finished, and its holder wrote nothing on it and edited none of its files for the workspace's `stallAfterSeconds` (300 by default). The run view counts them as `stalled_tasks`.
 
 ### contract
 
