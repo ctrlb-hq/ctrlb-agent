@@ -13,6 +13,8 @@ This directory is research code, not the plugin. Nothing in `plugin/`, `lib/`, `
 | `relay_proof.py` | the benchmark harness: Claude Code agents on a toy or DevBench task set, against Seeker, one trial at a time, per arm |
 | `run_swarm.py` | the earlier harness, which runs agents against the prototype; `relay_proof.py` reads its template, rules and `bash_writes` |
 | `stall_replay.py` | replays finished runs through Seeker's run view, to see the stall detector (decision 31) |
+| `run_benchmark.py` | the full benchmark (relay-benchmark-2026-11-09) as one queue of single `relay_proof.py` trials: groups of identical Relay settings, two lanes each, STATUS posts and a cost projection |
+| `bench_analyse.py` | the benchmark's tables from its trial files, with the duplicated-edit recount that leaves out Bash writes into a scratch copy |
 | `post_status.py` | posts a status note to a run on the lake, or reads the last notes back with `--tail` |
 | `dup_fix.py` | recounts duplicated work in finished `relay_proof.py` trials with `run_swarm.bash_writes` |
 | `test_bash_writes.py` | unit tests of `run_swarm.bash_writes` |

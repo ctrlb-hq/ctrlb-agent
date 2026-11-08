@@ -64,6 +64,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('runs', nargs='*')
     ap.add_argument('--step', type=int, default=30, help='seconds between replay points (default 30)')
+    ap.add_argument('--out', default=OUT, help='where to write the replay (default: OUT above)')
     ap.add_argument('--after', type=int, default=900, help='seconds past the run\'s last write to keep replaying (default 900)')
     a = ap.parse_args()
     if not os.environ.get('SEEKER_MCP_KEY'):
@@ -78,10 +79,10 @@ def main():
         when = ', '.join(f"{t['task']} ({t['holder']}) stalled from {t['stalled_since_s']} s, seen at {t['first_seen_s']} s"
                          + (' lease lapsed' if t['lease_lapsed'] else '') for t in r['tasks']) or 'none'
         print(f"{r['run_id']}: {r['stalls']} stalled task(s) over {r['duration_s']} s: {when}")
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    with open(OUT, 'w') as fh:
+    os.makedirs(os.path.dirname(a.out), exist_ok=True)
+    with open(a.out, 'w') as fh:
         json.dump(out, fh, indent=1)
-    print(f'wrote {OUT}')
+    print(f'wrote {a.out}')
 
 
 if __name__ == '__main__':

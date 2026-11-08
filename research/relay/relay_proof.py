@@ -45,8 +45,10 @@ PLUGIN = os.path.expanduser(os.environ.get('RELAY_PLUGIN') or os.path.join(HERE,
 OUT_ROOT = os.environ.get('RELAY_PROOF_OUT', os.path.join(HERE, 'results', 'relay-proof'))
 FEATURES = os.environ.get('RELAY_PROOF_FEATURES') or os.path.join(HERE, 'relay_proof_features.json')
 CLAUDE_PROJECTS = os.environ.get('CLAUDE_PROJECTS') or os.path.expanduser('~/.claude/projects')
-BASE = dict(sessionsDataset=DS, waitMs=20, leaseSeconds=600, enforce='enforce', holdRequired=False)
-SETTING_KEYS = ('sessionsDataset', 'waitMs', 'leaseSeconds', 'enforce', 'holdRequired')
+BASE = dict(sessionsDataset=DS, waitMs=20, leaseSeconds=600, enforce='enforce', holdRequired=False,
+            evidenceRequired=False, stallAfterSeconds=300)
+SETTING_KEYS = ('sessionsDataset', 'waitMs', 'leaseSeconds', 'enforce', 'holdRequired', 'evidenceRequired',
+                'stallAfterSeconds')
 SERVER = 'ctrlb'
 RELAY_TOOLS = ('peers', 'post', 'claim', 'release', 'handoff', 'ask', 'answer', 'brief', 'briefs', 'tasks', 'contract',
                'contracts')
@@ -63,13 +65,20 @@ TASK_TESTS = False
 
 SHIFT = (' You work a 4-minute shift. Before your 4 minutes are up, hand the task you hold to agent-2 with '
          'handoff(resource=<the task name>, to="agent-2"), post what is done and what is left on it, and stop.')
+# relay-benchmark arm 3: a 3-minute shift with leaseSeconds 600, so the task outlives its holder; the harness polls
+# the run detail for stalled tasks every 10 s (stall_poll)
+SHIFT3 = (' You work a 3-minute shift. Before your 3 minutes are up, hand the task you hold to agent-2 with '
+          'handoff(resource=<the task name>, to="agent-2"), post what is done and what is left on it, and stop.')
+# supplementary to arm 3: the toy pair finishes in 85-125 s, so a 3-minute shift never bites; a 1-minute shift does
+SHIFT1 = (' You work a 1-minute shift. Before your minute is up, hand the task you hold to agent-2 with '
+          'handoff(resource=<the task name>, to="agent-2"), post what is done and what is left on it, and stop.')
 ON = dict(relay=True, settings=dict(holdRequired=True))
 ARMS = {
     'solo': dict(agents=1, relay=False),
     'pair-none': dict(agents=2, relay=False, rule=rs.RULES['none']),
     'pair-relay': dict(agents=2, **ON),
     'quad-relay': dict(agents=4, **ON),
-    'questions': dict(agents=2, feature='questions', answer=True, **ON),
+    'questions': dict(agents=2, feature='questions', answer=True, ask_about=True, **ON),
     'questions-control': dict(agents=2, feature='questions', disallow=('ask',), **ON),
     'contracts': dict(agents=2, feature='contracts', **ON),
     'contracts-control': dict(agents=2, feature='contracts', disallow=('contract',), **ON),
@@ -77,6 +86,17 @@ ARMS = {
                     stop={'agent-1': 300}, extra={'agent-1': SHIFT}),
     'handoff-control': dict(agents=2, relay=True, settings=dict(holdRequired=True, leaseSeconds=60), feature='handoff',
                             stop={'agent-1': 240}),
+    'handoff3': dict(agents=2, relay=True, settings=dict(holdRequired=True, leaseSeconds=600), feature='handoff',
+                     stop={'agent-1': 240}, extra={'agent-1': SHIFT3}, stall_poll=True),
+    'handoff3-control': dict(agents=2, relay=True, settings=dict(holdRequired=True, leaseSeconds=600,
+                                                                 stallAfterSeconds=60), feature='handoff',
+                             stop={'agent-1': 180}, stall_poll=True),
+    'handoff1': dict(agents=2, relay=True, settings=dict(holdRequired=True, leaseSeconds=600, stallAfterSeconds=60),
+                     feature='handoff',
+                     stop={'agent-1': 90}, extra={'agent-1': SHIFT1}, stall_poll=True),
+    'handoff1-control': dict(agents=2, relay=True, settings=dict(holdRequired=True, leaseSeconds=600,
+                                                                 stallAfterSeconds=60), feature='handoff',
+                             stop={'agent-1': 60}, stall_poll=True),
     'fence-off': dict(agents=2, relay=True, settings=dict(holdRequired=False, leaseSeconds=60)),
     'fence-on': dict(agents=2, relay=True, settings=dict(holdRequired=True, leaseSeconds=60)),
 }
@@ -120,14 +140,17 @@ def put_settings(over):
     return {k: new.get(k) for k in SETTING_KEYS}
 
 
-def register(run_id, tasks, tests=None):
+def register(run_id, tasks, tests=None, ask_about=None):
     """One BRIEF per task name with its file, as the orchestrator (registered tasks; claims of them bundle the file).
-    tests ({task name: command}, --task-tests) adds each task's test command (Seeker decision 32)."""
+    tests ({task name: command}, --task-tests) adds each task's test command (Seeker decision 32); ask_about ({task
+    name: [text]}, the questions arm) what its holder should ask about (decision 29)."""
     keys = []
     for name, path, line in tasks:
         body = {'agent': ORCH, 'resource': name, 'text': line, 'paths': [path]}
         if tests and tests.get(name):
             body['test'] = tests[name]
+        if ask_about and ask_about.get(name):
+            body['ask_about'] = ask_about[name]
         st, ans = http('POST', run_path(run_id, '/briefs'), body)
         if st not in (200, 201) or ans.get('paths') != ['path:' + path]:
             raise RuntimeError(f'registering {name}: {st} {ans}')
@@ -317,7 +340,7 @@ def launch(arm, cfg, project, agent, n, run_id, cwd, home, model, max_turns):
                    CTRLB_MCP_URL=SEEKER + '/mcp?toolsets=agents')
         env.pop('CTRLB_OFF', None)
         env.pop('CTRLB_ENFORCE', None)
-        tools = RELAY_TOOLS + (('done',) if EVIDENCE_REQUIRED else ())
+        tools = RELAY_TOOLS + ('done',)  # the v7 text tells agents to call done, whether or not evidence is required
         allowed = BASE_TOOLS + ',' + ','.join(f'mcp__{SERVER}__{t}' for t in tools if t not in cfg.get('disallow', ()))
         cmd += ['--plugin-dir', PLUGIN, '--mcp-config', mcp, '--strict-mcp-config', '--allowedTools', allowed]
         if cfg.get('disallow'):
@@ -386,7 +409,7 @@ def text_of(c):
 
 def parse_stream(log):
     """session id, cost, turns, tool calls by name, whether a result line came, and post texts, from a stream log."""
-    out = dict(session_id='', cost_usd=None, turns=0, tools={}, result=False, posts=[], subtype='')
+    out = dict(session_id='', cost_usd=None, turns=0, tools={}, result=False, posts=[], subtype='', claims_with_wait=0)
     with open(log, errors='replace') as fh:
         for line in fh:
             try:
@@ -402,6 +425,8 @@ def parse_stream(log):
                         out['tools'][b['name']] = out['tools'].get(b['name'], 0) + 1
                         if b['name'] == f'mcp__{SERVER}__post':
                             out['posts'].append(str((b.get('input') or {}).get('text') or ''))
+                        if b['name'] == f'mcp__{SERVER}__claim' and (b.get('input') or {}).get('wait_s'):
+                            out['claims_with_wait'] += 1
             elif m.get('type') == 'result':
                 out.update(result=True, cost_usd=m.get('total_cost_usd'), turns=m.get('num_turns') or out['turns'],
                            subtype=m.get('subtype') or '')
@@ -442,8 +467,9 @@ def parse_transcript(path, cwd, files):
     """Timestamped file edits (applied or denied, with the hook's reason) and held claims, from a transcript."""
     real = os.path.realpath(cwd)
     calls, results = {}, {}
+    last = None
     if not path or not os.path.exists(path):
-        return dict(edits=[], claims=[])
+        return dict(edits=[], claims=[], last_ts=None)
     with open(path, errors='replace') as fh:
         for line in fh:
             try:
@@ -453,6 +479,8 @@ def parse_transcript(path, cwd, files):
             if rec.get('type') not in ('assistant', 'user'):
                 continue  # other record types repeat request content without a timestamp
             ts = ts_of(rec.get('timestamp'))
+            if ts and (last is None or ts > last):
+                last = ts
             for b in ((rec.get('message') or {}).get('content') or []) if isinstance(rec.get('message'), dict) else []:
                 if not isinstance(b, dict):
                     continue
@@ -488,7 +516,7 @@ def parse_transcript(path, cwd, files):
             edits.append(dict(ts=ts, tool=name, path=p, applied=not err, denied=denied))
     edits.sort(key=lambda e: e['ts'] or 0)
     claims.sort(key=lambda c: c['ts'] or 0)
-    return dict(edits=edits, claims=claims)
+    return dict(edits=edits, claims=claims, last_ts=last)
 
 
 # ---------------------------------------------------------------- the orchestrator inside a trial
@@ -500,8 +528,10 @@ class Orchestrator:
         self.cfg, self.project, self.feat, self.run_id, self.cwd, self.t0 = cfg, project, feat, run_id, cwd, t0
         self.questions = {}      # id -> record
         self.prd_change = None   # record of the contracts change
-        self.next_q = self.next_c = 0.0
+        self.next_q = self.next_c = self.next_s = 0.0
         self.errors = []
+        self.stall_seen = {}     # task key -> first reading with stalled true (stall_poll arms)
+        self.stall_polls = 0
 
     def prepare(self):
         """Before the agents start: remove the fact (questions arms)."""
@@ -529,6 +559,9 @@ class Orchestrator:
             if f == 'contracts' and self.prd_change is None and now >= self.next_c:
                 self.next_c = now + 5
                 self.maybe_change_prd(now)
+            if self.cfg.get('stall_poll') and now >= self.next_s:
+                self.next_s = now + 10
+                self.poll_stalls(now)
         except Exception as e:  # noqa: BLE001  (one failed poll is recorded, the trial goes on)
             self.errors.append(f'{round(now - self.t0)}s {type(e).__name__}: {str(e)[:200]}')
 
@@ -553,6 +586,22 @@ class Orchestrator:
                     rec['answered_at_s'] = round(rec['answered_at'] - self.t0, 1)
                 else:
                     self.errors.append(f'answer {qid}: {st} {a}')
+
+    def poll_stalls(self, now):
+        """The run detail's stalled detector as of now (decision 31): the first reading of each stalled task."""
+        st, d = http('GET', run_path(self.run_id), query={'from': int((self.t0 - 600) * 1e6),
+                                                          'to': int((now + 60) * 1e6)})
+        if st != 200:
+            raise RuntimeError(f'run detail {st}')
+        self.stall_polls += 1
+        for x in (d.get('detectors') or {}).get('stalled') or []:
+            rec = self.stall_seen.setdefault(x.get('key'), dict(task=x.get('task'), holder=x.get('holder'),
+                                                                first_seen=now, first_seen_s=round(now - self.t0, 1),
+                                                                last_activity=x.get('last_activity'),
+                                                                last_activity_ts=x.get('last_activity_ts'),
+                                                                stalled_s=x.get('stalled_s')))
+            if x.get('lease_lapsed') and 'lease_lapsed_seen_s' not in rec:
+                rec['lease_lapsed_seen_s'] = round(now - self.t0, 1)
 
     def maybe_change_prd(self, now):
         c = self.feat['contracts']
@@ -611,8 +660,16 @@ def trial(arm, spec, k, model, budget_min, max_turns):
             give_task_tests(project, cwd, tests)
             res['task_tests'] = {name: cmd for name, (cmd, _) in tests.items()}
             res['task_tests_missing'] = sorted(name for name, _, _ in project['tasks'] if name not in tests)
+        ask = {}
+        if cfg.get('ask_about') and feat.get('questions'):
+            q = feat['questions']
+            holders = set(q.get('holders') or [])
+            text = q.get('ask_about') or ('the default reading speed (words per minute) used when none is given: '
+                                          'ask the orchestrator, it is not in the docs')
+            ask = {name: [text] for name, path, _ in project['tasks'] if path in holders}
+            res['ask_about'] = ask
         res['registered'] = len(register(run_id, project['tasks'],
-                                         {name: cmd for name, (cmd, _) in tests.items()})) if cfg['relay'] else 0
+                                         {name: cmd for name, (cmd, _) in tests.items()}, ask)) if cfg['relay'] else 0
         orch = Orchestrator(cfg, project, feat, run_id, cwd, time.time())
         orch.prepare()
         t0 = orch.t0 = time.time()
@@ -679,6 +736,15 @@ def trial(arm, spec, k, model, budget_min, max_turns):
     # agents saw (done, and a finished release) in their stream logs.
     res['evidence_refusals'] = sum(evidence_refusals(os.path.join(cwd, f'.log-{p.name}.jsonl')) for p in procs)
     res['run_detail_status'] = st
+    if cfg.get('stall_poll'):
+        last = {a: (timeline.get(a) or {}).get('last_ts') for a in agents}
+        seen = []
+        for key, r in orch.stall_seen.items():
+            g = last.get(r.get('holder'))
+            seen.append(dict(r, key=key, holder_last_activity_s=round(g - t0, 1) if g else None,
+                             detect_after_last_activity_s=round(r['first_seen'] - g, 1) if g else None))
+        res['stall'] = dict(polls=orch.stall_polls, seen=seen, agents_last_activity_s={
+            a: (round(v - t0, 1) if v else None) for a, v in last.items()})
     res['abandoned'], res['abandoned_per_agent'] = abandonment(res)
     per_task = res['score'].get('per_task') or {}
     res['questions']['tasks_needing_fact_passed'] = {t: per_task.get(t) for t in res['questions']['tasks_needing_fact']}
@@ -844,6 +910,14 @@ def analyse(cfg, project, feat, agents, per_agent, timeline, detail, rows, orch,
         run_detail_check_events=sum(1 for e in events if e.get('kind') == 'check'),
         run_detail_resources_held=sum(1 for r in detail.get('resources') or [] if r.get('holds')),
         wait_s_total=run.get('wait_s_total'), hot_keys=detail.get('hot_keys') or [],
+        served_waits=run.get('served_waits'), served_wait_s_total=run.get('served_wait_s_total'),
+        timed_out_waits=len({r.get('nonce') for r in good if r.get('kind') == 'RELEASE'
+                             and (r.get('text') or '') == 'timed_out'}),
+        claims_with_wait=sum(per_agent[a].get('claims_with_wait', 0) for a in agents),
+        claims_held=run.get('claims_held'), claims_refused=run.get('claims_refused'),
+        done_with_task_test=run.get('done_with_task_test'),
+        relay_rows_compact=[{k: r.get(k) for k in ('_timestamp', 'agent', 'kind', 'key', 'nonce', 'held_by', 'to')}
+                            | {'text': (r.get('text') or '')[:200]} for r in good],
         # decisions 30 and 31 (None from a Seeker without them)
         done_with_evidence=run.get('done_with_evidence'), done_without=run.get('done_without'),
         stalled_tasks=run.get('stalled_tasks'), stalled=(detail.get('detectors') or {}).get('stalled'),
@@ -883,7 +957,9 @@ NUMERIC = ('unit_pass', 'accept_pass', 'duplicated_n', 'redone_share', 'edits_un
            'edits_unheld_applied', 'edits_on_lapsed_lease_applied', 'edits_after_refusal_and_reclaim', 'cost_usd',
            'wall_s', 'turns', 'src_files_written', 'holds', 'dependent_old_pass', 'dependent_new_pass',
            'provider_old_pass', 'provider_new_pass', 'done_with_evidence', 'done_without', 'stalled_tasks',
-           'evidence_refusals', 'finished_with_command_and_exit')
+           'evidence_refusals', 'finished_with_command_and_exit', 'served_waits', 'served_wait_s_total',
+           'wait_s_total', 'timed_out_waits', 'claims_with_wait', 'claims_held', 'claims_refused',
+           'done_with_task_test')
 
 
 def stats(xs):
