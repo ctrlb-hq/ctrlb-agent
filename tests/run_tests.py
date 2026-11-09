@@ -460,6 +460,11 @@ def test_hooks(seeker):
     check('no planted secret reaches Seeker (body and command)', not leaked and len(seeker.rows) == 3,
           f'leaked {leaked}' if leaked else f"{sent.count('[REDACTED]')} redactions")
     check('non-secret token counts kept', '\\"input_tokens\\": 1234' in sent)
+    import redact as _redact
+    pre = [_redact.redact(t)[1] for t in ('aws_secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"',
+                                          'db_password: hunter2hunter', 'password=$PW', 'api_key=<your key>',
+                                          'the access key rotation doc')]
+    check('prefixed lower-case secret assignments are redacted (round 8: aws_secret_access_key = "...")', pre == [1, 1, 0, 0, 0], str(pre))
 
     # user_name comes only from the key's own user (its email claim); CTRLB_USER is the agent label
     seeker.reset()
