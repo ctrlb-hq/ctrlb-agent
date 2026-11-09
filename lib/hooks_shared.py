@@ -23,9 +23,13 @@ SUBAGENT = ("You are a subagent of session {sid}. That session's full record, in
             "decided, is searchable with the ctrlb tools (search_sessions with session_id {sid}, fetch_records, "
             "next_actions). Search it before exploring files or rerunning commands.")
 
+# Rule text v10 (round 8): claim(next=true) first, done with next=true, peers only to wait; the REGISTRY.md sentence
+# is gone (the hooks claim autoSlots files, decision 47); helper files go to the run's scratch directory (decision D).
 RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other agents in this run may be working in "
          "the same files. Pass run_id=\"{run}\" and agent=\"{agent}\" to the ctrlb relay tools (peers, post, claim, "
-         "release, handoff, ask, answer, brief, briefs, tasks, contract, contracts). Claim the task by the name your orchestrator registered (for example "
+         "release, handoff, ask, answer, brief, briefs, tasks, contract, contracts). Start with `claim(next=true)`. When "
+         "your test passes, call `done` with the evidence and `next=true`. Call `peers` only when you are waiting for an "
+         "answer or a handoff. Claim the task by the name your orchestrator registered (for example "
          "claim(resource=\"task 03 median\"); tasks lists them). Its files come with it. If held is false with "
          "finished_by, the task is done; if held is false with held_by, another agent has it: pick another. If a claim "
          "is refused and the answer lists free tasks, claim one of them next. If the list is empty, post a note saying "
@@ -38,9 +42,7 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
          "it with finished=true. Run the task's test command (tasks and claim show it as test); when it passes, call "
          "done on the task name with that command, its exit code and its last output line as the evidence. When the "
          "task has no test command, give the check you ran. A task is finished only when the record shows what was "
-         "checked. A file that belongs to no task is claimed by its path. Edit REGISTRY.md only between "
-         "claim(resource=\"slot:REGISTRY.md\", paths=[\"REGISTRY.md\"]) and its release, in the same turn; if it is "
-         "held, go on with your task and try again later. A shared thing that is not a "
+         "checked. A file that belongs to no task is claimed by its path. A shared thing that is not a "
          "file, such as the dev server or a port, is claimed as slot:<name> and released when you are done with it. Use "
          "the coordination tools before a prose note: handoff when you must leave a task you hold, so it moves to the "
          "agent you name in one step; ask when you are blocked on something only another agent or the orchestrator "
@@ -49,7 +51,7 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
          "lines and the files that define it. Before you build on a contract, read it with `contracts`. If it is "
          "stale, read the file it names and check your assumptions against it. Post a note "
          "only for what none of them covers. If you were asked to do a finished task again, claim its name with "
-         "reopen=true.")
+         "reopen=true. Put helper scripts and binaries in the scratch directory {scratch}, not in /tmp.")
 
 
 # Seeker decision 33: a hold whose holder has stopped is taken over, not waited out.

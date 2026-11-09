@@ -5,11 +5,16 @@ codex/install.py writes the [[hooks.*]] tables that call it. Output shapes are C
 hookSpecificOutput.additionalContext, and on PreToolUse permissionDecision "deny" with a permissionDecisionReason.
 
 A hook never fails or blocks a session: every error goes to ~/.ctrlb/hooks.log and the hook exits 0. pre-tool fails
-open (no output) on any error and gives up after two seconds."""
+open (no output) on any error and gives up after two seconds.
+
+Round 8 (docs/relay-hooks.md): session-start creates the run's scratch directory and, in a relay run (CTRLB_RUN), adds
+the record block (decision 45). Codex gets no spawn registration (decision 43), no artefact posting (decision 44) and
+no autoSlots (decision 47): its hooks have no sub-agent tool input to read and no hook after a tool call, so a slot
+claimed before a patch could not be released after it."""
 import json, os, signal, sys, time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
-import common, rows_codex  # noqa: E402
+import common, relay_hooks, rows_codex  # noqa: E402
 from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, context, decide  # noqa: E402
 
 SYNC_S, ASYNC_S = 5, 90
@@ -98,13 +103,22 @@ def main():
     if mode == 'session-start':
         run, parent = session_run(cfg, sid, inp.get('transcript_path'))
         head = SUBAGENT.format(sid=parent) if parent else RECALL.format(sid=sid)
-        out = context('SessionStart', head + '\n\n' + RELAY.format(run=run, agent=rows_codex.agent_for(cfg, sid, parent)))
+        agent = rows_codex.agent_for(cfg, sid, parent)
+        scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
+        text = head + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
+        try:      # decision 45: a relay run's session starts with the record
+            block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
+        except Exception as e:
+            common.log(f"codex session-start record: {type(e).__name__}: {str(e)[:200]}")
+            block = ''
+        out = context('SessionStart', text + ('\n\n' + block if block else ''))
     elif mode == 'subagent-start':
         upload(cfg, [inp.get('transcript_path')], SYNC_S - 1, event, sid)
         run, _ = session_run(cfg, sid, inp.get('transcript_path'))
         sub = inp.get('agent_id') or ''
         agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid)
-        out = context('SubagentStart', SUBAGENT.format(sid=sid) + '\n\n' + RELAY.format(run=run, agent=agent))
+        out = context('SubagentStart', SUBAGENT.format(sid=sid) + '\n\n'
+                      + RELAY.format(run=run, agent=agent, scratch=common.scratch_dir(cfg, run)))
     elif mode == 'flush':
         upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
     elif mode == 'session-end':
