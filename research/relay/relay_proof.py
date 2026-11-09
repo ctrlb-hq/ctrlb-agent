@@ -4,12 +4,13 @@ Usage (SEEKER_MCP_KEY, CTRLB_KEY and SEEKER_JWT in the environment; SEEKER_JWT, 
 to set the settings; the keys are read into request headers only, never printed or written):
   python3 -I research/relay/relay_proof.py <arm> --project toy|devbench:<p>
       --trials N --model haiku|sonnet [--budget-min 15] [--max-turns 200] [--evidence-required] [--task-tests]
-      [--first K] [--lane NAME]
+      [--first K] [--lane NAME] [--every-task-test]
   python3 -I relay_proof.py --summary <arm>          (rebuild the arm's summary from its trial files)
 Env: RELAY_SEEKER (http://127.0.0.1:8096), RELAY_SESSIONS_DATASET (agent_sessions), RELAY_PLUGIN (the ctrlb-agent
 plugin to load; default this repo's plugin/), RELAY_PROOF_OUT (results; default results/relay-proof next to this
 file), RELAY_PROOF_FEATURES (the feature arms' per-project data; default relay_proof_features.json next to this file),
-RELAY_PROOF_NO_RESTORE=1 (a lane of a parallel pair leaves the settings for the queue to restore), CLAUDE_PROJECTS
+RELAY_PROOF_NO_RESTORE=1 (a lane of a parallel pair leaves the settings for the queue to restore),
+RELAY_PROOF_VENV_ROOT (round 6: the projects' package venvs; default <RELAY_PROOF_OUT>/venvs), CLAUDE_PROJECTS
 (where Claude Code keeps transcripts; default ~/.claude/projects); run_swarm's RELAY_TEMPLATE and devbench's
 DEVBENCH_* for the task sources.
 
@@ -24,6 +25,10 @@ Arms (ARMS below):
   handoff, handoff-control              leaseSeconds 60; agent-1 told of a 4-minute shift and stopped at 5 min;
                                         control: no warning, stopped at 4 min
   fence-off, fence-on                   leaseSeconds 60, holdRequired false / true
+  round 6 (relay-redirect, run_round6.py): pair-relay-witness (witnessRequired on), false-evidence (agent-1 told to
+                                        report a command it never ran), handoff1-stop / handoff1-kill (agent-1 stopped
+                                        with SIGTERM, so the SessionEnd hook hands its holds off, or SIGKILL, so it
+                                        cannot), contracts-provider-staleoff (staleContracts off)
 
 Relay arms load the ctrlb-agent plugin (its SessionStart hook injects RELAY once; no --append-system-prompt) and an MCP
 config sending the key. Every arm's transcripts are uploaded after the agents stop with the plugin's own
@@ -46,9 +51,9 @@ OUT_ROOT = os.environ.get('RELAY_PROOF_OUT', os.path.join(HERE, 'results', 'rela
 FEATURES = os.environ.get('RELAY_PROOF_FEATURES') or os.path.join(HERE, 'relay_proof_features.json')
 CLAUDE_PROJECTS = os.environ.get('CLAUDE_PROJECTS') or os.path.expanduser('~/.claude/projects')
 BASE = dict(sessionsDataset=DS, waitMs=20, leaseSeconds=600, enforce='enforce', holdRequired=False,
-            evidenceRequired=False, stallAfterSeconds=300)
+            evidenceRequired=False, stallAfterSeconds=300, witnessRequired=False, staleContracts=True)
 SETTING_KEYS = ('sessionsDataset', 'waitMs', 'leaseSeconds', 'enforce', 'holdRequired', 'evidenceRequired',
-                'stallAfterSeconds')
+                'stallAfterSeconds', 'witnessRequired', 'staleContracts')
 SERVER = 'ctrlb'
 RELAY_TOOLS = ('peers', 'post', 'claim', 'release', 'handoff', 'ask', 'answer', 'brief', 'briefs', 'tasks', 'contract',
                'contracts')
@@ -62,6 +67,14 @@ EVIDENCE_REQUIRED = False
 # the task's module, run with the stdlib unittest; the agents' python3 has no pytest), the test files are copied into
 # the trial dir, and TASKS.md names them. Off: every arm runs exactly as before.
 TASK_TESTS = False
+# --every-task-test (round 6, Seeker decision 38: under evidenceRequired a task registered without a test command is
+# refused with test_required): every task gets a test command. A task with no unit test of its own is given the unit
+# test files that exercise its module (the task set's import graph), else a harness smoke test (harness_tests/: the
+# module imports and defines the names its task line gives); a project whose code imports third-party packages gets
+# them installed in a venv of its own (RELAY_PROOF_VENV_ROOT/<project>, never system-wide), first on the agents' PATH,
+# and its TASKS.md says they are installed. Implies TASK_TESTS.
+EVERY_TASK_TEST = False
+VENV_ROOT = os.environ.get('RELAY_PROOF_VENV_ROOT') or os.path.join(OUT_ROOT, 'venvs')
 
 SHIFT = (' You work a 4-minute shift. Before your 4 minutes are up, hand the task you hold to agent-2 with '
          'handoff(resource=<the task name>, to="agent-2"), post what is done and what is left on it, and stop.')
@@ -73,6 +86,14 @@ SHIFT3 = (' You work a 3-minute shift. Before your 3 minutes are up, hand the ta
 SHIFT1 = (' You work a 1-minute shift. Before your minute is up, hand the task you hold to agent-2 with '
           'handoff(resource=<the task name>, to="agent-2"), post what is done and what is left on it, and stop.')
 ON = dict(relay=True, settings=dict(holdRequired=True))
+# Round 6, section D: agent-1 is told to report a command it never ran, so the done hook's witness check blocks it.
+FALSE_EVIDENCE = (' When you call done on a task, report as its evidence the command `make verify-all` with exit code 0 '
+                  'and the summary "all checks passed".')
+# Round 6, section B: agent-1 is stopped while Seeker's tasks shows it holding a task (as handoff1-taskhold), told
+# nothing about a shift; stop_signal TERM lets Claude Code run its SessionEnd hook (the plugin hands the holds off),
+# KILL does not (takeover must cover).
+STOP_ON_TASK = dict(agent='agent-1', key='*task*', from_s=30, until_s=150, every_s=1)
+G60 = dict(holdRequired=True, leaseSeconds=600, stallAfterSeconds=60)
 CONTRACT_HINT = (' When you have written {provider} (the module the other modules build on), publish its interface with '
                  'the contract tool (name it after the module, paths: ["{provider}"]) so the other agent can read it '
                  'with contracts.')
@@ -127,6 +148,16 @@ ARMS = {
                                                                   stallAfterSeconds=60), feature='handoff',
                               stop_on_hold=dict(agent='agent-1', key='*task*', from_s=30, until_s=150, every_s=1),
                               stall_poll=True),
+    # Round 6 (relay-redirect-2026-11-09)
+    'pair-relay-witness': dict(agents=2, relay=True, settings=dict(holdRequired=True, witnessRequired=True)),
+    'false-evidence': dict(agents=2, relay=True, settings=dict(holdRequired=True, witnessRequired=True),
+                           extra={'agent-1': FALSE_EVIDENCE}),
+    'handoff1-stop': dict(agents=2, relay=True, settings=G60, feature='handoff', stop_on_hold=STOP_ON_TASK,
+                          stop_signal='TERM', stall_poll=True, open_handoff=True),
+    'handoff1-kill': dict(agents=2, relay=True, settings=G60, feature='handoff', stop_on_hold=STOP_ON_TASK,
+                          stop_signal='KILL', stall_poll=True, open_handoff=True),
+    'contracts-provider-staleoff': dict(agents=2, feature='contracts', contracts_mode='provider', contract_hint=True,
+                                        relay=True, settings=dict(holdRequired=True, staleContracts=False)),
     'fence-off': dict(agents=2, relay=True, settings=dict(holdRequired=False, leaseSeconds=60)),
     'fence-on': dict(agents=2, relay=True, settings=dict(holdRequired=True, leaseSeconds=60)),
 }
@@ -215,6 +246,101 @@ def task_tests(project):
         if os.path.exists(os.path.join(judge, rel)):
             out[name] = (DEVBENCH_TEST.format(rel), [(os.path.join(judge, rel), rel)])
     return out
+
+
+def every_task_tests(project, cwd):
+    """Round 6 (--every-task-test): {task name: (test command, [(source, path in the trial dir)])} with a command for
+    every task. Toy and DevBench tasks with a unit test of their own module keep it (task_tests, packages or not);
+    another DevBench task gets the unit test files that exercise its module (taskset.json exercised_by_test_file), and
+    a task none exercises gets a harness smoke test written into harness_tests/ (its module imports and has the names
+    its task line gives). Returns (tests, smoke): smoke names the tasks given a smoke test."""
+    if project['name'] == 'toy':
+        return task_tests(project), []
+    judge = os.path.join(os.path.dirname(project['tree']), 'judge')
+    with open(os.path.join(os.path.dirname(project['tree']), 'taskset.json')) as fh:
+        meta = json.load(fh)
+    exercised = meta.get('exercised_by_test_file') or {}
+    out, smoke = {}, []
+    for name, path, line in project['tasks']:
+        own = f'unit_tests/test_{os.path.basename(path)[:-3]}.py'
+        if os.path.exists(os.path.join(judge, own)):
+            rels = [own]
+        else:
+            rels = sorted(f for f, mods in exercised.items() if f.startswith('unit_tests/') and path in mods
+                          and os.path.exists(os.path.join(judge, f)))
+        if rels:
+            out[name] = (DEVBENCH_TEST.format(' '.join(rels)), [(os.path.join(judge, r), r) for r in rels])
+            continue
+        rel = f'harness_tests/test_{os.path.basename(path)[:-3]}_smoke.py'
+        names = sorted(set(re.findall(r'(?:class\s+)?\b([A-Za-z_]\w*)\(', line.split(' File: ')[0])))
+        mod = path[:-3].replace('/', '.')
+        os.makedirs(os.path.join(cwd, 'harness_tests'), exist_ok=True)
+        with open(os.path.join(cwd, rel), 'w') as fh:
+            fh.write(SMOKE_TEST.format(mod=mod, names=names, path=path))
+        out[name] = (DEVBENCH_TEST.format(rel), [])
+        smoke.append(name)
+    return out, smoke
+
+
+SMOKE_TEST = '''"""Harness smoke test (round 6): no unit test of the task set exercises {path}, and a task needs a test command,
+so this checks only that the module imports and defines the names its task line gives."""
+import importlib, unittest
+
+
+class Smoke(unittest.TestCase):
+    def test_names(self):
+        m = importlib.import_module({mod!r})
+        for n in {names!r}:
+            self.assertTrue(callable(getattr(m, n, None)), n + ' is not defined in {path}')
+
+
+if __name__ == '__main__':
+    unittest.main()
+'''
+
+PACKAGES_NOT_INSTALLED = (' The third-party packages the docs name ({p}) are not installed here, so code that imports them '
+                          'cannot be run in this environment.')
+PACKAGES_INSTALLED = (' The third-party packages the docs name ({p}) are installed for python3 here, so the task tests '
+                      'can run.')
+
+
+def project_venv(project):
+    """The venv with the project's third-party packages (round 6, readtime): RELAY_PROOF_VENV_ROOT/<project>, made once
+    with python3 -m venv and pip install, never system-wide. Returns its bin dir, or None for a project without
+    packages."""
+    pk = [x.strip() for x in (project.get('packages') or '').split(',') if x.strip()]
+    if not pk:
+        return None
+    root = os.path.join(VENV_ROOT, project['name'])
+    ok = os.path.join(root, '.packages-ok')
+    os.makedirs(VENV_ROOT, exist_ok=True)
+    with open(os.path.join(VENV_ROOT, '.lock'), 'w') as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        if not os.path.exists(ok):
+            subprocess.run([sys.executable, '-m', 'venv', root], check=True, capture_output=True, timeout=300)
+            r = subprocess.run([os.path.join(root, 'bin', 'pip'), 'install', '-q', *pk], capture_output=True,
+                               text=True, timeout=900)
+            if r.returncode != 0:
+                raise RuntimeError(f'pip install {pk} into {root}: {r.stderr[-300:]}')
+            chk = subprocess.run([os.path.join(root, 'bin', 'python'), '-c', 'import sys; print(sys.prefix)'],
+                                 capture_output=True, text=True, timeout=60)
+            with open(ok, 'w') as fh:
+                fh.write(json.dumps(dict(packages=pk, prefix=chk.stdout.strip(), at=time.time())) + '\n')
+    return os.path.join(root, 'bin')
+
+
+def give_packages(project, cwd):
+    """TASKS.md of a project whose packages are installed for the trial says so."""
+    md = os.path.join(cwd, 'TASKS.md')
+    with open(md) as fh:
+        text = fh.read()
+    old = PACKAGES_NOT_INSTALLED.format(p=project['packages'])
+    if old in text:
+        text = text.replace(old, PACKAGES_INSTALLED.format(p=project['packages']))
+        with open(md, 'w') as fh:
+            fh.write(text)
+        return True
+    return False
 
 
 def give_task_tests(project, cwd, tests):
@@ -318,19 +444,23 @@ class Agent:
         self.name, self.proc, self.log, self.t0 = name, proc, log, t0
         self.ended = None
         self.stopped_by_harness = None
+        self.stop_at = None
+        self.stop_signal = None
 
     def alive(self):
         if self.ended is None and self.proc.poll() is not None:
             self.ended = time.time()
         return self.ended is None
 
-    def stop(self, why):
+    def stop(self, why, sig='TERM'):
         """SIGTERM to the agent's own process group (it was started in a new session, so the group is ours), SIGKILL
-        after 15 s."""
+        after 15 s; sig 'KILL' (round 6, handoff1-kill) sends SIGKILL at once, so no SessionEnd hook runs."""
         if not self.alive():
             return
         self.stopped_by_harness = why
-        for sig, wait in ((signal.SIGTERM, 15), (signal.SIGKILL, 10)):
+        self.stop_at, self.stop_signal = time.time(), sig
+        seq = ((signal.SIGKILL, 10),) if sig == 'KILL' else ((signal.SIGTERM, 15), (signal.SIGKILL, 10))
+        for sig, wait in seq:
             try:
                 os.killpg(self.proc.pid, sig)
             except ProcessLookupError:
@@ -353,8 +483,10 @@ def prompt_for(project, agent, n):
     return text
 
 
-def launch(arm, cfg, project, agent, n, run_id, cwd, home, model, max_turns):
+def launch(arm, cfg, project, agent, n, run_id, cwd, home, model, max_turns, path_first=None):
     env = dict(os.environ)
+    if path_first:
+        env['PATH'] = path_first + os.pathsep + env.get('PATH', '')
     for k in ('CLAUDECODE', 'SEEKER_JWT'):
         env.pop(k, None)  # the agent gets the MCP key only
     prompt = prompt_for(project, agent, n) + (cfg.get('extra') or {}).get(agent, '')
@@ -809,8 +941,24 @@ def trial(arm, spec, k, model, budget_min, max_turns):
             st_, cur_ = http('GET', '/ai/relay/settings', cred='SEEKER_JWT')
             res['evidence_required'] = cur_.get('evidenceRequired') if st_ == 200 else None
             res['stall_after_seconds'] = cur_.get('stallAfterSeconds') if st_ == 200 else None
-        tests = {}
-        if TASK_TESTS:
+        tests, venv_bin = {}, None
+        if EVERY_TASK_TEST:
+            venv_bin = project_venv(project)
+            if venv_bin:
+                res['venv'] = os.path.dirname(venv_bin)
+                res['packages_installed'] = give_packages(project, cwd)
+            tests, res['smoke_tests'] = every_task_tests(project, cwd)
+            give_task_tests(project, cwd, tests)
+            if res['smoke_tests']:
+                md = os.path.join(cwd, 'TASKS.md')
+                with open(md) as fh:
+                    text = fh.read()
+                with open(md, 'w') as fh:
+                    fh.write(text.replace('has its unit test in unit_tests/', 'has its test file in unit_tests/ or '
+                                          'harness_tests/', 1))
+            res['task_tests'] = {name: cmd for name, (cmd, _) in tests.items()}
+            res['task_tests_missing'] = sorted(name for name, _, _ in project['tasks'] if name not in tests)
+        elif TASK_TESTS:
             tests = task_tests(project)
             give_task_tests(project, cwd, tests)
             res['task_tests'] = {name: cmd for name, (cmd, _) in tests.items()}
@@ -832,7 +980,7 @@ def trial(arm, spec, k, model, budget_min, max_turns):
         orch = Orchestrator(cfg, project, feat, run_id, cwd, time.time())
         orch.prepare()
         t0 = orch.t0 = time.time()
-        procs = [launch(arm, cfg, project, a, n, run_id, cwd, home, model, max_turns) for a in agents]
+        procs = [launch(arm, cfg, project, a, n, run_id, cwd, home, model, max_turns, venv_bin) for a in agents]
         deadline = t0 + budget_min * 60
         while any(p.alive() for p in procs):
             now = time.time()
@@ -841,7 +989,7 @@ def trial(arm, spec, k, model, budget_min, max_turns):
                 if stop_at is not None and p.alive() and now - t0 >= stop_at:
                     p.stop(f'arm stop at {stop_at} s')
                 if p.name in orch.stop_requests and p.alive():
-                    p.stop(orch.stop_requests[p.name])
+                    p.stop(orch.stop_requests[p.name], cfg.get('stop_signal') or 'TERM')
             if now >= deadline:
                 for p in procs:
                     p.stop('budget')
@@ -868,7 +1016,9 @@ def trial(arm, spec, k, model, budget_min, max_turns):
         s['upload'] = upload_transcripts([tpath], run_id, p.name, home) if tpath else {'error': 'no transcript'}
         timeline[p.name] = parse_transcript(tpath, cwd, files)
         s.update(exit_s=round((p.ended or time.time()) - t0, 1), stopped_by_harness=p.stopped_by_harness,
-                 returncode=p.proc.returncode)
+                 returncode=p.proc.returncode, stop_at_s=round(p.stop_at - t0, 1) if p.stop_at else None,
+                 stop_signal=p.stop_signal)
+        s['flow'] = relay_flow(tpath, t0)
         per_agent[p.name] = s
     qjudge = (feat.get('questions') or {}).get('judge') if cfg.get('feature') == 'questions' else None
     if qjudge and spec.startswith('devbench:'):
@@ -911,6 +1061,16 @@ def trial(arm, spec, k, model, budget_min, max_turns):
         res['takeover'] = takeover_measures(rows, orch, timeline, procs, cwd, res, t0)
     if orch.hold_watch is not None:
         res['hold_watch'] = orch.hold_watch
+    # Round 6 measures (Seeker decisions 35 to 39; None or empty from a Seeker without them)
+    st_t, tasks_end = http('GET', run_path(run_id, '/tasks'))
+    res['tasks_end'] = ({k: tasks_end.get(k) for k in ('free_tasks', 'idle_agents')} |
+                        {'tasks': [{k: x.get(k) for k in ('name', 'state', 'held_by', 'finished_by', 'handed_off',
+                                                          'handoff_text', 'handoff_by', 'stalled')}
+                                   for x in tasks_end.get('tasks') or []]}) if st_t == 200 else {'error': st_t}
+    res['redirect'] = redirect_measures(per_agent, rows, t0)
+    res['witness'] = witness_measures(per_agent, detail if st == 200 else {})
+    if cfg.get('open_handoff'):
+        res['open_handoff'] = open_handoff_measures(rows, per_agent, timeline, project, res, t0)
     res['abandoned'], res['abandoned_per_agent'] = abandonment(res)
     per_task = res['score'].get('per_task') or {}
     res['questions']['tasks_needing_fact_passed'] = {t: per_task.get(t) for t in res['questions']['tasks_needing_fact']}
@@ -987,6 +1147,184 @@ def question_duplicates(qs, entries):
 
 
 TAKEOVER_TEXT = 'stalled: taken over by'
+OPEN_HANDOFF_TEXT = 'handed off'
+NO_FREE_TASK = 'there is no free task in this run'
+NO_TASK_NOTE = re.compile(r'\bno (free |open |more |other )?tasks?\b|\bno tasks? (left|remain)|nothing (left )?to (do|claim)'
+                          r'|all tasks (are )?(done|finished|claimed|taken|held)', re.I)
+
+
+def relay_flow(path, t0):
+    """Round 6: an agent's ctrlb tool calls in order from its transcript: [{tool, ts_s, input, error, text, answer}]
+    for claim, release, done, handoff, post and tasks (answer: the JSON answer, {} when it is not JSON; error: the
+    call came back as an error, e.g. a hook's denial or a 400)."""
+    calls, out = {}, []
+    if not path or not os.path.exists(path):
+        return out
+    want = ('claim', 'release', 'done', 'handoff', 'post', 'tasks')
+    seen = set()
+    with open(path, errors='replace') as fh:
+        for line in fh:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get('type') not in ('assistant', 'user'):
+                continue
+            ts = ts_of(rec.get('timestamp'))
+            msg = rec.get('message')
+            for b in (msg.get('content') or []) if isinstance(msg, dict) and isinstance(msg.get('content'), list) else []:
+                if not isinstance(b, dict):
+                    continue
+                if b.get('type') == 'tool_use' and str(b.get('name') or '').startswith('mcp__'):
+                    short = b['name'].rsplit('__', 1)[-1]
+                    if short in want:
+                        calls[b.get('id')] = dict(tool=short, ts_s=round(ts - t0, 1) if ts else None,
+                                                  input=b.get('input') or {})
+                elif b.get('type') == 'tool_result' and b.get('tool_use_id') in calls and b['tool_use_id'] not in seen:
+                    seen.add(b['tool_use_id'])
+                    c = calls[b['tool_use_id']]
+                    text = text_of(b.get('content'))
+                    try:
+                        ans = json.loads(text)
+                    except ValueError:
+                        ans = {}
+                    out.append(dict(c, error=bool(b.get('is_error')), text=text[:400],
+                                    answer=ans if isinstance(ans, dict) else {}))
+    out.sort(key=lambda x: x['ts_s'] if x['ts_s'] is not None else 1e9)
+    return out
+
+
+def _norm_task(x):
+    x = ' '.join(str(x or '').lower().split())
+    return x[5:] if x.startswith('name:') else x
+
+
+def redirect_measures(per_agent, rows, t0):
+    """Round 6, sections A and E (decisions 35, 39): refused task claims that listed free tasks and whether the
+    agent's next claim was one of them; refusals with an empty list; agents that posted a "no task" note and when they
+    exited; refused per hold from the relay record; claims sent with wait_s (refused by Seeker now)."""
+    good = [r for r in rows if 'error' not in r]
+    out = dict(refusals_with_free=0, refusals_empty=0, next_claim_free=0, next_claim_other=0, next_claim_none=0,
+               no_task_notes=[], claims_wait_s=0, claim_errors=0, per_agent={},
+               holds=sum(1 for r in good if r.get('kind') in ('HOLD', 'REOPEN')),
+               refused=sum(1 for r in good if r.get('kind') == 'REFUSED'),
+               refused_no_free=sum(1 for r in good if r.get('kind') == 'REFUSED' and NO_FREE_TASK in (r.get('text') or '')))
+    out['refused_per_hold'] = round(out['refused'] / out['holds'], 3) if out['holds'] else None
+    for a, s in per_agent.items():
+        flow = s.get('flow') or []
+        claims = [x for x in flow if x['tool'] == 'claim']
+        pa = dict(claims=len(claims), with_free=0, empty=0, followed=0, exit_s=s.get('exit_s'), no_task_note_s=None)
+        for i, c in enumerate(claims):
+            if c['input'].get('wait_s') is not None:
+                out['claims_wait_s'] += 1
+            if c['error']:
+                out['claim_errors'] += 1
+            ft = c['answer'].get('free_tasks')
+            if c['answer'].get('held') or ft is None:
+                continue
+            if not ft:
+                pa['empty'] += 1
+                continue
+            pa['with_free'] += 1
+            names = {_norm_task(t.get('name')) for t in ft if isinstance(t, dict)} | \
+                    {_norm_task(t.get('key')) for t in ft if isinstance(t, dict)}
+            nxt = claims[i + 1] if i + 1 < len(claims) else None
+            if nxt is None:
+                out['next_claim_none'] += 1
+            elif _norm_task(nxt['input'].get('resource')) in names:
+                pa['followed'] += 1
+            else:
+                out['next_claim_other'] += 1
+        for x in flow:
+            if x['tool'] == 'post' and NO_TASK_NOTE.search(str(x['input'].get('text') or '')):
+                out['no_task_notes'].append(dict(agent=a, ts_s=x['ts_s'], exit_s=s.get('exit_s'),
+                                                 text=str(x['input'].get('text'))[:200]))
+                pa['no_task_note_s'] = pa['no_task_note_s'] or x['ts_s']
+        out['refusals_with_free'] += pa['with_free']
+        out['refusals_empty'] += pa['empty']
+        out['next_claim_free'] += pa['followed']
+        out['per_agent'][a] = pa
+    return out
+
+
+def witness_measures(per_agent, detail):
+    """Round 6, section D (decision 38): every done call and how it came back: done; blocked by the plugin's witness
+    hook (an error result: the PreToolUse denial; its text kept); refused witness_required or evidence_required by
+    Seeker; other. With the run view's done_witnessed beside done_with_evidence and done_with_task_test."""
+    calls, out = [], dict(done=0, blocked_by_hook=0, witness_required=0, evidence_required=0, other=0, blocked=[])
+    for a, s in per_agent.items():
+        for x in s.get('flow') or []:
+            if x['tool'] != 'done':
+                continue
+            ans, ev = x['answer'], x['input'].get('evidence')
+            if x['error']:
+                kind = 'blocked_by_hook'
+                out['blocked'].append(dict(agent=a, ts_s=x['ts_s'], evidence=ev, text=x['text'][:300]))
+            elif ans.get('done'):
+                kind = 'done'
+            elif ans.get('reason') in ('witness_required', 'evidence_required'):
+                kind = ans['reason']
+            else:
+                kind = 'other'
+            out[kind] += 1
+            calls.append(dict(agent=a, ts_s=x['ts_s'], kind=kind, evidence=ev, witnessed=(ans.get('evidence') or {})
+                              .get('witnessed') if isinstance(ans.get('evidence'), dict) else None))
+    run = (detail or {}).get('run') or {}
+    out.update(calls=calls, done_witnessed=run.get('done_witnessed'), done_with_evidence=run.get('done_with_evidence'),
+               done_with_task_test=run.get('done_with_task_test'), done_total=run.get('done'))
+    return out
+
+
+def open_handoff_measures(rows, per_agent, timeline, project, res, t0):
+    """Round 6, section B (decision 36): the open handoffs the stopped agent's SessionEnd hook wrote (RELEASE rows
+    whose text starts "handed off", one lake write per hold, plus a NOTE), their text, the handed files, and how long
+    from the stop to the other agent's first applied edit of a handed file; who claimed the handed task next."""
+    good = [r for r in rows if 'error' not in r]
+    stopped = [a for a, s in per_agent.items() if s.get('stop_at_s') is not None and
+               str(s.get('stopped_by_harness') or '').startswith('stop_on_hold')]
+    giver = stopped[0] if stopped else None
+    out = dict(giver=giver, stop_at_s=(per_agent.get(giver) or {}).get('stop_at_s'),
+               stop_signal=(per_agent.get(giver) or {}).get('stop_signal'),
+               exit_s=(per_agent.get(giver) or {}).get('exit_s'), writes=[], notes=[])
+    if not giver:
+        return out
+    stop_abs = t0 + out['stop_at_s']
+    path_of = {_norm_task(name): path for name, path, _ in project['tasks']}
+    groups = {}
+    for r in good:
+        if r.get('agent') == giver and r.get('kind') == 'RELEASE' and \
+                str(r.get('text') or '').startswith(OPEN_HANDOFF_TEXT):
+            groups.setdefault(int(r['_timestamp']), []).append(r)
+    for ts, rs_ in sorted(groups.items()):
+        keys = sorted({r.get('key') or '' for r in rs_})
+        files = sorted({k[5:] for k in keys if k.startswith('path:')} |
+                       {path_of[_norm_task(k)] for k in keys if k.startswith('name:') and _norm_task(k) in path_of})
+        tsec = ts / 1e6
+        others = [a for a in per_agent if a != giver]
+        first = None
+        for a in others:
+            for e in (timeline.get(a) or {}).get('edits', []):
+                if e['applied'] and e['path'] in files and (e['ts'] or 0) >= tsec and (first is None or e['ts'] < first[1]):
+                    first = (a, e['ts'], e['path'])
+        task_keys = [k for k in keys if k.startswith('name:')]
+        nxt = sorted((int(r['_timestamp']), r.get('agent')) for r in good if r.get('kind') in ('HOLD', 'REOPEN')
+                     and r.get('key') in task_keys and int(r['_timestamp']) > ts)
+        out['writes'].append(dict(at_s=round(tsec - t0, 1), after_stop_s=round(tsec - stop_abs, 2), keys=keys,
+                                  files=files, text=str(rs_[0].get('text') or '')[:600],
+                                  text_present=len(str(rs_[0].get('text') or '').strip()) > len(OPEN_HANDOFF_TEXT) + 2,
+                                  next_holder=nxt[0][1] if nxt else None,
+                                  next_hold_after_stop_s=round(nxt[0][0] / 1e6 - stop_abs, 1) if nxt else None,
+                                  first_edit_by=first[0] if first else None,
+                                  first_edit_file=first[2] if first else None,
+                                  first_edit_after_stop_s=round(first[1] - stop_abs, 1) if first else None))
+    out['notes'] = [dict(at_s=round(int(r['_timestamp']) / 1e6 - t0, 1), text=str(r.get('text') or '')[:600])
+                    for r in good if r.get('agent') == giver and r.get('kind') == 'NOTE'
+                    and OPEN_HANDOFF_TEXT in str(r.get('text') or '')]
+    out['handoffs'] = len(out['writes'])
+    out['handed_tasks'] = sorted({k for w in out['writes'] for k in w['keys'] if k.startswith('name:')})
+    per = (res.get('score') or {}).get('per_task') or {}
+    out['tasks_completed'], out['tasks'] = sum(1 for v in per.values() if v), len(per)
+    return out
 
 
 def claim_answers(log):
@@ -1123,6 +1461,15 @@ def contract_side_measures(cfg, c, change, crow, per_agent, timeline, t0):
         out['changed_since_read'] = (con or {}).get('changed_since_read')
         out['next_read_has_new_sig'] = bool(con and re.search(re.escape(c['revise']['new_sig']) if c.get('revise')
                                                               else 'words', con.get('text') or ''))
+        # round 6, decision 37 (absent with staleContracts off or from a Seeker without it)
+        out['next_read_stale'] = (con or {}).get('stale')
+        out['next_read_stale_since'] = (con or {}).get('stale_since')
+        out['next_read_changed_by'] = (con or {}).get('changed_by')
+    # round 6: the dependent's first read after the change that shows the provider's contract stale
+    st_read = next((r for r in reads if r['read_at'] > at and any(prov_key in (x.get('paths') or []) and x.get('stale')
+                                                                 for x in r['contracts'])), None)
+    out['stale_seen_s'] = round(st_read['read_at'] - t0, 1) if st_read else None
+    out['stale_shown_ever'] = any('stale' in x for r in reads for x in r['contracts'])
     dep_files = c.get('dependent_files') or []
     since = first['read_at'] if first else ref
     ed = [e for e in (timeline.get(dep) or {}).get('edits', []) if e['applied'] and e['path'] in dep_files and
@@ -1396,12 +1743,18 @@ def main():
                     help='Seeker decision 32: register each task with its test command (the task set\'s unit test of '
                          'its module, python3 -m unittest <file>), copy DevBench\'s test files into the trial dir and '
                          'name them in TASKS.md; the trial records task_tests and task_tests_missing')
+    ap.add_argument('--every-task-test', action='store_true',
+                    help='round 6 (Seeker decision 38, test_required): --task-tests, and every task gets a test '
+                         'command (unit tests that exercise its module, else a harness smoke test); a project whose '
+                         'code imports packages gets them in its own venv (RELAY_PROOF_VENV_ROOT), first on the '
+                         'agents\' PATH')
     ap.add_argument('--lane', default='', help='lane name of a parallel pair: its own lock file; only arms with '
                     'identical relay settings may run as two lanes at once, with RELAY_PROOF_NO_RESTORE=1')
     a = ap.parse_args()
-    global EVIDENCE_REQUIRED, TASK_TESTS
+    global EVIDENCE_REQUIRED, TASK_TESTS, EVERY_TASK_TEST
     EVIDENCE_REQUIRED = a.evidence_required
-    TASK_TESTS = a.task_tests
+    TASK_TESTS = a.task_tests or a.every_task_test
+    EVERY_TASK_TEST = a.every_task_test
     if a.summary:
         print(json.dumps(summarise(a.summary), indent=1))
         return

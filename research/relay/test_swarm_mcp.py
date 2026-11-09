@@ -4,9 +4,10 @@
           belongs_to_task decision on its cases with a claim (decision 27), DONE rows with evidence folding as without
           (decision 30), the takeover decision and the edit check on its takeover and check cases (decision 33), and
           relay_paths.key on every case of tests/fixtures/keys.json
-  live    claim, release, reopen, the read-your-write guard, the late finish, waiting in line (wait_s) and registered
-          tasks (belongs_to_task), done with evidence, takeover of a stalled hold (decision 33) against the lake (stream
-          swarm_board, a fresh run id); skipped when the lake does not answer
+  live    claim, release, reopen, the read-your-write guard, the late finish, the redirect to free tasks and the refusal
+          of wait_s on claim (decision 35), the open handoff (decision 36), registered tasks (belongs_to_task), done
+          with evidence, takeover of a stalled hold (decision 33) against the lake (stream swarm_board, a fresh run id);
+          skipped when the lake does not answer
 
 Usage: FIXTURES=<seeker>/tests/fixtures python3 -I test_swarm_mcp.py
   FIXTURES   Seeker's tests/fixtures (default: ../../../seeker/tests/fixtures, a Seeker checkout beside this repo)
@@ -385,65 +386,70 @@ class Live(unittest.TestCase):
         self.assertEqual(self.as_agent('c', M.contracts, ['seeker-4 routes'])['contracts'][0]['changed_since'],
                          ['path:internal/api/router.go'])
 
-    def test_wait_served_after_release(self):
-        """Decision 25: a waiter stays in line and is held once the holder releases; a served wait writes no REFUSED."""
-        self.assertTrue(self.as_agent('a', M.claim, 'task wait')['held'])
-        t0 = time.time()
-        waiter = self.spawn('b', 'claim', resource='task wait', wait_s=20)
-        time.sleep(1.0)
-        rel = self.as_agent('a', M.release, 'task wait', False)
-        self.assertEqual((rel['released'], rel['finished']), (1, False))
-        got = self.result(waiter)
-        self.assertEqual((got['held'], got.get('held_by'), got.get('reason')), (True, None, None), got)
-        self.assertGreaterEqual(got['waited_ms'], 800)
-        self.assertLess(time.time() - t0, 15)
+    def test_redirect_free_tasks(self):
+        """Decision 35: a refused claim of a registered task names the holder and since and lists the free tasks (no
+        live hold, not finished) with their paths and test; with none free the list is empty and the message (and the
+        REFUSED row) says there is no free task; a finished task's refusal lists them too."""
+        for n in ('1', '2', '3'):
+            M.task(f'task r{n}', f'redirect {n}', [f'src/r{n}.py'], test=f'pytest tests/test_r{n}.py')
         time.sleep(0.05)
-        self.assertEqual(self.rows_of('name:task wait', 'REFUSED'), [])
-        self.assertTrue(self.as_agent('b', M.claim, 'task wait').get('renewed'))
-
-    def test_wait_times_out_with_position(self):
-        """Decision 25: a second waiter whose wait_s runs out is refused timed_out with held_by and its position,
-        after a RELEASE (text timed_out) and a REFUSED row; the first waiter is then served in order."""
-        self.assertTrue(self.as_agent('a', M.claim, 'src/wait.py')['held'])
-        first = self.spawn('b', 'claim', resource='src/wait.py', wait_s=30)
-        time.sleep(1.0)
-        second = self.spawn('c', 'claim', resource='src/wait.py', wait_s=2)
-        got = self.result(second)
-        self.assertEqual((got['held'], got.get('reason'), got.get('held_by'), got.get('position')),
-                         (False, 'timed_out', 'a', 3), got)
-        self.assertGreaterEqual(got['waited_ms'], 1500)
+        held = self.as_agent('a', M.claim, 'task r1')
+        self.assertTrue(held['held'])
+        got = self.as_agent('b', M.claim, 'task r1')
+        self.assertEqual((got['held'], got.get('held_by')), (False, 'a'))
+        self.assertIsInstance(got.get('since'), int)
+        self.assertEqual(got['free_tasks'], [
+            dict(name='task r2', key='name:task r2', paths=['path:src/r2.py'], test='pytest tests/test_r2.py'),
+            dict(name='task r3', key='name:task r3', paths=['path:src/r3.py'], test='pytest tests/test_r3.py')])
+        self.assertTrue(self.as_agent('b', M.claim, 'task r2')['held'])
+        self.assertTrue(self.as_agent('c', M.claim, 'task r3')['held'])
         time.sleep(0.05)
-        rel = [r for r in self.rows_of('path:src/wait.py', 'RELEASE') if r['agent'] == 'c']
-        self.assertEqual([r.get('text') for r in rel], ['timed_out'])
-        ref = self.rows_of('path:src/wait.py', 'REFUSED')
-        self.assertEqual([(r['agent'], r.get('held_by')) for r in ref], [('c', 'a')])
-        self.as_agent('a', M.release, 'src/wait.py', False)
-        got = self.result(first)
-        self.assertTrue(got['held'], got)
-        self.assertGreaterEqual(got['waited_ms'], 1500)
+        got = self.as_agent('d', M.claim, 'task r1')
+        self.assertEqual((got['held'], got.get('free_tasks')), (False, []))
+        self.assertIn(M.NO_FREE_TASK, got['message'])
+        time.sleep(0.05)
+        ref = [r for r in self.rows_of('name:task r1', 'REFUSED') if r['agent'] == 'd']
+        self.assertIn(M.NO_FREE_TASK, ref[0]['text'])
+        self.assertTrue(self.as_agent('a', M.done, 'task r1', {'command': 'pytest tests/test_r1.py', 'exit_code': 0})['done'])
+        self.as_agent('c', M.release, 'task r3', False)
+        time.sleep(0.05)
+        got = self.as_agent('d', M.claim, 'task r1')
+        self.assertEqual((got.get('finished_by'), [t['name'] for t in got.get('free_tasks', [])]), ('a', ['task r3']))
+        # A refused claim of a bare file lists no free tasks.
+        self.assertTrue(self.as_agent('a', M.claim, 'docs/free.md')['held'])
+        self.assertNotIn('free_tasks', self.as_agent('b', M.claim, 'docs/free.md'))
 
-    def test_wait_ends_finished(self):
-        """Decision 25: a DONE while the claim waits ends it refused with finished_by."""
-        self.assertTrue(self.as_agent('a', M.claim, 'task wait done')['held'])
-        waiter = self.spawn('b', 'claim', resource='task wait done', wait_s=20)
-        time.sleep(1.0)
-        self.assertTrue(self.as_agent('a', M.release, 'task wait done', True)['finished'])
-        got = self.result(waiter)
-        self.assertEqual((got['held'], got.get('finished_by')), (False, 'a'), got)
+    def test_claim_refuses_wait_s(self):
+        """Decision 35: claims do not wait; a claim that sends wait_s is an error naming peers."""
+        with self.assertRaises(ValueError) as e:
+            self.as_agent('a', M.claim, 'task nowait', wait_s=30)
+        self.assertIn('use peers with wait_s', str(e.exception))
+        p = self.spawn('a', 'claim', resource='task nowait', wait_s=30)
+        with p.stdout:
+            out = json.loads(p.stdout.read())
+        p.wait(30)
+        self.assertTrue(out['result']['isError'])
+        self.assertIn('wait_s is no longer accepted on claim', out['result']['content'][0]['text'])
+        self.assertNotIn('wait_s', M.ALL['claim']['properties'])
 
-    def test_wait_capped(self):
-        real = M.MAX_WAIT_S
-        M.MAX_WAIT_S = 1
-        try:
-            self.assertTrue(self.as_agent('a', M.claim, 'task cap')['held'])
-            t0 = time.time()
-            got = self.as_agent('b', M.claim, 'task cap', wait_s=300)
-        finally:
-            M.MAX_WAIT_S = real
-        self.assertEqual((got['held'], got.get('reason'), got.get('position')), (False, 'timed_out', 2), got)
-        self.assertLess(time.time() - t0, 5)
-        with self.assertRaises(ValueError):
-            self.as_agent('b', M.claim, 'task cap', wait_s=-1)
+    def test_open_handoff(self):
+        """Decision 36: a handoff with no receiver releases our holds on the task and its files (text 'handed off: ...')
+        and writes a NOTE with the text, in one write; the next claim of the task is served as for a released key."""
+        M.task('task oh', 'open handoff', ['src/oh.py'])
+        time.sleep(0.05)
+        self.assertTrue(self.as_agent('a', M.claim, 'task oh')['held'])
+        time.sleep(0.05)
+        got = self.as_agent('a', M.handoff, 'task oh', '', 'edited src/oh.py; tests fail on empty input')
+        self.assertEqual((got['handed'], got.get('open'), got.get('paths')), (True, True, ['path:src/oh.py']))
+        time.sleep(0.05)
+        for k in ('name:task oh', 'path:src/oh.py'):
+            rel = self.rows_of(k, 'RELEASE')
+            self.assertEqual([r.get('text') for r in rel], ['handed off: edited src/oh.py; tests fail on empty input'], k)
+            self.assertEqual(M.read_key(M.hold_rows(k), M.now_us(), M.LEASE_S, k)['live'], [], k)
+        note = self.rows_of('name:task oh', 'NOTE')
+        self.assertEqual([r.get('text') for r in note], ['handed off task oh: edited src/oh.py; tests fail on empty input'])
+        got = self.as_agent('b', M.claim, 'task oh')
+        self.assertEqual((got['held'], got.get('paths')), (True, ['path:src/oh.py']))
 
     def test_belongs_to_task(self):
         """Decision 27: a bare claim of a file registered to a task is refused with the task's name unless the caller

@@ -19,6 +19,9 @@ This directory is research code, not the plugin. Nothing in `plugin/`, `lib/`, `
 | `round5_analyse.py` | round 5's tables (takeovers, path holds, contracts beside the benchmark's, Sonnet turns and cost, cost and wall) from its trial files |
 | `overhead.py` | the overhead accounting of the benchmark's pair cells: extra turns (and cost) per tool, Relay minus no Relay |
 | `test_round5.py` | offline tests of round 5's measures (takeovers, contract triggers and reads, question duplicates by `ask_about` entry) |
+| `run_round6.py` | round 6 (relay-redirect-2026-11-09): redirect and swarm sizing (`pair-relay` hone and readtime, `quad-relay` hone, Sonnet `pair-relay` readtime), witnessed evidence (`pair-relay-witness`, `false-evidence`), handoff by the SessionEnd hook (`handoff1-stop` with SIGTERM, `handoff1-kill` with SIGKILL) and stale contracts (`contracts-provider`, `contracts-provider-staleoff`), one trial at a time in groups of identical settings, every task registered with a test command (`--every-task-test`; readtime's packages in a venv of its own), with a cost projection after the first cell and a stop above $40 |
+| `round6_analyse.py` | round 6's tables (A/E redirect, B hook handoffs, C stale contracts, D witnessed done, F REGISTRY.md turns, the overhead accounting on the Sonnet cell, cost and wall) beside the benchmark's and round 5's |
+| `test_round6.py` | offline tests of round 6's measures and tables on synthetic transcripts, stream logs and trial files |
 | `post_status.py` | posts a status note to a run on the lake, or reads the last notes back with `--tail` |
 | `dup_fix.py` | recounts duplicated work in finished `relay_proof.py` trials with `run_swarm.bash_writes` |
 | `test_bash_writes.py` | unit tests of `run_swarm.bash_writes` |

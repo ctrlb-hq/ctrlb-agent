@@ -1,4 +1,4 @@
-"""Every ctrlb-agent hook for Codex. Usage: hook.py <session-start|subagent-start|flush|upload|pre-tool>, with the
+"""Every ctrlb-agent hook for Codex. Usage: hook.py <session-start|subagent-start|flush|upload|session-end|pre-tool>, with the
 hook's JSON on stdin (Codex 0.166: session_id, transcript_path, cwd, hook_event_name; agent_id and
 agent_transcript_path on subagent events and on tool calls inside a subagent; tool_name and tool_input on PreToolUse).
 codex/install.py writes the [[hooks.*]] tables that call it. Output shapes are Claude Code's, which Codex accepts:
@@ -13,6 +13,28 @@ import common, rows_codex  # noqa: E402
 from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, context, decide  # noqa: E402
 
 SYNC_S, ASYNC_S = 5, 90
+HANDOFF_S = 0.8
+# Codex has no hook after a tool call, so the hook keeps no record of edits or tests: its open handoff says so.
+CODEX_HANDOFF_TEXT = 'Session ended (Codex: the hook keeps no record of edits or tests; read the task\'s files and notes).'
+
+
+def session_end(cfg, inp):
+    """Seeker decision 36 for Codex: in a relay run (CTRLB_RUN set), hand off every hold the agent still has, in one
+    write (common.handoff_all). Seeker unreachable or an error: nothing is written."""
+    if not cfg.get('run'):
+        return None
+    sid = inp.get('session_id') or ''
+    run, parent = session_run(cfg, sid, inp.get('transcript_path'))
+    agent = rows_codex.agent_for(cfg, sid, parent)
+    if not run or not agent:
+        return None
+    try:
+        ans = common.handoff_all(cfg, run, agent, CODEX_HANDOFF_TEXT, inp.get('cwd') or '', timeout=HANDOFF_S)
+    except Exception as e:
+        common.log(f"codex session-end handoff {run}/{agent}: {type(e).__name__}: {str(e)[:200]}")
+        return None
+    common.log(f"codex session-end handoff {run}/{agent}: handed={ans.get('handed')} released={ans.get('released')}")
+    return ans
 
 
 def upload(cfg, paths, budget, event, sid):
@@ -84,6 +106,12 @@ def main():
         agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid)
         out = context('SubagentStart', SUBAGENT.format(sid=sid) + '\n\n' + RELAY.format(run=run, agent=agent))
     elif mode == 'flush':
+        upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
+    elif mode == 'session-end':
+        try:
+            session_end(cfg, inp)
+        except Exception as e:
+            common.log(f"codex session-end: {type(e).__name__}: {str(e)[:200]}")
         upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
     elif mode == 'upload':
         upload(cfg, [inp.get('agent_transcript_path') or inp.get('transcript_path')], ASYNC_S, event, sid)

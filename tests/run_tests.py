@@ -58,7 +58,7 @@ class Seeker:
 
     def __init__(self):
         self.records, self.check_fx, self.runs_fx = load('seeker/records.json'), load('seeker/check.json'), load('seeker/runs.json')
-        self.calls, self.rows, self.refused, self.state = [], [], [], dict(check='allow')
+        self.calls, self.rows, self.refused, self.state = [], [], [], dict(check='allow', handoff='ok')
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -103,6 +103,15 @@ class Seeker:
                         time.sleep(5)
                         s = 'allow'
                     return self._answer(**outer.check_fx['responses'][s])
+                m = re.match(r'^/ai/relay/([A-Za-z0-9_]+)/runs/([^/]+)/handoffs$', self.path)
+                if m and method == 'POST':
+                    s = outer.state['handoff']
+                    if s == 'slow':
+                        time.sleep(5)
+                    if s == 'error':
+                        return self._answer(500, {'error': 'boom'})
+                    return self._answer(200, {'handed': True, 'open': True, 'released': ['name:task 07 latency', 'path:src/lat.py'],
+                                              'tasks': ['task 07 latency'], 'message': 'handed off 1 task, released 1 key'})
                 if self.path.startswith('/ai/relay/') and self.path.split('?')[0].endswith('/runs') and method == 'GET':
                     return self._answer(**outer.runs_fx['responses']['ok'])
                 return self._answer(404, {'error': 'no route'})
@@ -216,10 +225,12 @@ def test_layout():
     check('marketplace.json: one entry, ctrlb-agent at ./plugin', len(ent) == 1 and ent[0]['name'] == 'ctrlb-agent'
           and ent[0]['source'] == './plugin')
     hk = load('../../plugin/hooks/hooks.json')['hooks']
-    events = {'SessionStart': 'session-start', 'SubagentStart': 'subagent-start', 'PreCompact': 'flush', 'SessionEnd': 'flush',
-              'Stop': 'upload', 'SubagentStop': 'upload', 'PreToolUse': 'pre-tool', 'PostToolUse': 'post-tool'}
+    events = {'SessionStart': 'session-start', 'SubagentStart': 'subagent-start', 'PreCompact': 'flush', 'SessionEnd': 'session-end',
+              'Stop': 'upload', 'SubagentStop': 'upload', 'PreToolUse': 'pre-tool', 'PostToolUse': 'post-tool',
+              'PostToolUseFailure': 'post-tool-failure'}
     ok = set(hk) == set(events) and all(hk[e][0]['hooks'][0]['command'].endswith('hook.py" ' + m) for e, m in events.items())
-    check('hooks.json: the six hooks plus PreToolUse and PostToolUse, each with its mode', ok, ','.join(sorted(hk)))
+    check('hooks.json: the six hooks plus PreToolUse, PostToolUse and PostToolUseFailure, each with its mode (SessionEnd: session-end)',
+          ok, ','.join(sorted(hk)))
     check('hooks.json: PostToolUse matcher is the ctrlb claim, handoff and release tools',
           hk['PostToolUse'][0].get('matcher') == 'mcp__ctrlb__claim|mcp__ctrlb__handoff|mcp__ctrlb__release')
     check('hooks.json: PreToolUse matcher Edit|Write|MultiEdit|NotebookEdit',
@@ -300,9 +311,8 @@ def test_hooks(seeker):
           'you name in one step; ask when you are blocked on something only another agent or the orchestrator can decide; '
           "answer, with the question's id, when you can settle an open question; contract when you finish an interface others "
           'will build on (a type, a route, a config shape), with its name, the shape in a few lines and the files that define '
-          "it; contracts before you build on another agent's interface (changed_since lists its files changed since its text "
-          "was written, and changed_since_read says it changed since you last read it: read it again). Post a note only for "
-          "what none of them covers." in ctx)
+          "it. Before you build on a contract, read it with `contracts`. If it is stale, read the file it names and check your "
+          "assumptions against it. Post a note only for what none of them covers." in ctx)
     check('session-start under 1 s', dt < 1.0, f'{dt:.2f}s')
     p, _ = hook('session-start', I['session_start_compact'], dict(env, CTRLB_RUN='relay-run-7', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
@@ -1109,7 +1119,7 @@ def test_codex_install():
     check('install: the key is never written; bearer_token_env_var names CTRLB_KEY', KEY not in first
           and 'bearer_token_env_var = "CTRLB_KEY"' in first and 'env_http_headers = { "X-CtrlB-Run" = "CTRLB_RUN", "X-CtrlB-Agent" = "CTRLB_AGENT" }' in first)
     hook_cmd = f'python3 -I \\"{os.path.realpath(CODEX_HOOK)}\\"'
-    want = {'SessionStart': 'session-start', 'SubagentStart': 'subagent-start', 'PreCompact': 'flush', 'SessionEnd': 'flush',
+    want = {'SessionStart': 'session-start', 'SubagentStart': 'subagent-start', 'PreCompact': 'flush', 'SessionEnd': 'session-end',
             'Stop': 'upload', 'SubagentStop': 'upload', 'PreToolUse': 'pre-tool'}
     check('install: [[hooks.<Event>]] for the seven events, each calling codex/hook.py with its mode',
           all(f'[[hooks.{e}]]\n' in first and f'[[hooks.{e}.hooks]]\ntype = "command"\ncommand = "{hook_cmd} {m}"' in first
@@ -1195,32 +1205,40 @@ def test_validate():
 
 
 def test_wait_wording():
-    """Round 3 (Seeker relay-plan decisions 25, 27, 28, 29), with round 5's v8 text: the session rule, the relay skill
-    and the tool docs no longer recommend claim(wait_s) (the benchmark found it did not beat polling; wait_s stays in
-    the tool, documented as available), keep what timed_out means, what belongs_to_task means, that contracts says what
-    changed since it last read them, and to ask about a task's ask_about."""
+    """Round 3 (Seeker relay-plan decisions 25, 27, 28, 29), as round 6 (decisions 35 and 37) left it: claim no longer
+    waits (wait_s is gone from claim; a refused task claim lists free_tasks), so the session rule, the relay skill and
+    the tool docs never offer claim(wait_s), timed_out or a place in line; peers keeps wait_s. They keep what
+    belongs_to_task means, ask_about, and contracts (now: read it before building on it, and check a stale one)."""
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import hooks_shared as H
     rule = H.RELAY
-    check('relay rule v8: no claim(wait_s) recommendation', 'wait_s' not in rule and 'wait in line' not in rule.replace('Never wait in line', ''))
+    check('relay rule v9: no wait_s, no waiting in line on a claim', 'wait_s' not in rule and 'wait in line' not in rule.replace('Never wait in line', ''))
     check('relay rule: belongs_to_task means claim the task it names', 'If reason is belongs_to_task' in rule and 'claim that task (task in the answer)' in rule)
-    check('relay rule: contracts changed_since and changed_since_read', 'changed_since_read' in rule and 'changed_since' in rule)
+    check('relay rule v9: read a contract before building on it; a stale one means read its file',
+          'Before you build on a contract, read it with `contracts`. If it is stale, read the file it names and check your '
+          'assumptions against it.' in rule)
     check('relay rule: ask about a task\'s ask_about', 'If the claim answers ask_about' in rule)
     skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
-    check('relay skill: timed_out and position explained, claim wait_s not recommended',
-          'Claim with `wait_s=30`' not in skill and '`reason: timed_out`' in skill and '`position`' in skill
-          and not [ln for ln in skill.splitlines() if 'wait_s' in ln and 'claim(' in ln])
-    check('relay skill: belongs_to_task, ask_about, changed_since_read, peers wait_s',
+    check('relay skill: no claim wait_s, timed_out or position; free_tasks explained',
+          'Claim with `wait_s=30`' not in skill and 'timed_out' not in skill and '`position`' not in skill
+          and not [ln for ln in skill.splitlines() if 'wait_s' in ln and 'claim(' in ln] and '`free_tasks`' in skill
+          and '(`free_tasks: []`), post a note saying you have no task and stop' in skill)
+    check('relay skill: belongs_to_task, ask_about, changed_since_read, stale, peers wait_s',
           '`reason: belongs_to_task`' in skill and '`ask_about`' in skill and '`changed_since_read`' in skill
-          and 'peers(kind="answer", since=<ts>, wait_s=30)' in skill)
+          and 'If it is `stale`' in skill and 'peers(kind="answer", since=<ts>, wait_s=30)' in skill)
     tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
-    check('relay-tools: claim wait_s, the timed_out and belongs_to_task answers, ask_about',
-          '| `wait_s` | Seconds to wait in line' in tools and 'Available, not recommended' in tools
-          and 'Claim with `wait_s=30`' not in tools and '"reason": "timed_out"' in tools and '"position": 2' in tools
-          and '"reason": "belongs_to_task"' in tools and '"task": "task 03 median"' in tools and '"ask_about"' in tools)
+    claim_doc = tools[tools.index('### claim'):tools.index('### release')]
+    check('relay-tools: claim has no wait_s argument and no timed_out answer; a claim sending wait_s gets 400 naming peers',
+          '| `wait_s` |' not in claim_doc and '"reason": "timed_out"' not in tools and '"position"' not in tools
+          and 'A claim that sends `wait_s` is refused (HTTP 400)' in claim_doc and 'use peers with wait_s' in claim_doc)
+    check('relay-tools: the refused task claim lists free_tasks with since; the empty list means stop',
+          '"free_tasks": [{"name": "task 05 mode"' in claim_doc and '"since": 1793000100000000' in claim_doc
+          and '`there is no free task in this run`' in claim_doc and '`idle_agents`' in claim_doc)
+    check('relay-tools: belongs_to_task answer and ask_about',
+          '"reason": "belongs_to_task"' in tools and '"task": "task 03 median"' in tools and '"ask_about"' in tools)
     check('relay-tools: peers since and wait_s, task ask_about, contracts since',
-          '| `since` | Only events after this' in tools and '| `ask_about` |' in tools
-          and '| `since` | When you last read the contracts' in tools)
+          '| `since` | Only events after this' in tools and '| `wait_s` | When no event matches yet' in tools
+          and '| `ask_about` |' in tools and '| `since` | When you last read the contracts' in tools)
 
 
 def test_takeover_wording():
@@ -1237,7 +1255,7 @@ def test_takeover_wording():
     check('relay rule v8: take over a stalled task or file, never wait in line on it', v8 in rule)
     check('relay rule v8: the claim(wait_s=30) sentence is gone, every other sentence kept',
           'wait_s' not in rule and registered_rule(rule) and 'If reason is belongs_to_task' in rule
-          and 'changed_since_read' in rule and 'If the claim answers ask_about' in rule
+          and "Before you build on a contract, read it with `contracts`. If it is stale, read the file it names" in rule and 'If the claim answers ask_about' in rule
           and "Run the task's test command" in rule and rule.index('another agent has it: pick another') < rule.index(v8))
     skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
     check('relay skill: takeover=true on a stalled task or file, not_stalled, other_user, taken_over_from',
@@ -1274,7 +1292,7 @@ def test_done_evidence(seeker):
           v7 in rule)
     check('relay rule v7: the v6 sentence is replaced', "call done on the task name with the command you ran and its result" not in rule)
     check('relay rule v7: every earlier sentence kept (v8 drops the wait_s one)', registered_rule(rule)
-          and 'If reason is belongs_to_task' in rule and 'changed_since_read' in rule and 'If the claim answers ask_about' in rule
+          and 'If reason is belongs_to_task' in rule and "Before you build on a contract, read it with `contracts`. If it is stale, read the file it names" in rule and 'If the claim answers ask_about' in rule
           and rule.index('release it with finished=true') < rule.index(v7))
     tests = ['pytest -q tests/test_x.py', 'python -m pytest', 'python3 -m unittest discover', 'cd app && go test ./...',
              'npm test', 'npm run test -- --watch=false', 'cargo test --quiet', 'make test', 'make -C sub test', 'python -m unittest -v']
@@ -1368,7 +1386,7 @@ def test_done_evidence(seeker):
     gone = tokens().get('path:src/panels/Latency.tsx')
     check('post-tool done: no output, the task\'s tokens dropped', not p.stdout.strip() and had and not gone, f'{had} {gone}')
     hk = load('../../plugin/hooks/hooks.json')['hooks']['PostToolUse']
-    check('hooks.json: a second PostToolUse group for Bash and the done tool', len(hk) == 2
+    check('hooks.json: a second PostToolUse group for Bash and the done tool', len(hk) == 3
           and hk[1].get('matcher') == 'Bash|mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'
           and hk[1]['hooks'][0]['command'].endswith('hook.py" post-tool'))
     skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
@@ -1383,6 +1401,135 @@ def test_done_evidence(seeker):
     check('relay-tools: task test, the claim and tasks answers, the refusal\'s test, evidence_matches_test',
           '| `test` | Optional. The command that tests the task' in tools and '"test": "python3 -m pytest tests/test_median.py"' in tools
           and "`test` when the task's registration names one" in tools and '`evidence_matches_test`' in tools and '`done_with_task_test`' in tools)
+
+
+def test_round6_hooks(seeker):
+    """Round 6 (Seeker decisions 36 and 38). The session-end hook hands off every hold of the agent in one call
+    (handoff all=true, no receiver) with a text from the session's own record (edited files, last test and exit code,
+    last note), then flushes; Seeker down or slow means nothing is written and the hook ends inside the SessionEnd
+    budget. Every Bash command is recorded with its exit code (PostToolUse and PostToolUseFailure). PreToolUse on done
+    witnesses the evidence: a matching command and exit code of this session adds witnessed=true (and a missing exit
+    code), a mismatch is denied naming what the hook saw, no evidence command gives no output, and a witnessed the
+    agent set itself is dropped."""
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import hooks_shared as H
+    rule = H.RELAY
+    check('relay rule v9: redirect to a free task; an empty list means note and stop',
+          'If a claim is refused and the answer lists free tasks, claim one of them next. If the list is empty, post a note '
+          'saying you have no task and stop.' in rule and 'wait_s' not in rule)
+    check('relay rule v9: REGISTRY.md as a slot with the file, released in the same turn',
+          'Edit REGISTRY.md only between claim(resource="slot:REGISTRY.md", paths=["REGISTRY.md"]) and its release, in the same turn' in rule)
+    home = os.path.join(WORK, 'home-r6')
+    shutil.rmtree(home, ignore_errors=True)
+    run = 'run-r6'
+    env = base_env(seeker.url, home, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    base = {'session_id': SID, 'transcript_path': '', 'cwd': '/work/dash'}
+    post = dict(base, hook_event_name='PostToolUse')
+    seeker.reset()
+    hook('post-tool', dict(post, tool_name='Edit', tool_input={'file_path': '/work/dash/src/lat.py', 'old_string': 'a', 'new_string': 'b'},
+                           tool_response={'filePath': '/work/dash/src/lat.py'}), env)
+    hook('post-tool', dict(post, tool_name='Write', tool_input={'file_path': '/work/dash/tests/test_lat.py', 'content': 'x'},
+                           tool_response={'filePath': '/work/dash/tests/test_lat.py', 'type': 'create'}), env)
+    hook('post-tool', dict(post, tool_name='Bash', tool_input={'command': 'ls src'}, tool_response={'stdout': 'lat.py\n', 'stderr': ''}), env)
+    p, _ = hook('post-tool-failure', dict(base, hook_event_name='PostToolUseFailure', tool_name='Bash',
+                                          tool_input={'command': 'python3 -m pytest tests/test_lat.py'},
+                                          error='Exit code 1\nE   assert 2 == 3\n1 failed in 0.02s', is_interrupt=False), env)
+    check('post-tool-failure Bash: no output, exits 0, no Seeker call', p.returncode == 0 and not p.stdout.strip() and not seeker.calls)
+    hook('post-tool', dict(post, tool_name='mcp__ctrlb__post', tool_input={'text': 'lat: half done, p99 left', 'run_id': run},
+                           tool_response=[{'type': 'text', 'text': '{"ok": true}'}]), env)
+    saved, common.HOME = common.HOME, home        # read the record the hooks wrote under their CTRLB_HOME
+    try:
+        rec = common.SessionRecord(run, 'agent-1').get(SID)
+    finally:
+        common.HOME = saved
+    check('session record: every Bash command with its exit code (a failure from PostToolUseFailure), edits relative, the note',
+          [(b['command'], b['exit_code']) for b in rec['bash']] == [('ls src', 0), ('python3 -m pytest tests/test_lat.py', 1)]
+          and rec['bash'][1]['summary'] == '1 failed in 0.02s' and rec['edited'] == ['src/lat.py', 'tests/test_lat.py']
+          and rec['note']['text'] == 'lat: half done, p99 left', json.dumps(rec)[:300])
+    p, dt = hook('session-end', dict(base, hook_event_name='SessionEnd', reason='other'), env)
+    calls = [c for c in seeker.calls if c['path'].endswith('/handoffs')]
+    body = calls[0]['body'] if calls else {}
+    check('session-end: one handoff call, all=true, no receiver, the agent; the path names the run',
+          len(calls) == 1 and body.get('all') is True and body.get('to') == '' and body.get('agent') == 'agent-1'
+          and calls[0]['path'] == f'/ai/relay/{common.DEFAULT_DATASET}/runs/{run}/handoffs', json.dumps(calls)[:300])
+    text = body.get('text') or ''
+    check('session-end: the text names the edited files, the last test and its exit code, and the last note',
+          'Edited: src/lat.py, tests/test_lat.py.' in text and '`python3 -m pytest tests/test_lat.py` exit 1' in text
+          and '1 failed in 0.02s' in text and 'Last note: lat: half done, p99 left' in text and len(text) <= 1500, text)
+    check('session-end: exits 0 with no output', p.returncode == 0 and not p.stdout.strip())
+    order = [c['path'].rsplit('/', 1)[-1] for c in seeker.calls]
+    check('session-end: the handoff goes before the transcript flush', order and order[0] == 'handoffs', ','.join(order))
+    seeker.reset()
+    seeker.state['handoff'] = 'slow'
+    p, dt = hook('session-end', dict(base, hook_event_name='SessionEnd', reason='other'), env)
+    seeker.state['handoff'] = 'ok'
+    check('session-end, Seeker slow: gives up inside the 1.5 s SessionEnd budget, exits 0 quietly',
+          p.returncode == 0 and not p.stdout.strip() and not p.stderr.strip() and dt < 1.5, f'{dt:.2f}s')
+    down = base_env(f'http://127.0.0.1:{closed_port()}', home, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    p, dt = hook('session-end', dict(base, hook_event_name='SessionEnd', reason='other'), down)
+    check('session-end, Seeker down: nothing written, exits 0 quietly, fast', p.returncode == 0 and not p.stdout.strip()
+          and not p.stderr.strip() and dt < 1.5, f'{dt:.2f}s')
+    seeker.reset()
+    plain = base_env(seeker.url, os.path.join(WORK, 'home-r6-plain'))
+    hook('session-end', dict(base, hook_event_name='SessionEnd', reason='other'), plain)
+    check('session-end outside a relay run (no CTRLB_RUN, no relay tool called): no handoff call',
+          not [c for c in seeker.calls if c['path'].endswith('/handoffs')])
+    fresh = dict(rec, bash=[], edited=[], note=None)
+    check('handoff text with nothing recorded', H.handoff_text(fresh) == 'Session ended. Edited: nothing. Last test: none run.')
+
+    # The witness.
+    pre = dict(base, hook_event_name='PreToolUse', tool_name='mcp__ctrlb__done')
+    hook('post-tool', dict(post, tool_name='Bash', tool_input={'command': 'cd /work/dash && python3 -m pytest tests/test_lat.py -q'},
+                           tool_response={'stdout': '..\n2 passed in 0.01s\n', 'stderr': ''}), env)
+    ev_in = {'resource': 'task 07 latency', 'run_id': run, 'agent': 'agent-1',
+             'evidence': {'command': 'python3 -m pytest tests/test_lat.py', 'exit_code': 0, 'summary': '2 passed in 0.01s'}}
+    p, _ = hook('pre-tool', dict(pre, tool_input=ev_in), env)
+    o = out_of(p)
+    check('witness: a command of this session containing the evidence, same exit code: allow with witnessed=true, the rest kept',
+          o.get('permissionDecision') == 'allow' and o.get('updatedInput', {}).get('witnessed') is True
+          and o['updatedInput'].get('resource') == 'task 07 latency' and o['updatedInput']['evidence']['summary'] == '2 passed in 0.01s', json.dumps(o)[:300])
+    no_code = dict(ev_in, evidence={'command': 'python3 -m pytest tests/test_lat.py'})
+    o = out_of(hook('pre-tool', dict(pre, tool_input=no_code), env)[0])
+    check('witness: no exit code given: filled from the record (the newest run, exit 0)',
+          o.get('permissionDecision') == 'allow' and o['updatedInput']['evidence'].get('exit_code') == 0 and o['updatedInput']['witnessed'] is True,
+          json.dumps(o)[:300])
+    lie = dict(ev_in, witnessed=True, evidence={'command': 'python3 -m pytest tests/test_other.py', 'exit_code': 0})
+    o = out_of(hook('pre-tool', dict(pre, tool_input=lie), env)[0])
+    reason = o.get('permissionDecisionReason', '')
+    check('witness: a command this session never ran is denied, naming the last test it did run, even with witnessed set',
+          o.get('permissionDecision') == 'deny' and 'never ran it' in reason
+          and '`cd /work/dash && python3 -m pytest tests/test_lat.py -q` (exit code 0)' in reason and 'updatedInput' not in o, reason)
+    wrong = dict(ev_in, evidence={'command': 'python3 -m pytest tests/test_lat.py', 'exit_code': 3})
+    hook('post-tool-failure', dict(base, hook_event_name='PostToolUseFailure', tool_name='Bash',
+                                   tool_input={'command': 'python3 -m pytest tests/test_lat.py'}, error='Exit code 1\n1 failed'), env)
+    o = out_of(hook('pre-tool', dict(pre, tool_input=wrong), env)[0])
+    reason = o.get('permissionDecisionReason', '')
+    check('witness: the command ran but with another exit code: denied, naming the exit code it saw',
+          o.get('permissionDecision') == 'deny' and 'with exit code 3' in reason and 'this session ran it with exit code 1' in reason, reason)
+    p, _ = hook('pre-tool', dict(pre, tool_input={'resource': 'task 07 latency', 'run_id': run}), env)
+    check('witness: a done with no evidence command: no output (Seeker answers evidence_required)', p.returncode == 0 and not p.stdout.strip())
+    o = out_of(hook('pre-tool', dict(pre, tool_input={'resource': 'task 07 latency', 'witnessed': True, 'evidence': 'it works'}), env)[0])
+    check('witness: a witnessed the agent set itself with no evidence command is dropped',
+          o.get('permissionDecision') == 'allow' and 'witnessed' not in o.get('updatedInput', {'witnessed': 1}), json.dumps(o)[:200])
+    other = base_env(seeker.url, home, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    o = out_of(hook('pre-tool', dict(pre, session_id='5f0c7a52-0000-4000-8000-0000000000ff', tool_input=ev_in), other)[0])
+    check('witness: only this session counts (another session of the same agent saw nothing)',
+          o.get('permissionDecision') == 'deny' and 'no Bash command in this session' in o.get('permissionDecisionReason', ''),
+          json.dumps(o)[:200])
+    hk = load('../../plugin/hooks/hooks.json')['hooks']
+    check('hooks.json: PreToolUse on the done tool, PostToolUse on edits and post, PostToolUseFailure on Bash',
+          len(hk['PreToolUse']) == 2 and hk['PreToolUse'][1]['matcher'] == 'mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'
+          and hk['PostToolUse'][2]['matcher'].startswith('Edit|Write|MultiEdit|NotebookEdit|mcp__ctrlb__post')
+          and hk['PostToolUseFailure'][0]['matcher'] == 'Bash' and hk['SessionEnd'][0]['hooks'][0]['command'].endswith('session-end'))
+    # Codex: the same session-end handoff in a relay run, with what it can say.
+    seeker.reset()
+    shutil.rmtree(os.path.join(WORK, 'home-r6-codex'), ignore_errors=True)
+    cenv = base_env(seeker.url, os.path.join(WORK, 'home-r6-codex'), CTRLB_RUN=run, CTRLB_AGENT='codex-1')
+    p, dt = chook('session-end', {'session_id': CSID, 'transcript_path': '', 'cwd': '/work/dash', 'hook_event_name': 'SessionEnd'}, cenv)
+    calls = [c for c in seeker.calls if c['path'].endswith('/handoffs')]
+    check('codex session-end: one open handoff of all holds in a relay run, exits 0',
+          p.returncode == 0 and len(calls) == 1 and calls[0]['body'].get('all') is True and calls[0]['body'].get('to') == ''
+          and 'Codex' in calls[0]['body'].get('text', ''), json.dumps(calls)[:300])
 
 
 def main():
@@ -1400,6 +1547,7 @@ def main():
     test_wait_wording()
     test_takeover_wording()
     test_done_evidence(seeker)
+    test_round6_hooks(seeker)
     test_failure_safety(seeker)
     test_config_and_status(seeker)
     test_codex_rows(seeker)

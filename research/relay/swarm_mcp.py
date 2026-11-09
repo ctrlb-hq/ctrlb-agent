@@ -6,15 +6,18 @@ lib_lake's CTRLB_URL, CTRLB_ORG, CTRLB_AUTH. Standard library only.
 
   peers()                    what every agent in this run has posted, claimed or released, newest first
   post(text)                 append a note (what you are about to do or have done)
-  claim(resource, reopen?, paths?, wait_s?)
+  claim(resource, reopen?, paths?)
                              write-first claim: write HOLD (or REOPEN) on the resource and on each of paths in one
                              write, wait, read each key's rows; held iff the first live hold of the current round is
-                             ours on every deciding key. wait_s (at most 55) waits in line instead of refusing
+                             ours on every deciding key. A refused claim of a registered task lists free_tasks (Seeker
+                             decision 35); claims never wait (wait_s is refused)
   claim(resource, takeover=true)
                              take over a hold whose holder made no progress for SWARM_STALL_S (300): a HANDOFF with the
                              stalled holder as giver (Seeker decision 33); refused not_stalled while it works
   release(resource, finished?)  hand back (RELEASE) or, for a task name, finish (DONE); a bundle's files go with it;
                              finished is the alias of done
+  handoff(resource, to?, text?)  hand a hold to agent `to` in one HANDOFF row; with no `to`, an open handoff (Seeker
+                             decision 36): RELEASE of our holds on the key and its bundle plus a NOTE with text
   done(resource, evidence?)  finish a task name (DONE) with the evidence of its check {command, exit_code, summary} as
                              the DONE row's text (Seeker decision 30); SWARM_EVIDENCE_REQUIRED=1 refuses one that
                              names no command, and a finished release, with reason evidence_required
@@ -30,9 +33,10 @@ a round, the first REOPEN after it starts the next); read_key is the same fold a
 tests/fixtures/key_states.json); a claim whose second read does not show its own row decides nothing (reason
 not_visible); a finished release after the lease ran out finishes the task when nobody else holds it.
 
-Waiting (decision 25): a claim with wait_s keeps its losing HOLDs live as its place in line and reads the keys again
-every 5 x SWARM_WAIT_MS until it is first (held, waited_ms), a DONE finishes the round (finished_by), or wait_s runs
-out (a RELEASE with text timed_out, a REFUSED row, reason timed_out with held_by and position).
+Redirect instead of wait (decision 35, which removed decision 25's waiting): a claim of a registered task refused
+because another agent holds it (held_by, since) or finished it (finished_by) lists free_tasks: the run's registered
+tasks with no live hold and not finished, up to 10, each with name, key, paths and test; when none is free the list is
+empty and the message says there is no free task in this run.
 
 Registered tasks (decisions 18 and 27): a file registered to one task is decided on the task's key when that task is
 claimed (its HOLD is still written); a claim naming a file registered to a task the caller does not hold is refused
@@ -54,14 +58,16 @@ EVIDENCE_REQUIRED_MESSAGE = 'say which command you ran and its exit code'
 
 HOLDS = ('HOLD', 'REOPEN')
 KIND_RANK = {'HOLD': 0, 'REOPEN': 1, 'RELEASE': 2, 'DONE': 3, 'HANDOFF': 4}
-NOT_VISIBLE, TIMED_OUT, RETRY, BELONGS_TO_TASK = 'not_visible', 'timed_out', 'retry', 'belongs_to_task'
-# Waiting (Seeker decision 25): wait_s is capped at MAX_WAIT_S; a waiting claim reads its keys every WAIT_READ_EVERY x
-# WAIT_MS; a bundle with paths decided by the AND rule adds a random BACKOFF_S to each read after a loss, and sleeps one
-# before it claims again when it found itself crossed with another bundle.
-MAX_WAIT_S = 55
-WAIT_READ_EVERY = 5
-BACKOFF_S = (0.05, 0.5)
+NOT_VISIBLE, BELONGS_TO_TASK = 'not_visible', 'belongs_to_task'
 MAX_PATHS = 32
+# Redirect (Seeker decision 35): a refused claim of a registered task lists at most FREE_TASKS_MAX free tasks; claims do
+# not wait, and a claim that sends wait_s is refused with WAIT_S_REFUSED.
+FREE_TASKS_MAX = 10
+NO_FREE_TASK = 'there is no free task in this run'
+WAIT_S_REFUSED = ('wait_s is no longer accepted on claim: a refused claim lists free_tasks to claim instead; to wait for '
+                  'news use peers with wait_s')
+# Open handoff (Seeker decision 36): the RELEASE rows' text starts with this.
+OPEN_HANDOFF_TEXT = 'handed off: '
 # Takeover (Seeker decision 33): a hold whose holder made no progress for STALL_S (the workspace's stallAfterSeconds)
 # can be taken over with claim(takeover=true): a HANDOFF with the stalled holder as giver and this text.
 STALL_S = int(os.environ.get('SWARM_STALL_S', '300'))
@@ -262,7 +268,8 @@ def registered_tasks(rows):
         if cur is None or (int(r['ts']), r['agent']) > (int(cur['ts']), cur['agent']):
             newest[r['key']] = r
     return [dict(key=k, resource=r.get('resource') or k[len(relay_paths.NAME):], text=r.get('text') or '',
-                 agent=r['agent'], ts=int(r['ts']), paths=_path_keys(r)) for k, r in sorted(newest.items())]
+                 agent=r['agent'], ts=int(r['ts']), paths=_path_keys(r), test=r.get('test') or '')
+            for k, r in sorted(newest.items())]
 
 
 def owners_of(tasks, key):
@@ -342,8 +349,8 @@ def run_tasks():
             return []
         raise
     return registered_tasks([dict(ts=int(r['_timestamp']), agent=r['agent'], kind=r['kind'], key=r.get('key') or '',
-                                  resource=r.get('resource') or '', text=r.get('text') or '', paths=r.get('paths') or '')
-                             for r in rows])
+                                  resource=r.get('resource') or '', text=r.get('text') or '', paths=r.get('paths') or '',
+                                  test=r.get('test') or '') for r in rows])
 
 
 def hold_rows(key):
@@ -437,16 +444,15 @@ def _holdable(resource, key):
                          f"it with the {kind['kind']} tool and read it with {kind['kind']}s")
 
 
-def claim(resource, reopen=False, paths=None, wait_s=0, takeover=False):
+def claim(resource, reopen=False, paths=None, takeover=False, **unknown):
     """Seeker's ClaimBundle: the claim protocol on the resource's key and, for a bundle, on each of paths at once.
     A registered task claimed without paths takes its registered paths; a file registered to it alone is decided on the
-    task's key. wait_s (at most MAX_WAIT_S) waits in line instead of refusing at once. takeover=true takes over a
-    stalled hold (Seeker decision 33, _takeover)."""
+    task's key. A refused claim of a registered task lists free_tasks (decision 35). takeover=true takes over a stalled
+    hold (Seeker decision 33, _takeover). wait_s is refused (WAIT_S_REFUSED)."""
+    if 'wait_s' in unknown:
+        raise ValueError(WAIT_S_REFUSED)
     key, rkind = relay_paths.key(resource)
     _holdable(resource, key)
-    wait_s = min(float(wait_s or 0), MAX_WAIT_S)
-    if wait_s < 0:
-        raise ValueError('wait_s must not be negative')
     if isinstance(paths, str):
         paths = [p for p in paths.split(',') if p.strip()]
     out = dict(held=False, resource=resource, key=key)
@@ -475,7 +481,7 @@ def claim(resource, reopen=False, paths=None, wait_s=0, takeover=False):
         return json.dumps(out)
     if takeover and not reopen:
         return json.dumps(_takeover(resource, keys, deciding_keys(keys, task, tasks), out))
-    return json.dumps(_Claim(resource, keys, deciding_keys(keys, task, tasks), reopen, wait_s).run(out))
+    return json.dumps(_Claim(resource, keys, deciding_keys(keys, task, tasks), reopen, task, tasks).run(out))
 
 
 def _activity(agent, keys):
@@ -505,7 +511,7 @@ def _takeover(resource, keys, decides, out):
     rows, now = hold_rows(key), now_us()
     st = read_key(rows, now, LEASE_S, key)
     if st['finished'] or not st['live'] or st['live'][0]['agent'] == AGENT:
-        return _Claim(resource, keys, decides, False, 0).run(out)
+        return _Claim(resource, keys, decides, False).run(out)
     holder, token = st['live'][0]['agent'], uuid.uuid4().hex
     plan = takeover_plan(rows, now, LEASE_S, key, AGENT, STALL_S, _activity(holder, keys), token=token)
     reading = {k: v for k, v in plan['stall'].items() if k != 'stalled'}
@@ -534,7 +540,7 @@ def _takeover(resource, keys, decides, out):
         batch += [row(r['kind'], k, k, text='' if r['kind'] == 'RELEASE' else r['text'], nonce=r['nonce'],
                       agent=r['agent'], **({'to': r['to'], 'token': r['token']} if r['kind'] == 'HANDOFF' else {}))
                   for r in _key_takeover_rows(ks, holder, AGENT, token, k, k, False)]
-    c = _Claim(resource, keys, decides, False, 0)
+    c = _Claim(resource, keys, decides, False)
     try:
         write_rows(batch)
     except Exception:
@@ -546,20 +552,19 @@ def _takeover(resource, keys, decides, out):
         return c._not_visible(out, token)
     lost = c._lost(states)
     if lost >= 0:
-        return c._refuse(out, states, lost, token, '')
+        return c._refuse(out, states, lost, token)
     c._held(out, states, token)
     out.update(taken_over_from=holder, stall=reading)
     return out
 
 
 class _Claim:
-    """One claim after its arguments were checked (Seeker's claimRun)."""
+    """One claim after its arguments were checked (Seeker's claimRun). It never waits: one write, one wait of WAIT_MS,
+    one read (decision 35 removed decision 25's waiting)."""
 
-    def __init__(self, resource, keys, decides, reopen, wait_s):
-        self.resource, self.keys, self.decides, self.reopen, self.wait_s = resource, keys, decides, reopen, wait_s
-        self.and_paths = any(decides[1:])
-        self.start = time.time()
-        self.waited = False
+    def __init__(self, resource, keys, decides, reopen, task=None, tasks=()):
+        self.resource, self.keys, self.decides, self.reopen = resource, keys, decides, reopen
+        self.task, self.tasks = task, list(tasks or [])
 
     def _resource_of(self, i):
         return self.resource if i == 0 else self.keys[i]
@@ -567,74 +572,41 @@ class _Claim:
     def _releases(self, nonce, text=''):
         write_rows([row('RELEASE', self._resource_of(i), k, text=text, nonce=nonce) for i, k in enumerate(self.keys)])
 
-    def _set_waited(self, out):
-        if self.waited:
-            out['waited_ms'] = max(1, int((time.time() - self.start) * 1000))
-
-    def _backoff(self):
-        return random.uniform(*BACKOFF_S)
-
     def run(self, out):
-        key, deadline = self.keys[0], self.start + self.wait_s
-        while True:
-            # Step 0: a finished task name is refused unless the claim reopens it.
-            hold_kind, text = 'HOLD', ''
-            done = read_key(hold_rows(key), now_us(), LEASE_S, key)['finished']
-            if done:
-                if not self.reopen:
-                    out.update(finished_by=done['agent'], finished_at=done['ts'],
-                               message=_finished_message(self.resource, done))
-                    self._set_waited(out)
-                    write('REFUSED', self.resource, key, text=out['message'], held_by=done['agent'])
-                    return out
-                hold_kind, text = 'REOPEN', f"reopened after {done['agent']} finished it"
-            # Step 1: one HOLD per key, one nonce, one write; the resource key's row carries the others in paths.
-            nonce = uuid.uuid4().hex
-            holds = [row('HOLD', self._resource_of(i), k, nonce=nonce) for i, k in enumerate(self.keys)]
-            holds[0].update(kind=hold_kind, text=text)
-            if len(self.keys) > 1:
-                holds[0]['paths'] = json.dumps(self.keys[1:])
-            try:
-                write_rows(holds)
-            except Exception:
-                self._abandon(nonce)
-                raise
-            # Step 2.
-            time.sleep(WAIT_MS / 1000)
-            states, lost, retry = None, -1, False
-            while not retry:
-                # Step 3, with the read-your-write guard on every key.
-                got = self._read(nonce)
-                if got is not None:
-                    states = got
-                    # Step 4.
-                    lost = self._lost(states)
-                    if lost < 0:
-                        return self._held(out, states, nonce)
-                    if states[lost]['finished'] or not self.wait_s:
-                        return self._refuse(out, states, lost, nonce, '')
-                    if self._crossed(states):
-                        # Two bundles crossed: neither leaves the line by waiting, so this one steps out and claims
-                        # again with a fresh nonce.
-                        self._releases(nonce, RETRY)
-                        self.waited = True
-                        time.sleep(self._backoff())
-                        if time.time() >= deadline:
-                            return self._refuse(out, states, lost, nonce, TIMED_OUT)
-                        retry = True
-                        continue
-                elif not self.wait_s:
-                    return self._not_visible(out, nonce)
-                now = time.time()
-                if now >= deadline:
-                    if states is None:
-                        return self._not_visible(out, nonce)   # never saw its own row: nothing was decided
-                    return self._refuse(out, states, lost, nonce, TIMED_OUT)
-                d = WAIT_READ_EVERY * WAIT_MS / 1000
-                if self.and_paths and got is not None:
-                    d += self._backoff()
-                self.waited = True
-                time.sleep(min(d, deadline - now))
+        key = self.keys[0]
+        # Step 0: a finished task name is refused unless the claim reopens it.
+        hold_kind, text = 'HOLD', ''
+        done = read_key(hold_rows(key), now_us(), LEASE_S, key)['finished']
+        if done:
+            if not self.reopen:
+                out.update(finished_by=done['agent'], finished_at=done['ts'],
+                           message=_finished_message(self.resource, done))
+                self._redirect(out)
+                write('REFUSED', self.resource, key, text=out['message'], held_by=done['agent'])
+                return out
+            hold_kind, text = 'REOPEN', f"reopened after {done['agent']} finished it"
+        # Step 1: one HOLD per key, one nonce, one write; the resource key's row carries the others in paths.
+        nonce = uuid.uuid4().hex
+        holds = [row('HOLD', self._resource_of(i), k, nonce=nonce) for i, k in enumerate(self.keys)]
+        holds[0].update(kind=hold_kind, text=text)
+        if len(self.keys) > 1:
+            holds[0]['paths'] = json.dumps(self.keys[1:])
+        try:
+            write_rows(holds)
+        except Exception:
+            self._abandon(nonce)
+            raise
+        # Step 2.
+        time.sleep(WAIT_MS / 1000)
+        # Step 3, with the read-your-write guard on every key.
+        states = self._read(nonce)
+        if states is None:
+            return self._not_visible(out, nonce)
+        # Step 4.
+        lost = self._lost(states)
+        if lost < 0:
+            return self._held(out, states, nonce)
+        return self._refuse(out, states, lost, nonce)
 
     def _abandon(self, nonce):
         try:
@@ -660,17 +632,14 @@ class _Claim:
                 return i
         return -1
 
-    def _crossed(self, states):
-        """The caller is first live on some key while the first live holder of a deciding key it lost holds a live
-        hold behind it there."""
-        for j, lost in enumerate(states):
-            if not self.decides[j] or not lost['live'] or lost['live'][0]['agent'] == AGENT:
-                continue
-            h = lost['live'][0]['agent']
-            for i, st in enumerate(states):
-                if i != j and st['live'] and st['live'][0]['agent'] == AGENT and any(o['agent'] == h for o in st['live'][1:]):
-                    return True
-        return False
+    def _redirect(self, out):
+        """Decision 35: on a refused claim of a registered task, the run's free tasks (no live hold, not finished)."""
+        if self.task is None:
+            return
+        free = free_tasks(self.tasks)
+        out['free_tasks'] = free[:FREE_TASKS_MAX]
+        if not free:
+            out['message'] = out.get('message', '') + f'. {NO_FREE_TASK}: post a note saying you have no task and stop'
 
     def _held(self, out, states, nonce):
         now = now_us()
@@ -685,7 +654,6 @@ class _Claim:
             out['renewed'] = True
         if states[0]['reopened'] and states[0]['reopened']['nonce'] == nonce:
             out['reopened'] = True
-        self._set_waited(out)
         return out
 
     def _not_visible(self, out, nonce):
@@ -693,11 +661,10 @@ class _Claim:
         self._releases(nonce, NOT_VISIBLE)
         out.update(reason=NOT_VISIBLE, message=f'{self.resource} was not claimed: the claim record was not readable '
                                                f'yet, so nothing was decided. Claim it again')
-        self._set_waited(out)
         return out
 
-    def _refuse(self, out, states, lost, nonce, reason):
-        self._releases(nonce, reason)
+    def _refuse(self, out, states, lost, nonce):
+        self._releases(nonce)
         lost_key, st = self.keys[lost], states[lost]
         if st['finished']:
             holder = st['finished']['agent']
@@ -706,26 +673,25 @@ class _Claim:
         else:
             holder = st['live'][0]['agent'] if st['live'] else '?'
             out['held_by'] = holder
+            if st['live']:
+                out['since'] = int(st['live'][0]['ts'])
             if lost:
                 out['conflict_key'] = lost_key
-            if reason == TIMED_OUT:
-                what = self.resource if not lost else f'{self.resource} (with {lost_key})'
-                out.update(reason=reason, message=f'{what} is still held by {holder} after waiting '
-                                                  f'{round(time.time() - self.start)}s; nothing was taken. Pick '
-                                                  f'something else',
-                           position=next((n + 1 for n, r in enumerate(st['live']) if r['agent'] == AGENT), 0))
-            elif not lost:
+            if not lost:
                 out['message'] = f'{self.resource} is already held by {holder}; pick something else'
             else:
                 out['message'] = (f'{self.resource} was not claimed: {lost_key}, which comes with it, is already held '
                                   f'by {holder}; nothing was taken. Pick something else')
-        self._set_waited(out)
+        self._redirect(out)
         write('REFUSED', self._resource_of(lost), lost_key, text=out['message'], nonce=nonce, held_by=holder)
         return out
 
 
-def handoff(resource, to):
-    """Hand our live hold of resource to agent `to` in one HANDOFF row (Seeker relay.Handoff, one key)."""
+def handoff(resource, to='', text=''):
+    """Hand our live hold of resource to agent `to` in one HANDOFF row (Seeker relay.Handoff, one key). With no `to`,
+    an open handoff (Seeker decision 36): the fold takes a HANDOFF only with a receiver, so the task goes back to the
+    run as RELEASE rows of our holds on the key and its bundle (text OPEN_HANDOFF_TEXT + text) plus one NOTE with the
+    text, in one write; the next claim of it is served as for a released key."""
     key, kind = relay_paths.key(resource)
     _holdable(resource, key)
     out = dict(handed=False, resource=resource, key=key, to=to)
@@ -735,6 +701,24 @@ def handoff(resource, to):
         out.update(held_by=holder or None, message=f'{resource} was not handed off: '
                    + (f'{holder} holds it, not you' if holder else 'you do not hold it'))
         return json.dumps({k: v for k, v in out.items() if v is not None})
+    if not to:
+        text = str(text or '').strip()[:2000]
+        rows, released = [], []
+        mine = [h for h in st['open'] if h['agent'] == AGENT]
+        for h in mine:
+            rows.append(row('RELEASE', resource, key, text=OPEN_HANDOFF_TEXT + text, nonce=h['nonce']))
+            for k in _path_keys(h):
+                for o in read_key(hold_rows(k), now_us(), LEASE_S, k)['open']:
+                    if o['agent'] == AGENT and o['nonce'] == h['nonce']:
+                        rows.append(row('RELEASE', k, k, text=OPEN_HANDOFF_TEXT + text, nonce=o['nonce']))
+                        released.append(k)
+        rows.append(row('NOTE', resource, key, text=f'handed off {resource}: {text}'))
+        write_rows(rows)
+        out.pop('to')
+        out.update(handed=True, open=True, message=f'{resource} was handed off to nobody: the next claim of it gets it')
+        if released:
+            out['paths'] = sorted(set(released))
+        return json.dumps(out)
     if to == AGENT:
         return claim(resource)
     giver, token = st['live'][0], uuid.uuid4().hex
@@ -817,7 +801,7 @@ def contracts(names=None):
     return json.dumps(dict(contracts=out))
 
 
-def task(name, text, paths, ask_about=None):
+def task(name, text, paths, ask_about=None, test=''):
     """Register a task with its files (Seeker's task tool): a BRIEF on the task name with paths (keys) required."""
     key, kind = relay_paths.key(name)
     if kind != 'name' or not key:
@@ -832,8 +816,25 @@ def task(name, text, paths, ask_about=None):
         items = [str(a).strip().encode()[:300].decode(errors='ignore') for a in ask_about if str(a).strip()][:16]
         if items:
             extra['ask_about'] = json.dumps(items)
+    if str(test or '').strip():
+        extra['test'] = str(test).strip()[:500]
     write('BRIEF', str(name).strip(), key, text=text, **extra)
     return json.dumps(dict(ok=True, run_id=RUN, agent=AGENT, key=key, paths=keys))
+
+
+def free_tasks(tasks=None):
+    """Decision 35: the registered tasks with no live hold whose current round is not finished, sorted by key, each
+    {name, key, paths, test?}."""
+    out = []
+    for t in run_tasks() if tasks is None else tasks:
+        st = read_key(hold_rows(t['key']), now_us(), LEASE_S, t['key'])
+        if st['finished'] or st['live']:
+            continue
+        d = dict(name=t['resource'], key=t['key'], paths=t['paths'])
+        if t.get('test'):
+            d['test'] = t['test']
+        out.append(d)
+    return out
 
 
 def tasks():
@@ -966,20 +967,21 @@ ALL = dict(
     post=dict(fn=post, required=['text'], properties=dict(text=S),
               description='Post a short note to the shared board: what you are taking, or what you finished.'),
     claim=dict(fn=claim, required=['resource'],
-               properties=dict(resource=S, reopen=B, paths=A, wait_s={'type': 'number'}, takeover=B),
+               properties=dict(resource=S, reopen=B, paths=A, takeover=B),
                description='Take an exclusive claim on a resource: a task name such as "slugify" or a file path such '
                            'as "src/slugify.py". Returns held=true if it is yours; held=false with held_by if someone '
                            'else has it, or with finished_by if the task name is already finished, in which case pick '
                            'another. reopen=true claims a finished task name anyway and starts a new round of work on '
                            'it; use it only when you were asked to redo that task. paths: files (or slot:<name>) taken '
-                           'with the resource in one step; a registered task takes its registered files. wait_s (at '
-                           'most 55): wait in line for the holder to let go instead of being refused at once; it ends '
-                           'held, finished_by, or reason timed_out with held_by and position. reason belongs_to_task: '
+                           'with the resource in one step; a registered task takes its registered files. A refused claim '
+                           'of a registered task lists free_tasks: claim one of them next; an empty list means there is '
+                           'no free task: post a note saying so and stop. reason belongs_to_task: '
                            'the file is held through its task; claim the task instead. takeover=true: take over a '
                            'hold whose holder has stopped (stalled in tasks); refused not_stalled while it works.'),
-    handoff=dict(fn=handoff, required=['resource', 'to'], properties=dict(resource=S, to=S),
+    handoff=dict(fn=handoff, required=['resource'], properties=dict(resource=S, to=S, text=S),
                  description='Hand a resource you hold to another agent of the run in one step: from then on it '
-                             'holds it and you do not, and no third agent can take it in between.'),
+                             'holds it and you do not, and no third agent can take it in between. With no to: an '
+                             'open handoff; the task goes back to the run with your text (what you did, what is left).'),
     ask=dict(fn=ask, required=['text'], properties=dict(text=S, to=S),
              description='Ask a question you are blocked on and only another agent or the orchestrator can decide. '
                          'Answers {id}; it stays open until someone calls answer with that id.'),
@@ -990,7 +992,7 @@ ALL = dict(
                               'shape in a few lines, and the files that define it.'),
     contracts=dict(fn=contracts, required=[], properties=dict(names=A),
                    description='The newest contract of each name, with changed_since: its files claimed after it.'),
-    task=dict(fn=task, required=['name', 'text', 'paths'], properties=dict(name=S, text=S, paths=A, ask_about=A),
+    task=dict(fn=task, required=['name', 'text', 'paths'], properties=dict(name=S, text=S, paths=A, ask_about=A, test=S),
               description='Register a task of this run with the files it owns (for an orchestrator). A claim of the '
                           'task takes its files with it; a bare claim of one of its files is refused (belongs_to_task).'),
     tasks=dict(fn=tasks, required=[], properties={},
@@ -1036,6 +1038,8 @@ def handle(msg):
     elif method == 'tools/call':
         p = msg.get('params') or {}
         t = TOOLS.get(p.get('name'))
+        if t and p.get('name') == 'claim' and 'wait_s' in (p.get('arguments') or {}):
+            t = dict(t, fn=lambda **_: (_ for _ in ()).throw(ValueError(WAIT_S_REFUSED)))
         try:
             text, err = (t['fn'](**{k: v for k, v in (p.get('arguments') or {}).items() if k in t['properties']}),
                          False) if t else (json.dumps({'error': 'unknown tool'}), True)
