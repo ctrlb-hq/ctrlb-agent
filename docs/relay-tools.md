@@ -153,13 +153,13 @@ Answer to `claim(resource="task 03 median")` when the orchestrator registered th
 {"held": true, "resource": "task 03 median", "key": "name:task 03 median", "lease_until": 1793000600000000, "paths": ["path:src/median.py"]}
 ```
 
-Answer to `claim(next=true)`: the first free registered task is claimed, with its files, and answered as `task` with its `name`, `brief` (the registration's text), `paths` and `test`. Start with it; you need not call `tasks` or `peers` first.
+Answer to `claim(next=true)`: the first free registered task is claimed, with its files, and answered as `next_task` with its `name`, `key`, `brief` (the registration's text), `paths`, `test` and `ask_about` when set. Start with it; you need not call `tasks` or `peers` first.
 
 ```json
-{"held": true, "resource": "task 03 median", "key": "name:task 03 median", "lease_until": 1793000600000000, "paths": ["path:src/median.py"], "task": {"name": "task 03 median", "brief": "Add median() to src/median.py ...", "paths": ["path:src/median.py"], "test": "python3 -m pytest tests/test_median.py"}}
+{"held": true, "resource": "task 03 median", "key": "name:task 03 median", "lease_until": 1793000600000000, "paths": ["path:src/median.py"], "next_task": {"name": "task 03 median", "key": "name:task 03 median", "brief": "Add median() to src/median.py ...", "paths": ["path:src/median.py"], "test": "python3 -m pytest tests/test_median.py"}}
 ```
 
-When no registered task is free, `claim(next=true)` answers `held: false` with `free_tasks: []` and writes nothing: post a note saying you have no task and stop.
+When no registered task is free, `claim(next=true)` answers `held: false` with `free_tasks: []` and writes nothing: post a note saying you have no task and stop. When every free task waits on an open question its `ask_about` names, the answer is `held: false`, `reason: "awaiting_answers"`, with those tasks in `free_tasks`, and nothing is written. Passing `next` with `resource`, `paths`, `reopen` or `takeover` is an error. Two agents calling `next` at once get different tasks or the idle answer; after 3 lost races the answer is `held: false` with the tasks still free.
 
 Answer when a file of the task is held by another agent: nothing is taken.
 
@@ -245,7 +245,7 @@ Finish a task you hold, when its test passes, and say what you checked. Run the 
 |---|---|
 | `resource` | Required. The task name as you claimed it. A file path is never done: release it (`a file path is never done: release it`). |
 | `evidence` | `{command, exit_code, summary}`: the test or check command you ran, its exit code, and one line of its output (at most 300 characters). Free text is kept as the summary. |
-| `next` | `true`: finish this task and claim the next free registered task in the same write. The answer carries the next task as `task` (`{name, brief, paths, test}`), as `claim(next=true)` does, or `free_tasks: []` when none is free. |
+| `next` | `true`: finish this task and claim the next free registered task in the same write. The answer carries the claim of the next task as `next` (the whole `claim(next=true)` answer, with `next_task`), written in the same lake write as the DONE; `next` is absent when the done did not finish the task. |
 | `witnessed` | Set by the Claude Code plugin, not by you: `true` when the plugin saw this session run the evidence's command with that exit code. Stored with the evidence. |
 | `cwd` | The working directory the claim was made with, if any. |
 | `run_id`, `agent` | Required, or from the headers. |

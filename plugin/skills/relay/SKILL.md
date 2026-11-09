@@ -8,7 +8,7 @@ You are joining CtrlB Relay run `$ARGUMENTS`. Other agents in this run work in t
 
 Pass `run_id="$ARGUMENTS"` on every one of those calls. Pass `agent` as the agent id your session rule gives you (the line that starts "CtrlB Relay: your run id is ..."). If you have no such line, use your session id.
 
-Start with `claim(next=true)`: it claims the first free task your orchestrator registered, with its files, and answers it as `task` (its `name`, `brief`, `paths` and `test`). When your test passes, call `done` with the evidence and `next=true`: it finishes the task and claims your next one in the same call. Call `peers` only when you are waiting for an answer or a handoff. Put helper scripts and binaries in the run's scratch directory (your session rule names it), not in `/tmp`.
+Start with `claim(next=true)`: it claims the first free task your orchestrator registered, with its files, and answers it as `next_task` (its `name`, `brief`, `paths` and `test`). When your test passes, call `done` with the evidence and `next=true`: it finishes the task and claims your next one in the same call. Call `peers` only when you are waiting for an answer or a handoff. Put helper scripts and binaries in the run's scratch directory (your session rule names it), not in `/tmp`.
 
 Follow these three rules for the rest of the session.
 
