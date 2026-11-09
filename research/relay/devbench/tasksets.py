@@ -145,14 +145,15 @@ def closure(graph, start):
 # ---------------------------------------------------------------- running the reference tests
 
 def run_suite(tree, suite, timeout=TEST_TIMEOUT):
-    """Run one test directory of a scoring copy with the scoring venv's pytest. Returns per-test outcomes."""
+    """Run one test directory of a scoring copy (or a list of pytest node ids) with the scoring venv's pytest.
+    Returns per-test outcomes keyed as the junit report names them (classname::name)."""
     tmp = tempfile.mkdtemp(prefix='devbench-judge-')
     ini, xml = os.path.join(tmp, 'pytest.ini'), os.path.join(tmp, 'junit.xml')
     with open(ini, 'w') as fh:
         fh.write('[pytest]\n')
     env = {'PATH': os.path.dirname(VENV_PY) + ':/usr/bin:/bin', 'HOME': tmp, 'LANG': 'C.UTF-8',
            'PYTHONDONTWRITEBYTECODE': '1', 'TMPDIR': tmp}
-    cmd = [VENV_PY, '-m', 'pytest', suite, '-q', '-p', 'no:cacheprovider', '--noconftest', '-c', ini,
+    cmd = [VENV_PY, '-m', 'pytest', *([suite] if isinstance(suite, str) else suite), '-q', '-p', 'no:cacheprovider', '--noconftest', '-c', ini,
            '--rootdir', tree, '--junitxml', xml, '-o', 'junit_family=xunit1']
     t0, timed_out = time.time(), False
     try:
@@ -169,6 +170,15 @@ def run_suite(tree, suite, timeout=TEST_TIMEOUT):
             tests[name] = 'passed' if not bad else bad[0]
     shutil.rmtree(tmp, ignore_errors=True)
     return dict(tests=tests, rc=rc, wall_s=wall, timed_out=timed_out, tail=tail)
+
+
+def node_of(name):
+    """'acceptance_tests.test_x.Class::test_y' -> the pytest node id 'acceptance_tests/test_x.py::Class::test_y'."""
+    cls, _, test = name.partition('::')
+    f = file_of_test(name)
+    parts = cls.split('.')
+    rest = parts[len(f[:-3].split('/')):]
+    return '::'.join([f] + rest + [test])
 
 
 def file_of_test(name):
@@ -362,15 +372,64 @@ def score_tree(cwd, project, ref_counts=None, timeout=TEST_TIMEOUT, meta=None, j
         res[key] = dict(passed=passed, total=total, ran=len(r['tests']), wall_s=r['wall_s'], timed_out=r['timed_out'],
                         failed=sorted(n for n, v in r['tests'].items() if v != 'passed'),
                         tail=r['tail'] if passed < total else '')
-    # per task: every reference test file that exercises the module passes in full; None when no test exercises it
+    # per task (round 5, benchmark item 2): a module passes when no failing test is charged to it; None when no
+    # reference test exercises it. A failing test is charged to the modules it exercises (the import closure of its
+    # file) whose reference version, put back alone in the scoring copy, makes it pass; when no single module does
+    # (two modules wrong, or a fact the reference does not have), it is charged to every module it exercises. So a
+    # failing acceptance test of one module no longer fails every module its test file touches. per_task_by_file is
+    # the earlier rule (every test file exercising the module passes in full), kept for comparison.
     if meta.get('modules'):
-        per = {}
+        per, per_file_rule = {}, {}
+        exercised = meta['exercised_by_test_file']
         for m in meta['modules']:
-            files = [f for f, ms in meta['exercised_by_test_file'].items() if m in ms]
+            files = [f for f, ms in exercised.items() if m in ms]
             need = {f: ref_counts[f.split('/')[0]]['per_file'].get(f, 0) for f in files}
             need = {f: n for f, n in need.items() if n}
-            per[os.path.basename(m)[:-3]] = all(per_file_pass.get(f, 0) >= n for f, n in need.items()) if need else None
+            per_file_rule[os.path.basename(m)[:-3]] = all(per_file_pass.get(f, 0) >= n for f, n in need.items()) if need else None
+        failing = {}  # suite -> [test names] that failed, ran or not (a missing test counts as failed)
+        for suite in SUITES:
+            key = 'unit' if suite == 'unit_tests' else 'accept'
+            failing[suite] = list(res[key]['failed'])
+        missing = {f: n - per_file_pass.get(f, 0) for s_ in SUITES for f, n in ref_counts[s_]['per_file'].items()}
+        charged = {m: [] for m in meta['modules']}
+        src_root = os.path.join(SRC, project)
+        if any(failing.values()):
+            fixes = {}  # test name -> modules whose reference version alone makes it pass
+            for m in meta['modules']:
+                if not os.path.exists(os.path.join(src_root, m)):
+                    continue
+                swap = os.path.join(tmp, 'swap')
+                shutil.rmtree(swap, ignore_errors=True)
+                shutil.copytree(scratch, swap, symlinks=True)
+                shutil.copy2(os.path.join(src_root, m), os.path.join(swap, m))
+                for suite in SUITES:
+                    names = [n for n in failing[suite] if m in exercised.get(file_of_test(n), [])]
+                    if not names:
+                        continue
+                    r = run_suite(swap, [node_of(n) for n in names], timeout)
+                    for n in names:
+                        if r['tests'].get(n) == 'passed':
+                            fixes.setdefault(n, []).append(m)
+                shutil.rmtree(swap, ignore_errors=True)
+            for suite in SUITES:
+                for n in failing[suite]:
+                    ex = exercised.get(file_of_test(n), [])
+                    for m in (fixes.get(n) or ex):
+                        if m in charged:
+                            charged[m].append(n)
+        for m in meta['modules']:
+            t = os.path.basename(m)[:-3]
+            files = [f for f, ms in exercised.items() if m in ms and ref_counts[f.split('/')[0]]['per_file'].get(f)]
+            if not files:
+                per[t] = None
+            else:
+                # a test that never ran (a module that failed to import, a timeout) has no name: its file is short
+                short = [f for f in files if missing.get(f, 0) > sum(1 for s_ in SUITES for n in failing[s_]
+                                                                      if file_of_test(n) == f)]
+                per[t] = not charged[m] and not short
         res['per_task'] = per
+        res['per_task_by_file'] = per_file_rule
+        res['failing_charged_to'] = {os.path.basename(m)[:-3]: sorted(v) for m, v in charged.items() if v}
     shutil.rmtree(tmp, ignore_errors=True)
     return res
 

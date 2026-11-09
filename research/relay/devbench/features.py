@@ -72,7 +72,13 @@ FEATURES = {
                         count=4),
                    dict(file='TASKS.md', old='class Result(seconds, wpm):', new='class Result(words, images, wpm):')],
             trigger_file='readtime/result.py', dependent_files=['readtime/utils.py', 'readtime/api.py'],
-            fallback_s=300)),
+            fallback_s=300,
+            # Round 5 contracts-reader: the harness, as the orchestrator, writes the provider's contract again on
+            # the same key with the constructor signature replaced and the new architecture line first.
+            revise=dict(pattern=r'Result\s*\(\s*seconds\s*,\s*wpm\s*\)', new_sig='Result(words, images, wpm)',
+                        note='round 5 contracts-reader: the harness, as the orchestrator, writes the provider\'s '
+                             'contract again on the same key with the constructor signature replaced and the new '
+                             'architecture line first'))),
     'hone': dict(
         prd='docs/README.md',
         questions=dict(

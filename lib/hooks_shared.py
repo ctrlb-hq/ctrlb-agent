@@ -26,9 +26,10 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
          "the same files. Pass run_id=\"{run}\" and agent=\"{agent}\" to the ctrlb relay tools (peers, post, claim, "
          "release, handoff, ask, answer, brief, briefs, tasks, contract, contracts). Claim the task by the name your orchestrator registered (for example "
          "claim(resource=\"task 03 median\"); tasks lists them). Its files come with it. If held is false with "
-         "finished_by, the task is done; if held is false with held_by, another agent has it: pick another. Claim "
-         "with wait_s=30 when the task you want is held and you have nothing else to do: you are held as soon as it "
-         "is your turn, or answered reason timed_out. If reason is unknown_task, claim again with the suggestion. If "
+         "finished_by, the task is done; if held is false with held_by, another agent has it: pick another. If tasks "
+         "shows a task you need as stalled, claim it with takeover=true, read its evidence and notes, and continue it. "
+         "Never wait in line on a stalled task. If a file you need is held by an agent that has stopped, the hold "
+         "shows as stalled; take it over the same way. If reason is unknown_task, claim again with the suggestion. If "
          "reason is belongs_to_task, the file comes with a registered task: claim that task (task in the answer) "
          "instead. If the claim answers ask_about, ask the task's owner about those before deciding them yourself. "
          "Work only while you hold it. When the task is done, release "
@@ -46,6 +47,11 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
          "read it: read it again). Post a note "
          "only for what none of them covers. If you were asked to do a finished task again, claim its name with "
          "reopen=true.")
+
+
+# Seeker decision 33: a hold whose holder has stopped is taken over, not waited out.
+STALLED_HINT = ("If the holder has stopped, the hold shows as stalled (tasks lists stalled tasks); claim it with "
+                "takeover=true instead of waiting.")
 
 
 def context(event, text):
@@ -99,11 +105,11 @@ def decide(cfg, run, agent, paths, cwd=''):
         holder = conflicts[0]['held_by']
         if mode == 'enforce' and res.get('allowed') is False:
             reason = (f"CtrlB Relay (run {run}): {said}. Do not edit it. Call {call} and edit only if held is true; "
-                      f"otherwise pick other work or call peers to see what {holder} is doing.")
+                      f"otherwise pick other work or call peers to see what {holder} is doing. {STALLED_HINT}")
             return _deny(reason)
         return context('PreToolUse', f"CtrlB Relay (run {run}): {said}. Another agent is working on this file. Before "
                                      f"editing it, call {call}; if held is false, leave the file to its holder and pick "
-                                     f"other work.")
+                                     f"other work. {STALLED_HINT}")
     # Fencing (holdRequired): the agent does not hold the file now.
     text = (f"CtrlB Relay (run {run}): {said}. Call {call} and edit only if held is true; if held is false, leave the "
             f"file to its holder and pick other work.")

@@ -81,6 +81,34 @@ class BashWrites(unittest.TestCase):
         self.assertTrue(rs.bash_writes(f"cd {cwd} && cat > readtime/utils.py <<'EOF'\nx\nEOF", F, cwd))
         self.assertTrue(rs.bash_writes("cat > readtime/utils.py <<'EOF'\nx\nEOF", F, cwd))
 
+    def test_scratch_copy(self):
+        """The three false duplicates of the relay benchmark (item 1): a write into a scratch copy of the tree."""
+        cwd = '/tmp/relay-proof-pair-relay-04-851j5cuy'
+        f = 'hone/utils/csv_utils.py'
+        # pair-relay hone trial 4, agent-1: cd into the trial dir, copy it to $S, write the copy
+        cmd = ("set -e; S=/tmp/agent1-scratch; rm -rf $S; mkdir -p $S; cd /tmp/relay-proof-pair-relay-04-851j5cuy; "
+               "cp -r hone unit_tests data_file examples $S/; cat > $S/hone/utils/csv_utils.py <<'EOF'\nimport csv\nEOF")
+        self.assertFalse(rs.bash_writes(cmd, f, cwd))
+        # quad-relay hone trial 3, agent-3: the same with the trial dir in a variable
+        cmd = ("set -e\nS=/tmp/scratch-agent3-hone; rm -rf $S; mkdir -p $S\nP=/tmp/relay-proof-quad-relay-03-_ubf6psy\n"
+               "cp -r $P/hone $P/unit_tests $S/\ncat > $S/hone/utils/csv_utils.py <<'EOF'\nimport csv\nEOF")
+        self.assertFalse(rs.bash_writes(cmd, f, '/tmp/relay-proof-quad-relay-03-_ubf6psy'))
+        # pair-relay readtime trial 7, agent-1: a mktemp dir (an unknown directory is not the trial dir)
+        cmd = ("d=$(mktemp -d) && mkdir -p $d/readtime && cp /tmp/relay-proof-pair-relay-07-fexwlw59/readtime/api.py "
+               "$d/readtime/ && cat > $d/readtime/utils.py <<'EOF'\ndef read_time(c, f, wpm=265):\n    pass\nEOF")
+        self.assertFalse(rs.bash_writes(cmd, F, '/tmp/relay-proof-pair-relay-07-fexwlw59'))
+        # the trial's own file through a variable naming the trial dir, or $PWD, still counts
+        self.assertTrue(rs.bash_writes(f"P={cwd}; cat > $P/{f} <<'EOF'\nx\nEOF", f, cwd))
+        self.assertTrue(rs.bash_writes(f"cat > $PWD/{f} <<'EOF'\nx\nEOF", f, cwd))
+        # a write before a later cd away counts; one after it does not
+        self.assertTrue(rs.bash_writes(f"cat > {f} <<'EOF'\nx\nEOF\ncd /tmp && python3 -c 'print(1)'", f, cwd))
+        self.assertFalse(rs.bash_writes(f"cd /tmp && cat > {f} <<'EOF'\nx\nEOF", f, cwd))
+        # a relative cd inside the trial dir and back
+        self.assertTrue(rs.bash_writes(f"cd hone && cd .. && sed -i 's/a/b/' {f}", f, cwd))
+        self.assertFalse(rs.bash_writes(f"cd ../other-copy && sed -i 's/a/b/' {f}", f, cwd))
+        # without the trial dir nothing can be judged: the old suffix rule
+        self.assertTrue(rs.bash_writes(cmd, F))
+
 
 if __name__ == '__main__':
     unittest.main()

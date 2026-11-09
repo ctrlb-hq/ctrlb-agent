@@ -2,10 +2,11 @@
 
   parity  read_key on every case of Seeker's tests/fixtures/key_states.json (the same file Go's ReadKey passes), the
           belongs_to_task decision on its cases with a claim (decision 27), DONE rows with evidence folding as without
-          (decision 30), and relay_paths.key on every case of tests/fixtures/keys.json
+          (decision 30), the takeover decision and the edit check on its takeover and check cases (decision 33), and
+          relay_paths.key on every case of tests/fixtures/keys.json
   live    claim, release, reopen, the read-your-write guard, the late finish, waiting in line (wait_s) and registered
-          tasks (belongs_to_task), done with evidence against the lake (stream swarm_board, a fresh run id); skipped when the lake does not
-          answer
+          tasks (belongs_to_task), done with evidence, takeover of a stalled hold (decision 33) against the lake (stream
+          swarm_board, a fresh run id); skipped when the lake does not answer
 
 Usage: FIXTURES=<seeker>/tests/fixtures python3 -I test_swarm_mcp.py
   FIXTURES   Seeker's tests/fixtures (default: ../../../seeker/tests/fixtures, a Seeker checkout beside this repo)
@@ -109,6 +110,73 @@ class Parity(unittest.TestCase):
             with self.subTest(c['name']):
                 self.assertEqual({k: [sig(r) for r in v] if isinstance(v, list) else sig(v) for k, v in a.items()},
                                  {k: [sig(r) for r in v] if isinstance(v, list) else sig(v) for k, v in b.items()})
+
+    def test_takeover(self):
+        """Seeker decision 33: the fixture's takeover cases (rows of the key, a claim with takeover=true at now_us):
+        takeover_plan gives the reason, the holder, its idle seconds and the rows written (tokens are random: the
+        taker's own rows are compared with their nonce as <token>, and ts is never compared)."""
+        cases = [c for c in fixture('key_states.json')['cases'] if c.get('takeover')]
+        if not cases:
+            self.skipTest(f'{FIXTURES} predates decision 33 (no takeover case); use a fixture from feat/relay-stall-takeover')
+        for c in cases:
+            t = c['takeover']
+            age = t.get('activity_age_s')
+            act = None if age is None else c['now_us'] - int(age) * 1_000_000
+            got = M.takeover_plan([dict(r) for r in c['rows']], c['now_us'], c['lease_s'], c['key'], t['agent'],
+                                  t['stall_after_s'], act, token='<token>')
+            want = c['want_takeover']
+
+            def norm(rows):
+                return [dict(agent=r['agent'], kind=r['kind'], nonce=r.get('nonce') or '', to=r.get('to') or '')
+                        for r in rows]
+            with self.subTest(c['name']):
+                self.assertEqual(dict(held=got['held'], reason=got['reason'], holder=got['holder'], idle_s=got['idle_s'],
+                                      rows=norm(got['rows'])),
+                                 dict(held=want.get('held', False), reason=want.get('reason', ''),
+                                      holder=want.get('holder', ''), idle_s=want.get('idle_s', 0),
+                                      rows=norm(want.get('rows') or [])))
+                # The takeover's rows folded with the key's: a held taker is first live, in the holder's place.
+                ts = c['now_us']
+                written = [dict(r, ts=ts, token='<token>' if r['kind'] == 'HANDOFF' else '') for r in got['rows']]
+                st = M.read_key([dict(r) for r in c['rows']] + written, ts, c['lease_s'], key=c['key'])
+                self.assertEqual(bool(st['live']) and st['live'][0]['agent'] == t['agent'], got['held'])
+        print(f'\n  key_states.json: takeover_plan decided as the fixture says on {len(cases)} takeover cases', file=sys.stderr)
+
+    def test_check_after_takeover(self):
+        """Seeker decision 33: the fixture's check cases (the edit check of an agent with holdRequired at now_us), such
+        as the stalled holder's check after the takeover: held by the taker."""
+        cases = [c for c in fixture('key_states.json')['cases'] if c.get('check')]
+        if not cases:
+            self.skipTest(f'{FIXTURES} predates decision 33 (no check case); use a fixture from feat/relay-stall-takeover')
+        for c in cases:
+            got = M.check_state([dict(r) for r in c['rows']], c['now_us'], c['lease_s'], c['key'], c['check']['agent'])
+            want = c['want_check']
+            with self.subTest(c['name']):
+                self.assertEqual((got['reason'], got['held_by']), (want.get('reason', ''), want.get('held_by', '')))
+        print(f'\n  key_states.json: check_state decided as the fixture says on {len(cases)} check cases', file=sys.stderr)
+
+    def test_takeover_plan_rules(self):
+        """The takeover rule without the fixture: stalled first holder handed off (its renewal released); a working
+        holder refused not_stalled with nothing written; nothing to take over on a free, finished or own key."""
+        now, s = 1_800_000_000_000_000, 1_000_000
+        h = lambda age, agent, kind, nonce: dict(ts=now - age * s, agent=agent, kind=kind, nonce=nonce)
+        rows = [h(400, 'a', 'HOLD', 'a1'), h(350, 'a', 'HOLD', 'a2'), h(100, 'b', 'HOLD', 'b1')]
+        got = M.takeover_plan(rows, now, 600, 'name:t', 'c', 300, token='tk')
+        self.assertEqual((got['reason'], got['holder'], got['idle_s']), ('', 'a', 350))
+        self.assertEqual([(r['agent'], r['kind'], r['nonce'], r['to']) for r in got['rows']],
+                         [('a', 'RELEASE', 'a2', ''), ('a', 'HANDOFF', 'a1', 'c')])
+        st = M.read_key(rows + [dict(r, ts=now) for r in got['rows']], now, 600, 'name:t')
+        self.assertEqual([r['agent'] for r in st['live']], ['c', 'b'])
+        self.assertEqual(M.check_state(rows + [dict(r, ts=now) for r in got['rows']], now, 600, 'name:t', 'a'),
+                         dict(reason='held', held_by='c'))
+        busy = M.takeover_plan(rows, now, 600, 'name:t', 'c', 300, activity_us=now - 40 * s)
+        self.assertEqual((busy['reason'], busy['idle_s'], busy['rows']), ('not_stalled', 40, []))
+        free = M.takeover_plan([], now, 600, 'name:t', 'c', 300, token='tk')
+        self.assertEqual((free['held'], [(r['agent'], r['kind'], r['nonce']) for r in free['rows']]), (True, [('c', 'HOLD', 'tk')]))
+        self.assertEqual([r['kind'] for r in M.takeover_plan(rows, now, 600, 'name:t', 'a', 300)['rows']], ['HOLD'])
+        done = rows[:1] + [h(300, 'a', 'DONE', 'a1')]
+        self.assertEqual(M.takeover_plan(done, now, 600, 'name:t', 'c', 300)['rows'], [])
+        self.assertEqual(M.takeover_plan(rows, now, 600, 'name:t', 'c', 300, user='other')['reason'], 'other_user')
 
     def test_evidence_shape(self):
         self.assertEqual(M._evidence({'command': ' pytest -q ', 'exit_code': 0, 'summary': '1 passed', 'x': 1}),
@@ -268,6 +336,33 @@ class Live(unittest.TestCase):
         self.assertTrue(self.as_agent('b', M.claim, 'src/h.py').get('renewed'))
         self.assertEqual(self.as_agent('b', M.release, 'src/h.py', False)['released'], 2)
         self.assertTrue(self.as_agent('c', M.claim, 'src/h.py')['held'])
+
+    def test_takeover(self):
+        """Decision 33 against the lake: a working holder is not taken over; once it made no progress for SWARM_STALL_S
+        the taker holds the task and its file in its place, and the stalled holder is refused on its file."""
+        M.task('task to', 'stall me', ['src/to.py'])
+        time.sleep(0.05)
+        self.assertTrue(self.as_agent('a', M.claim, 'task to')['held'])
+        time.sleep(0.05)
+        old = M.STALL_S
+        try:
+            M.STALL_S = 60
+            got = self.as_agent('b', M.claim, 'task to', takeover=True)
+            self.assertEqual((got['held'], got.get('reason'), got.get('held_by')), (False, 'not_stalled', 'a'))
+            self.assertEqual(self.rows_of('name:task to', 'HANDOFF'), [])
+            M.STALL_S = 0
+            got = self.as_agent('b', M.claim, 'task to', takeover=True)
+            self.assertEqual((got['held'], got.get('taken_over_from'), got.get('paths')), (True, 'a', ['path:src/to.py']))
+        finally:
+            M.STALL_S = old
+        time.sleep(0.05)
+        for k in ('name:task to', 'path:src/to.py'):
+            st = M.read_key(M.hold_rows(k), M.now_us(), M.LEASE_S, k)
+            self.assertEqual(st['live'][0]['agent'], 'b', k)
+            self.assertEqual(M.check_state(M.hold_rows(k), M.now_us(), M.LEASE_S, k, 'a'), dict(reason='held', held_by='b'))
+        h = self.rows_of('name:task to', 'HANDOFF')
+        self.assertEqual([(r['agent'], r['to'], r['text']) for r in h], [('a', 'b', 'stalled: taken over by b')])
+        self.assertTrue(self.as_agent('b', M.done, 'task to', {'command': 'pytest', 'exit_code': 0})['done'])
 
     def test_questions(self):
         qid = self.as_agent('a', M.ask, 'which port?', 'b')['id']

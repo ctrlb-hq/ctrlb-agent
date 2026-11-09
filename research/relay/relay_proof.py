@@ -73,6 +73,9 @@ SHIFT3 = (' You work a 3-minute shift. Before your 3 minutes are up, hand the ta
 SHIFT1 = (' You work a 1-minute shift. Before your minute is up, hand the task you hold to agent-2 with '
           'handoff(resource=<the task name>, to="agent-2"), post what is done and what is left on it, and stop.')
 ON = dict(relay=True, settings=dict(holdRequired=True))
+CONTRACT_HINT = (' When you have written {provider} (the module the other modules build on), publish its interface with '
+                 'the contract tool (name it after the module, paths: ["{provider}"]) so the other agent can read it '
+                 'with contracts.')
 ARMS = {
     'solo': dict(agents=1, relay=False),
     'pair-none': dict(agents=2, relay=False, rule=rs.RULES['none']),
@@ -82,6 +85,19 @@ ARMS = {
     'questions-control': dict(agents=2, feature='questions', disallow=('ask',), **ON),
     'contracts': dict(agents=2, feature='contracts', **ON),
     'contracts-control': dict(agents=2, feature='contracts', disallow=('contract',), **ON),
+    # Round 5, section C: the contracts experiment split into its two sides (Orchestrator.contract_change). reader:
+    # after the provider's first contract on the provider file, the harness revises that contract (same key, the
+    # changed constructor line) and NOTEs the dependent agent. provider: the same trigger, the docs change and the
+    # NOTE goes to the provider, which may republish. Controls: the same NOTE with contract and contracts not
+    # allowed. The arms' agents are told to publish the provider module's interface with contract (CONTRACT_HINT):
+    # in the benchmark only 1 of 5 contracts trials had a contract on readtime/result.py, so without it the change
+    # rarely fires.
+    'contracts-reader': dict(agents=2, feature='contracts', contracts_mode='reader', contract_hint=True, **ON),
+    'contracts-reader-control': dict(agents=2, feature='contracts', contracts_mode='reader',
+                                     disallow=('contract', 'contracts'), **ON),
+    'contracts-provider': dict(agents=2, feature='contracts', contracts_mode='provider', contract_hint=True, **ON),
+    'contracts-provider-control': dict(agents=2, feature='contracts', contracts_mode='provider',
+                                       disallow=('contract', 'contracts'), **ON),
     'handoff': dict(agents=2, relay=True, settings=dict(holdRequired=True, leaseSeconds=60), feature='handoff',
                     stop={'agent-1': 300}, extra={'agent-1': SHIFT}),
     'handoff-control': dict(agents=2, relay=True, settings=dict(holdRequired=True, leaseSeconds=60), feature='handoff',
@@ -97,6 +113,20 @@ ARMS = {
     'handoff1-control': dict(agents=2, relay=True, settings=dict(holdRequired=True, leaseSeconds=600,
                                                                  stallAfterSeconds=60), feature='handoff',
                              stop={'agent-1': 60}, stall_poll=True),
+    # Round 5 path-hold proof: agent-1 is stopped while it is first live on path:REGISTRY.md (the toy's agents claim
+    # it each time they append a task's line), polled every second from 30 s; if it never holds it by 150 s it is
+    # stopped then (registry.held_at_stop false). The hold should show as stalled (kind path) and be taken over.
+    'handoff1-registry': dict(agents=2, relay=True, settings=dict(holdRequired=True, leaseSeconds=600,
+                                                                  stallAfterSeconds=60), feature='handoff',
+                              stop_on_hold=dict(agent='agent-1', key='path:REGISTRY.md', from_s=30, until_s=150,
+                                                every_s=1), stall_poll=True),
+    # Round 5 supplementary takeover proof: agent-1 is stopped while it holds a registered task (Seeker's tasks:
+    # state held, held_by agent-1), polled every second from 30 s, else at 150 s. In handoff1-control the stop at 60 s
+    # caught agent-1 holding a task in 1 of 5 trials; this shape makes every trial a stall to take over.
+    'handoff1-taskhold': dict(agents=2, relay=True, settings=dict(holdRequired=True, leaseSeconds=600,
+                                                                  stallAfterSeconds=60), feature='handoff',
+                              stop_on_hold=dict(agent='agent-1', key='*task*', from_s=30, until_s=150, every_s=1),
+                              stall_poll=True),
     'fence-off': dict(agents=2, relay=True, settings=dict(holdRequired=False, leaseSeconds=60)),
     'fence-on': dict(agents=2, relay=True, settings=dict(holdRequired=True, leaseSeconds=60)),
 }
@@ -532,6 +562,9 @@ class Orchestrator:
         self.errors = []
         self.stall_seen = {}     # task key -> first reading with stalled true (stall_poll arms)
         self.stall_polls = 0
+        self.stop_requests = {}  # agent -> why (stop_on_hold arms: the trial loop stops it)
+        self.hold_watch = None   # stop_on_hold: what the watch saw
+        self.next_h = 0.0
 
     def prepare(self):
         """Before the agents start: remove the fact (questions arms)."""
@@ -562,6 +595,10 @@ class Orchestrator:
             if self.cfg.get('stall_poll') and now >= self.next_s:
                 self.next_s = now + 10
                 self.poll_stalls(now)
+            soh = self.cfg.get('stop_on_hold')
+            if soh and soh['agent'] not in self.stop_requests and now >= self.next_h and now - self.t0 >= soh['from_s']:
+                self.next_h = now + soh.get('every_s', 1)
+                self.watch_hold(now, soh)
         except Exception as e:  # noqa: BLE001  (one failed poll is recorded, the trial goes on)
             self.errors.append(f'{round(now - self.t0)}s {type(e).__name__}: {str(e)[:200]}')
 
@@ -596,6 +633,7 @@ class Orchestrator:
         self.stall_polls += 1
         for x in (d.get('detectors') or {}).get('stalled') or []:
             rec = self.stall_seen.setdefault(x.get('key'), dict(task=x.get('task'), holder=x.get('holder'),
+                                                                kind=x.get('kind'), resource=x.get('resource'),
                                                                 first_seen=now, first_seen_s=round(now - self.t0, 1),
                                                                 last_activity=x.get('last_activity'),
                                                                 last_activity_ts=x.get('last_activity_ts'),
@@ -603,7 +641,63 @@ class Orchestrator:
             if x.get('lease_lapsed') and 'lease_lapsed_seen_s' not in rec:
                 rec['lease_lapsed_seen_s'] = round(now - self.t0, 1)
 
+    def watch_hold(self, now, soh):
+        """stop_on_hold: read the key's rows from the lake, fold them (swarm_mcp.read_key, the fold that passes
+        key_states.json) and ask the trial loop to stop the agent when it is the first live holder; at until_s stop it
+        anyway."""
+        if soh['key'] == '*task*':
+            return self.watch_task_hold(now, soh)
+        import lib_lake as L
+        import swarm_mcp
+        raw, err = [], None
+        # "to" and token exist only once some HANDOFF was written to the dataset: read without them when they are not
+        for cols in ('_timestamp, agent, kind, nonce, "to", token', '_timestamp, agent, kind, nonce'):
+            sql = (f'SELECT {cols} FROM {RELAY_DS} '
+                   f"WHERE run_id = '{L.q(self.run_id)}' AND key = '{L.q(soh['key'])}'")
+            try:
+                raw, err = L.search(RELAY_DS, sql, size=10000, timeout=10), None
+                break
+            except Exception as e:  # noqa: BLE001
+                err = f'{type(e).__name__}: {str(e)[:120]}'
+        rows = [dict(ts=int(r['_timestamp']), agent=r.get('agent'), kind=r.get('kind'), nonce=r.get('nonce') or '',
+                     to=r.get('to') or '', token=r.get('token') or '') for r in raw if r.get('kind')]
+        lease = int((self.cfg.get('settings') or {}).get('leaseSeconds') or BASE.get('leaseSeconds', 600))
+        st = swarm_mcp.read_key(rows, int(now * 1e6), lease, key=soh['key'])
+        first = st['live'][0] if st['live'] else None
+        w = self.hold_watch = self.hold_watch or dict(key=soh['key'], polls=0, errors=0, holders_seen=[])
+        w['polls'] += 1
+        w['errors'] += bool(err)
+        if first and first['agent'] not in w['holders_seen']:
+            w['holders_seen'].append(first['agent'])
+        if first and first['agent'] == soh['agent']:
+            w.update(held_at_stop=True, stop_s=round(now - self.t0, 1), hold_ts=first['ts'] / 1e6,
+                     hold_nonce=first['nonce'])
+            self.stop_requests[soh['agent']] = f"stop_on_hold: first live on {soh['key']}"
+        elif now - self.t0 >= soh['until_s']:
+            w.update(held_at_stop=False, stop_s=round(now - self.t0, 1))
+            self.stop_requests[soh['agent']] = f"stop_on_hold: never held {soh['key']} by {soh['until_s']} s"
+
+    def watch_task_hold(self, now, soh):
+        """stop_on_hold with key *task*: stop the agent when Seeker's tasks shows it holding any task not finished."""
+        st, ans = http('GET', run_path(self.run_id, '/tasks'))
+        w = self.hold_watch = self.hold_watch or dict(key='*task*', polls=0, errors=0, holders_seen=[])
+        w['polls'] += 1
+        w['errors'] += st != 200
+        held = [t for t in (ans.get('tasks') or []) if st == 200 and t.get('state') == 'held']
+        for t in held:
+            if t.get('held_by') and t['held_by'] not in w['holders_seen']:
+                w['holders_seen'].append(t['held_by'])
+        mine = [t for t in held if t.get('held_by') == soh['agent']]
+        if mine:
+            w.update(held_at_stop=True, stop_s=round(now - self.t0, 1), task=mine[0].get('name'), key=mine[0].get('key'))
+            self.stop_requests[soh['agent']] = f"stop_on_hold: holds {mine[0].get('name')}"
+        elif now - self.t0 >= soh['until_s']:
+            w.update(held_at_stop=False, stop_s=round(now - self.t0, 1))
+            self.stop_requests[soh['agent']] = f"stop_on_hold: held no task by {soh['until_s']} s"
+
     def maybe_change_prd(self, now):
+        if self.cfg.get('contracts_mode'):
+            return self.contract_change(now, self.cfg['contracts_mode'])
         c = self.feat['contracts']
         trigger = None
         if 'contract' not in self.cfg.get('disallow', ()):
@@ -629,6 +723,67 @@ class Orchestrator:
                                     f'reads "{c["new"]}".' + (f' The matching lines in {", ".join(also)} changed too.'
                                                               if also else '') + ' Check anything built on it.')
         self.prd_change = dict(trigger, at=time.time(), at_s=round(time.time() - self.t0, 1), note_status=st)
+
+
+    def contract_change(self, now, mode):
+        """Round 5, section C. Trigger: with contracts allowed, the first contract whose paths name the provider file
+        (its agent is the provider); in the controls (contract and contracts not allowed) the provider's task finished,
+        which is when the arms' agents are told to publish the contract (CONTRACT_HINT), so the trigger falls at the
+        same point of the work. On the trigger the docs change as in the benchmark (architecture line, UML lines,
+        TASKS.md), and: reader: the harness, as the orchestrator, writes the contract again on the same key with the
+        new constructor (arm only), and NOTEs the dependent agent; provider: NOTEs the provider that the doc line
+        changed. No trigger by fallback_s: nothing changes, and the trial is reported as untriggered."""
+        c = self.feat['contracts']
+        prov_key = 'path:' + c['provider']
+        allowed = 'contracts' not in self.cfg.get('disallow', ())
+        trigger = None
+        if allowed:
+            st, ans = http('GET', run_path(self.run_id, '/contracts'))
+            mine = [x for x in (ans.get('contracts') or []) if prov_key in (x.get('paths') or [])] if st == 200 else []
+            mine = [x for x in mine if x.get('agent') != ORCH]
+            if mine:
+                first = min(mine, key=lambda x: x.get('ts') or 0)
+                trigger = dict(by='provider first contract', contract=first.get('name'), key=first.get('key'),
+                               provider=first.get('agent'), contract_text=first.get('text'), paths=first.get('paths'),
+                               contract_ts=first.get('ts'))
+        else:
+            st, ans = http('GET', run_path(self.run_id, '/tasks'))
+            for t in (ans.get('tasks') or []) if st == 200 else []:
+                if t.get('state') == 'finished' and any(p.endswith(c['trigger_file']) for p in t.get('paths') or []):
+                    trigger = dict(by='provider task finished', task=t.get('name'), provider=t.get('finished_by'))
+        if trigger is None:
+            if now - self.t0 >= c.get('fallback_s', 300):
+                self.prd_change = dict(by=None, mode=mode, at=None, at_s=None,
+                                       note=f"no trigger by {c.get('fallback_s', 300)} s: nothing changed")
+            return
+        agents = [f'agent-{i + 1}' for i in range(self.cfg['agents'])]
+        trigger['dependent'] = next((a for a in agents if a != trigger.get('provider')), None)
+        self.edit_prd(c['old'], c['new'], c.get('file'))
+        for e in c.get('edits') or []:
+            self.edit_prd(e['old'], e['new'], e.get('file'), e.get('count', 1))
+        prd = c.get('file') or self.project['prd'] or self.feat['prd']
+        rec = dict(trigger, mode=mode)
+        if mode == 'reader':
+            if allowed:
+                rv = c['revise']
+                text = re.sub(rv['pattern'], rv['new_sig'], trigger.get('contract_text') or '')
+                text = 'Revised by the orchestrator: ' + c['new'] + '\n' + text
+                st, ans = http('POST', run_path(self.run_id, '/briefs'),
+                               {'agent': ORCH, 'resource': trigger['key'], 'text': text, 'paths': trigger['paths']})
+                rec['revision'] = dict(status=st, key=ans.get('key'), at=time.time(), text=text)
+                where = f'the contract "{trigger.get("contract")}" and {prd} now give the new line'
+            else:
+                where = f'{prd} now gives the new line'
+            note = (f'NOTE from the orchestrator to {trigger["dependent"]}: the Result constructor ({c["provider"]}) was '
+                    f'revised; {where}. Check it before building on it.')
+        else:
+            note = (f'NOTE from the orchestrator to {trigger.get("provider")}: the PRD changed. In {prd}, the line '
+                    f'"{c["old"]}" now reads "{c["new"]}". Check anything built on it.')
+        rec['note'] = note
+        rec['note_status'] = post_note(self.run_id, note)
+        rec['at'] = time.time()
+        rec['at_s'] = round(rec['at'] - self.t0, 1)
+        self.prd_change = rec
 
 
 # ---------------------------------------------------------------- one trial
@@ -670,6 +825,10 @@ def trial(arm, spec, k, model, budget_min, max_turns):
             res['ask_about'] = ask
         res['registered'] = len(register(run_id, project['tasks'],
                                          {name: cmd for name, (cmd, _) in tests.items()}, ask)) if cfg['relay'] else 0
+        if cfg.get('contract_hint') and feat.get('contracts'):
+            hint = CONTRACT_HINT.format(provider=feat['contracts']['provider'])
+            cfg = dict(cfg, extra={a: (cfg.get('extra') or {}).get(a, '') + hint for a in agents})
+            res['contract_hint'] = hint
         orch = Orchestrator(cfg, project, feat, run_id, cwd, time.time())
         orch.prepare()
         t0 = orch.t0 = time.time()
@@ -681,6 +840,8 @@ def trial(arm, spec, k, model, budget_min, max_turns):
                 stop_at = (cfg.get('stop') or {}).get(p.name)
                 if stop_at is not None and p.alive() and now - t0 >= stop_at:
                     p.stop(f'arm stop at {stop_at} s')
+                if p.name in orch.stop_requests and p.alive():
+                    p.stop(orch.stop_requests[p.name])
             if now >= deadline:
                 for p in procs:
                     p.stop('budget')
@@ -731,7 +892,8 @@ def trial(arm, spec, k, model, budget_min, max_turns):
     time.sleep(3)  # the last uploaded rows become readable
     st, detail = http('GET', run_path(run_id), query={'from': int((t0 - 600) * 1e6), 'to': int((time.time() + 60) * 1e6)})
     rows = lake_rows(run_id)
-    res.update(analyse(cfg, project, feat, agents, per_agent, timeline, detail if st == 200 else {}, rows, orch, t0))
+    res.update(analyse(cfg, project, feat, agents, per_agent, timeline, detail if st == 200 else {}, rows, orch, t0,
+                       ask))
     # done refused for missing evidence (decision 30): Seeker writes nothing for a refusal, so count the answers the
     # agents saw (done, and a finished release) in their stream logs.
     res['evidence_refusals'] = sum(evidence_refusals(os.path.join(cwd, f'.log-{p.name}.jsonl')) for p in procs)
@@ -745,6 +907,10 @@ def trial(arm, spec, k, model, budget_min, max_turns):
                              detect_after_last_activity_s=round(r['first_seen'] - g, 1) if g else None))
         res['stall'] = dict(polls=orch.stall_polls, seen=seen, agents_last_activity_s={
             a: (round(v - t0, 1) if v else None) for a, v in last.items()})
+    if cfg.get('stall_poll'):
+        res['takeover'] = takeover_measures(rows, orch, timeline, procs, cwd, res, t0)
+    if orch.hold_watch is not None:
+        res['hold_watch'] = orch.hold_watch
     res['abandoned'], res['abandoned_per_agent'] = abandonment(res)
     per_task = res['score'].get('per_task') or {}
     res['questions']['tasks_needing_fact_passed'] = {t: per_task.get(t) for t in res['questions']['tasks_needing_fact']}
@@ -769,12 +935,210 @@ PROSE = dict(question=re.compile(r'\?|\bquestion\b|\bask(ing)?\b', re.I),
              handoff=re.compile(r'\bhand(ing)?[ -]?off\b|\bhanded\b|\btak(e|ing) over\b|\bleft to do\b|\bremaining\b', re.I))
 
 
+STOP = set('the a an of to in is it be when what which used use for and or on by with not none given your you ask '
+           'asks about this that are from at as default'.split())
+
+
+def ask_entries(feat, ask):
+    """The ask_about entries of a trial (decision 29) with the words that identify each: the questions feature's
+    keywords (curated: one is enough) for its fact, else the entry's own content words (two needed)."""
+    q = (feat or {}).get('questions') or {}
+    texts = sorted({t for v in (ask or {}).values() for t in v})
+    if not texts and q.get('fact'):
+        texts = [q['fact']]  # the control registers no ask_about: the fact the arm is about stands for it
+    out = []
+    for t in texts:
+        kws = [k.lower() for k in q.get('keywords') or []] if len(texts) == 1 else []
+        if kws:
+            out.append(dict(text=t, keywords=kws, need=1))
+        else:
+            out.append(dict(text=t, need=2, keywords=sorted({w for w in re.findall(r'[a-z0-9]+', t.lower())
+                                                             if w not in STOP and len(w) > 2})))
+    return out
+
+
+def entry_of(text, entries):
+    """The index of the ask_about entry a question is about (the entry whose identifying words it names most, at
+    least its `need`), or None."""
+    low = (text or '').lower()
+    words = set(re.findall(r'[a-z0-9]+', low))
+    best, score = None, 0
+    for i, e in enumerate(entries):
+        n = sum(1 for k in e['keywords'] if (k in low if not k.isalnum() else k in words))
+        if n >= min(e['need'], len(e['keywords'])) and n > score:
+            best, score = i, n
+    return best
+
+
+def question_duplicates(qs, entries):
+    """Round 5 (benchmark item 10): two questions about the same ask_about entry are duplicates, whatever their
+    wording. duplicates counts the questions after the first about an entry; by_two_agents the entries asked about by
+    more than one agent; unmatched the questions about no entry."""
+    by_entry, unmatched = {}, 0
+    for q in sorted(qs, key=lambda x: x.get('ts') or x.get('asked_ts') or 0):
+        i = entry_of(q.get('text') or '', entries)
+        if i is None:
+            unmatched += 1
+        else:
+            by_entry.setdefault(i, []).append(q.get('agent'))
+    return dict(duplicates=sum(len(v) - 1 for v in by_entry.values()),
+                by_two_agents=sum(1 for v in by_entry.values() if len(set(v)) > 1), unmatched=unmatched,
+                per_entry=[dict(entry=entries[i]['text'][:120], asked_by=v) for i, v in sorted(by_entry.items())])
+
+
+TAKEOVER_TEXT = 'stalled: taken over by'
+
+
+def claim_answers(log):
+    """The claim answers an agent read in its stream log that are takeovers or takeover refusals (Seeker decision
+    33): [{held, taken_over_from, reason, resource, stall}]."""
+    out = []
+    try:
+        fh = open(log, errors='replace')
+    except OSError:
+        return out
+    with fh:
+        for line in fh:
+            if 'taken_over_from' not in line and 'not_stalled' not in line and 'other_user' not in line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            msg = rec.get('message') if isinstance(rec, dict) else None
+            for b in (msg.get('content') or []) if isinstance(msg, dict) and isinstance(msg.get('content'), list) else []:
+                if not isinstance(b, dict) or b.get('type') != 'tool_result':
+                    continue
+                try:
+                    ans = json.loads(text_of(b.get('content')))
+                except ValueError:
+                    continue
+                if isinstance(ans, dict) and (ans.get('taken_over_from') or ans.get('reason') in ('not_stalled', 'other_user')):
+                    out.append({k: ans.get(k) for k in ('held', 'taken_over_from', 'reason', 'resource', 'key', 'stall',
+                                                         'paths')})
+    return out
+
+
+def takeover_measures(rows, orch, timeline, procs, cwd, res, t0):
+    """Round 5 takeover proof (decision 33): the takeovers in the record (HANDOFF rows with the takeover text, one
+    lake write per takeover: a task's key and its files, or a bare path), when each came after the first stalled
+    reading of its key (the 10 s poll) and after the holder's last activity (the claim answer's stall reading), the
+    giver's applied edits after it (a fencing failure), tasks completed, and duplicated files other than a taken-over
+    task's (the giver's edits before the takeover and the taker's after are one task continued, not a duplicate)."""
+    good = [r for r in rows if 'error' not in r]
+    groups = {}
+    for r in good:
+        if r.get('kind') == 'HANDOFF' and (r.get('text') or '').startswith(TAKEOVER_TEXT):
+            groups.setdefault((int(r['_timestamp']), r.get('to'), r.get('agent')), []).append(r.get('key') or '')
+    answers = {p.name: claim_answers(os.path.join(cwd, f'.log-{p.name}.jsonl')) for p in procs}
+    taken = [a for v in answers.values() for a in v if a.get('taken_over_from')]
+    out, files_taken = [], set()
+    for (ts, to, giver), keys in sorted(groups.items()):
+        main = next((k for k in keys if not k.startswith('path:')), keys[0])
+        paths = sorted(k[5:] for k in keys if k.startswith('path:'))
+        files_taken.update(paths)
+        seen = orch.stall_seen.get(main) or {}
+        ans = next((a for a in taken if a.get('key') == main or a.get('resource') == main), None)
+        last_act = ((ans or {}).get('stall') or {}).get('last_activity_ts') or seen.get('last_activity_ts')
+        tsec = ts / 1e6
+        after = [e for e in (timeline.get(giver) or {}).get('edits', []) if e['applied'] and e['path'] in paths and
+                 (e['ts'] or 0) > tsec]
+        out.append(dict(key=main, kind=main.split(':', 1)[0], files=paths, giver=giver, taker=to,
+                        at_s=round(tsec - t0, 1), first_stalled_reading_s=seen.get('first_seen_s'),
+                        after_stalled_reading_s=round(tsec - seen['first_seen'], 1) if seen.get('first_seen') else None,
+                        after_holder_last_activity_s=round(tsec - last_act / 1e6, 1) if last_act else None,
+                        stall_idle_s=((ans or {}).get('stall') or {}).get('idle_s'),
+                        giver_edits_after=len(after)))
+    per = (res.get('score') or {}).get('per_task') or {}
+    dup = res.get('duplicated') or []
+    return dict(takeovers=out, n=len(out), n_tasks=sum(1 for t in out if t['kind'] != 'path'),
+                n_paths=sum(1 for t in out if t['kind'] == 'path'),
+                refused=[a for v in answers.values() for a in v if not a.get('taken_over_from')],
+                claim_answers=answers, tasks_completed=sum(1 for v in per.values() if v), tasks=len(per),
+                duplicated_other=sorted(f for f in dup if f not in files_taken),
+                duplicated_by_takeover=sorted(f for f in dup if f in files_taken),
+                stalled_keys=sorted(orch.stall_seen), giver_edits_after_takeover=sum(t['giver_edits_after'] for t in out))
+
+
+def contract_reads(path):
+    """The agent's contracts calls from its transcript: [{read_at (s), contracts: [...]}] from each answer (read_at is
+    Seeker's, so exact), in order."""
+    calls, out = set(), []
+    if not path or not os.path.exists(path):
+        return out
+    with open(path, errors='replace') as fh:
+        for line in fh:
+            if 'contracts' not in line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            msg = rec.get('message') if isinstance(rec, dict) else None
+            for b in (msg.get('content') or []) if isinstance(msg, dict) and isinstance(msg.get('content'), list) else []:
+                if not isinstance(b, dict):
+                    continue
+                if b.get('type') == 'tool_use' and b.get('name') == f'mcp__{SERVER}__contracts':
+                    calls.add(b.get('id'))
+                elif b.get('type') == 'tool_result' and b.get('tool_use_id') in calls:
+                    try:
+                        ans = json.loads(text_of(b.get('content')))
+                    except ValueError:
+                        continue
+                    if isinstance(ans, dict) and ans.get('read_at'):
+                        out.append(dict(read_at=ans['read_at'] / 1e6, contracts=ans.get('contracts') or []))
+    uniq = {round(r['read_at'], 6): r for r in out}  # a transcript may carry a record twice
+    return [uniq[k] for k in sorted(uniq)]
+
+
+def contract_side_measures(cfg, c, change, crow, per_agent, timeline, t0):
+    """Round 5, section C measures. ref: when the dependent agent has something new to read: the harness revision
+    (reader) or the provider's first republish after the NOTE (provider; the NOTE when it never republished)."""
+    out = dict(mode=cfg['contracts_mode'], triggered=bool(change and change.get('at')))
+    if not out['triggered']:
+        return out
+    prov, dep, at = change.get('provider'), change.get('dependent'), change['at']
+    prov_key = 'path:' + c['provider']
+    out.update(provider=prov, dependent=dep, change_at_s=round(at - t0, 1), trigger=change.get('by'))
+    ref = at
+    if cfg['contracts_mode'] == 'provider':
+        rep = sorted(int(r['_timestamp']) / 1e6 for r in crow if r.get('agent') == prov and int(r['_timestamp']) / 1e6 > at)
+        out['provider_republished'] = bool(rep)
+        out['provider_republish_s'] = round(rep[0] - t0, 1) if rep else None
+        if rep:
+            ref = rep[0]
+    out['ref_s'] = round(ref - t0, 1)
+    s = per_agent.get(dep) or {}
+    reads = contract_reads(transcript_path(s.get('session_id') or '') if s.get('session_id') else '')
+    after = [r for r in reads if r['read_at'] > ref]
+    out['dependent_contracts_reads'] = len(reads)
+    out['dependent_reads_after'] = len(after)
+    first = after[0] if after else None
+    if first:
+        con = next((x for x in first['contracts'] if prov_key in (x.get('paths') or [])), None)
+        out['next_read_s'] = round(first['read_at'] - t0, 1)
+        out['next_read_shows_contract'] = con is not None
+        out['changed_since'] = (con or {}).get('changed_since')
+        out['changed_since_nonempty'] = bool((con or {}).get('changed_since'))
+        out['changed_since_read'] = (con or {}).get('changed_since_read')
+        out['next_read_has_new_sig'] = bool(con and re.search(re.escape(c['revise']['new_sig']) if c.get('revise')
+                                                              else 'words', con.get('text') or ''))
+    dep_files = c.get('dependent_files') or []
+    since = first['read_at'] if first else ref
+    ed = [e for e in (timeline.get(dep) or {}).get('edits', []) if e['applied'] and e['path'] in dep_files and
+          (e['ts'] or 0) > ref]
+    out['dependent_edited_after_ref'] = bool(ed)
+    out['dependent_edited_after_read'] = any((e['ts'] or 0) > since for e in ed) if first else None
+    out['dependent_first_edit_after_s'] = round(min(e['ts'] for e in ed) - t0, 1) if ed else None
+    return out
+
+
 def similar(a, b):
     ta, tb = set(re.findall(r'[a-z0-9]+', a.lower())), set(re.findall(r'[a-z0-9]+', b.lower()))
     return bool(ta and tb) and len(ta & tb) / len(ta | tb) >= 0.6
 
 
-def analyse(cfg, project, feat, agents, per_agent, timeline, detail, rows, orch, t0):
+def analyse(cfg, project, feat, agents, per_agent, timeline, detail, rows, orch, t0, ask_about=None):
     files = [p for _, p, _ in project['tasks']]
     task_of = {p: name for name, p, _ in project['tasks']}
     applied = {a: [e for e in timeline[a]['edits'] if e['applied'] and e['path'] in task_of] for a in agents}
@@ -838,26 +1202,35 @@ def analyse(cfg, project, feat, agents, per_agent, timeline, detail, rows, orch,
     # questions
     qs = detail.get('questions') or []
     ttas = sorted(round((q['answered_ts'] - q['ts']) / 1e6, 1) for q in qs if q.get('answered_ts') and q.get('ts'))
-    dup_q = sum(1 for i, q in enumerate(qs) if any(similar(q.get('text') or '', o.get('text') or '') for o in qs[i + 1:]))
+    dup_text = sum(1 for i, q in enumerate(qs) if any(similar(q.get('text') or '', o.get('text') or '') for o in qs[i + 1:]))
+    qd = question_duplicates(qs, ask_entries(feat, ask_about))
     need = (feat.get('questions') or {}).get('tasks_needing') or []
-    questions = dict(asked=len(qs), answered=sum(1 for q in qs if q.get('answered_ts')), duplicates=dup_q,
+    questions = dict(asked=len(qs), answered=sum(1 for q in qs if q.get('answered_ts')), duplicates=qd['duplicates'],
+                     duplicates_text_similarity=dup_text, same_entry_by_two_agents=qd['by_two_agents'],
+                     unmatched=qd['unmatched'], per_entry=qd['per_entry'],
                      time_to_answer_s=ttas, mean_time_to_answer_s=round(statistics.mean(ttas), 1) if ttas else None,
                      answered_by_harness=sum(1 for q in orch.questions.values() if q.get('answered_at')),
                      naming_fact=sum(1 for q in orch.questions.values() if q.get('names_fact')),
                      open_at_end=run.get('open_questions'), harness_log=list(orch.questions.values()),
                      tasks_needing_fact=need)
 
-    # contracts
+    # contracts. written counts contract rows in the relay record by the agents (round 5, benchmark item j3: not
+    # attempted calls, which include refused ones); calls is the tool count.
     cons = detail.get('contracts') or []
-    contracts = dict(written=tools.get('contract', 0), listed=len(cons),
+    crow = [r for r in good if (r.get('key') or '').startswith('contract:') and r.get('kind') == 'BRIEF']
+    contracts = dict(written=sum(1 for r in crow if r.get('agent') != ORCH), calls=tools.get('contract', 0),
+                     written_by_harness=sum(1 for r in crow if r.get('agent') == ORCH), listed=len(cons),
                      changed_since_nonempty=sum(1 for c in cons if c.get('changed_since')),
                      list=[{k: c.get(k) for k in ('name', 'agent', 'paths', 'changed_since', 'text')} for c in cons],
                      prd_change=orch.prd_change)
-    if orch.prd_change and feat.get('contracts'):
+    if orch.prd_change and orch.prd_change.get('at') and feat.get('contracts'):
         dep = feat['contracts'].get('dependent_files') or []
         at = orch.prd_change['at']
         contracts['dependent_redone'] = any(e['path'] in dep and e['applied'] and (e['ts'] or 0) > at
                                             for a in agents for e in timeline[a]['edits'])
+
+    if cfg.get('contracts_mode') and feat.get('contracts'):
+        contracts.update(contract_side_measures(cfg, feat['contracts'], orch.prd_change, crow, per_agent, timeline, t0))
 
     # handoffs: giver's last applied edit of each handed file before the handoff, receiver's first after it
     hand_rows = [r for r in good if r.get('kind') == 'HANDOFF']

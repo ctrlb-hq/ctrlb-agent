@@ -128,7 +128,8 @@ An exclusive claim on a resource, a file path or a task name.
 | `cwd` | Your working directory. An absolute path under it is keyed relative to it. |
 | `reopen` | `true` to claim a finished task name anyway and start a new round of work on it. It has no effect on a key that is not finished. |
 | `paths` | Files (or `slot:<name>` slots) that come with the resource: all are taken in one step with it, or none is (at most 32). A task your orchestrator registered brings its files when you leave this out. |
-| `wait_s` | Claim with `wait_s=30` when the task you want is held and you have nothing else to do: the claim waits in line (at most 55 s) and is held as soon as it is your turn. Waiters are served in the order they claimed. |
+| `wait_s` | Seconds to wait in line (at most 55) when another agent holds it, instead of a refusal at once: the claim is held as soon as it is your turn, or answers `reason: timed_out`. Waiters are served in the order they claimed. Available, not recommended: in the benchmark waiting did not beat claiming something else, and never wait on a stalled hold (take it over). |
+| `takeover` | `true` to take over a hold whose holder has stopped: the first live hold is another agent's (of your user) and is stalled, that is its holder wrote no relay row on the key or its files and edited none of them for the workspace's `stallAfterSeconds` (300 by default). The holder's hold is handed to you in one write (a `HANDOFF` with the holder as giver and the text `stalled: taken over by <you>`), with the task's files; its next edit of them is refused. On a free key, or one whose holder's lease ran out, it is an ordinary claim. |
 
 Answer when the claim is yours:
 
@@ -167,8 +168,22 @@ Answer when the run has registered tasks and none has that name:
 Answer to `claim(resource="task 03 median", wait_s=30)` when another agent still held it after 30 s (a claim that got its turn answers `held: true` with `waited_ms`):
 
 ```json
-{"held": false, "resource": "task 03 median", "key": "name:task 03 median", "reason": "timed_out", "held_by": "agent-b", "position": 2, "waited_ms": 30000, "message": "task 03 median is still held by agent-b after waiting 30s; nothing was taken. Pick something else, or claim it again with wait_s"}
+{"held": false, "resource": "task 03 median", "key": "name:task 03 median", "reason": "timed_out", "held_by": "agent-b", "position": 2, "waited_ms": 30000, "message": "task 03 median is still held by agent-b after waiting 30s; nothing was taken. Pick something else"}
 ```
+
+Answer to `claim(resource="task 03 median", takeover=true)` when agent-b stopped while holding it (`tasks` showed it `stalled`): you hold it and its files. Read its evidence and notes (`tasks`, `briefs`, `peers`) and continue it.
+
+```json
+{"held": true, "resource": "task 03 median", "key": "name:task 03 median", "lease_until": 1793000900000000, "paths": ["path:src/median.py"], "token": "9f2c...", "taken_over_from": "agent-b", "stall": {"holder": "agent-b", "last_activity": "edit", "last_activity_ts": 1793000200000000, "idle_s": 310, "stall_after_s": 300}}
+```
+
+Answer when the holder is still working: nothing is written. Pick other work.
+
+```json
+{"held": false, "resource": "task 03 median", "key": "name:task 03 median", "held_by": "agent-b", "reason": "not_stalled", "stall": {"holder": "agent-b", "last_activity": "edit", "last_activity_ts": 1793000500000000, "idle_s": 40, "stall_after_s": 300, "stalled": false}, "message": "task 03 median is held by agent-b, whose last progress on it (edit) was 40 s ago; a hold is stalled after 300 s with no relay row and no edit, so it was not taken over and nothing was written. Pick something else, or look at tasks later"}
+```
+
+`reason: other_user` means another user's agent holds it: only that user's agents can take it over. A claim without `takeover` that is refused because the holder's hold is stalled says so: the answer carries `stall` and its message ends "claim it with takeover=true instead of waiting". This is how a stalled bare file, which `tasks` never lists, shows. A bare file works the same way: `claim(resource="REGISTRY.md", takeover=true)` when the agent holding `REGISTRY.md` has stopped.
 
 Answer to a claim of a file that belongs to a registered task you do not hold:
 
@@ -330,7 +345,7 @@ The run's registered tasks and their state now.
 |---|---|
 | `run_id` | Optional, from the header. |
 
-Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round, ask_about?}]}`, and `test` when the task's registration names one. `state` is `open`, `held` or `finished` in the task's current round; `ask_about` is what the task's owner wants its holder to ask about; `test` is the command that tests the task. A finished task with a `test` also carries `evidence_matches_test`: whether its done's command named that test. Each task also carries `evidence` (`{command, exit_code, summary}`, what the `done` that finished it says was checked) when it was finished with evidence, and `stalled`: `true` when it is held (or its holder's lease ran out) and not finished, and its holder wrote nothing on it and edited none of its files for the workspace's `stallAfterSeconds` (300 by default). The run view counts them as `stalled_tasks`.
+Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round, ask_about?}]}`, and `test` when the task's registration names one. `state` is `open`, `held` or `finished` in the task's current round; `ask_about` is what the task's owner wants its holder to ask about; `test` is the command that tests the task. A finished task with a `test` also carries `evidence_matches_test`: whether its done's command named that test. Each task also carries `evidence` (`{command, exit_code, summary}`, what the `done` that finished it says was checked) when it was finished with evidence, and `stalled`: `true` when it is held (or its holder's lease ran out) and not finished, and its holder wrote nothing on it and edited none of its files for the workspace's `stallAfterSeconds` (300 by default). Claim a stalled task you need with `takeover=true`; never wait in line on it. The run view counts them as `stalled_tasks`, and lists every stalled hold, bare files and slots too, in `detectors.stalled` (with `kind` and `resource`; `stalled_holds` is the total).
 
 ### contract
 

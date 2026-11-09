@@ -15,6 +15,10 @@ This directory is research code, not the plugin. Nothing in `plugin/`, `lib/`, `
 | `stall_replay.py` | replays finished runs through Seeker's run view, to see the stall detector (decision 31) |
 | `run_benchmark.py` | the full benchmark (relay-benchmark-2026-11-09) as one queue of single `relay_proof.py` trials: groups of identical Relay settings, two lanes each, STATUS posts and a cost projection |
 | `bench_analyse.py` | the benchmark's tables from its trial files, with the duplicated-edit recount that leaves out Bash writes into a scratch copy |
+| `run_round5.py` | round 5 (relay-stall-takeover-2026-11-09): the takeover proof (`handoff1-control`), the path-hold proof (`handoff1-registry`, agent-1 stopped while it holds `REGISTRY.md`), Sonnet `pair-relay` readtime with rule text v8, and the corrected contracts cells (`contracts-reader`, `contracts-provider` and their controls), as single trials in lanes of identical settings |
+| `round5_analyse.py` | round 5's tables (takeovers, path holds, contracts beside the benchmark's, Sonnet turns and cost, cost and wall) from its trial files |
+| `overhead.py` | the overhead accounting of the benchmark's pair cells: extra turns (and cost) per tool, Relay minus no Relay |
+| `test_round5.py` | offline tests of round 5's measures (takeovers, contract triggers and reads, question duplicates by `ask_about` entry) |
 | `post_status.py` | posts a status note to a run on the lake, or reads the last notes back with `--tail` |
 | `dup_fix.py` | recounts duplicated work in finished `relay_proof.py` trials with `run_swarm.bash_writes` |
 | `test_bash_writes.py` | unit tests of `run_swarm.bash_writes` |
@@ -37,6 +41,7 @@ These rules follow Seeker's `docs/relay.md` (Claim protocol, State machine, Wait
   - A bare claim of such a file is refused with `reason: "belongs_to_task"` and `task`. It is refused before anything is written, unless the caller holds the task.
   - Releasing the task hands its files back.
 - `done(resource, evidence?)` comes from decision 30. It finishes a task name with the evidence of its check, `{command, exit_code, summary}`, which is written as the `DONE` row's text. `read_key` never reads that text. `release(finished=true)` stays as an alias of `done` with no evidence. With `SWARM_EVIDENCE_REQUIRED=1`, both `done` without a command and a finished `release` are refused with `reason: "evidence_required"`.
+- `claim(resource, takeover=true)` comes from decision 33. When the first live hold of the key is another agent's and its holder wrote no row on the key or its files for `SWARM_STALL_S`, one write hands it to the caller: a `HANDOFF` with the stalled holder as giver (text `stalled: taken over by <agent>`) on each key the holder is first on, a `RELEASE` of the holder's other live holds, and the caller's `HOLD` where the holder is not first. The claim then waits, reads and decides like any claim; `read_key` does not change. A holder that is still working is refused with `reason: "not_stalled"` and nothing is written. `takeover_plan` is the decision as a pure function, `check_state` the edit check, and `tasks` marks a held task `stalled`. The prototype has no edit stream, so only relay rows count as progress.
 - Not ported: `unknown_task` and its suggestion, user names (agents are told apart by agent id only), fencing tokens on edits, and the session store.
 
 ## Running the parity runner
@@ -49,7 +54,8 @@ FIXTURES=<seeker checkout>/tests/fixtures python3 -I research/relay/test_swarm_m
 
 - **Parity** runs `read_key` on every case of `key_states.json`. It also runs the `belongs_to_task` decision on the cases that carry a `claim`, and `relay_paths.key` on every case of `keys.json`. It needs no lake. When `FIXTURES` is not set, the runner looks in `../../../seeker/tests/fixtures`, which is a Seeker checkout beside this repo. When neither has the files, it skips these tests.
 - **Evidence** checks that the `DONE` rows that carry evidence fold as they would without it. It needs a fixture from decision 30 on (Seeker `feat/relay-done-stall`), and is skipped with an older one.
-- **Live** runs the following against a lake, each test under a fresh run id: claims, releases, rounds, the read-your-write guard, handoff, questions, contracts, waiting in line (a waiter is served after a release, and a second waiter times out with its position), registered tasks, and `done` with evidence. When the lake does not answer, the live tests are skipped.
+- **Takeover** runs `takeover_plan` on the cases that carry a `takeover` and `check_state` on those that carry a `check`. It needs a fixture from decision 33 on (Seeker `feat/relay-stall-takeover`), and is skipped with an older one.
+- **Live** runs the following against a lake, each test under a fresh run id: claims, releases, rounds, the read-your-write guard, handoff, questions, contracts, waiting in line (a waiter is served after a release, and a second waiter times out with its position), registered tasks, `done` with evidence, and the takeover of a stalled task with its file. When the lake does not answer, the live tests are skipped.
 
 ## Environment
 
@@ -63,6 +69,7 @@ FIXTURES=<seeker checkout>/tests/fixtures python3 -I research/relay/test_swarm_m
 | `SWARM_RUN`, `SWARM_AGENT` | empty | the run and the agent of one server process |
 | `SWARM_TOOLS` | `peers,post,claim,release` | the tools the server exposes |
 | `SWARM_WAIT_MS`, `SWARM_LEASE_S` | `20`, `600` | the claim's wait and the lease |
+| `SWARM_STALL_S` | `300` | a hold with no progress for this long can be taken over (`takeover=true`) |
 
 ## The benchmark harness
 

@@ -275,20 +275,92 @@ def py_writes(prog, f):
     return False
 
 
+CD_RE = re.compile(r'(?:^|[;&|(\n]|&&|\|\|)\s*cd(?:\s+([^\s;&|)]+))?')
+ASSIGN_RE = re.compile(r'(?:^|[\s;&|(])(?:export\s+)?([A-Za-z_]\w*)=([^\s;&|]+)')
+PREFIX_RE = re.compile(r'([^\s\'"<>|;&()=,]*)$')
+PWD_VARS = ('$PWD', '${PWD}', '$(pwd)', '`pwd`')
+
+
+def _expand(tok, here, env):
+    """A path token of a Bash command with $PWD/$(pwd) and variables assigned earlier in the command expanded;
+    None when it still names an unknown variable or command substitution."""
+    tok = tok.strip('\'"')
+    for v in PWD_VARS:
+        tok = tok.replace(v, here or '')
+    for name, val in sorted(env.items(), key=lambda kv: -len(kv[0])):
+        tok = tok.replace('${' + name + '}', val).replace('$' + name, val)
+    if '$' in tok or '`' in tok:
+        return None
+    if tok.startswith('~'):
+        tok = os.path.expanduser(tok)
+    return tok
+
+
+def _occurrences_inside(cmd, f, cwd):
+    """For each occurrence of the relative path f in cmd: whether it names the trial dir's f. The directory in force
+    at an occurrence is the session cwd (the trial dir) changed by every `cd` before it (absolute, relative, or a
+    variable assigned earlier in the command); a prefix before f (`/tmp/x/`, `$S/`, `../copy/`) is resolved against
+    that directory. An unknown directory or an unresolved variable is not the trial dir."""
+    roots = {os.path.normpath(cwd), os.path.realpath(cwd)}
+    target = os.path.normpath(os.path.join(cwd, f))
+    targets = {target, os.path.join(os.path.realpath(cwd), f)}
+    events = [(m.start(), 'cd', m.group(1)) for m in CD_RE.finditer(cmd)]
+    events += [(m.start(), 'set', (m.group(1), m.group(2))) for m in ASSIGN_RE.finditer(cmd)]
+    events.sort(key=lambda e: e[0])
+    out = []
+    for m in re.finditer(re.escape(f), cmd):
+        if m.end() < len(cmd) and re.match(r'[\w]', cmd[m.end()]):
+            out.append(None)  # f is part of a longer name (utils.py.bak, utils.pyc)
+            continue
+        here, env = os.path.normpath(cwd), {}
+        for pos, kind, arg in events:
+            if pos >= m.start():
+                break
+            if kind == 'set':
+                v = _expand(arg[1], here, env)
+                if v is not None:
+                    env[arg[0]] = v
+                else:
+                    env.pop(arg[0], None)
+            elif arg is None or arg in ('~', '-'):
+                here = None if arg == '-' else os.path.expanduser('~')
+            elif here is not None or os.path.isabs(arg):
+                d = _expand(arg, here, env)
+                here = None if d is None else os.path.normpath(os.path.join(here or '/', d))
+        pre = PREFIX_RE.search(cmd[:m.start()]).group(1)
+        if pre and not pre.endswith('/'):
+            out.append(None)  # f is the tail of another name (xreadtime/utils.py)
+            continue
+        p = _expand(pre, here, env) if pre else ''
+        if p is None or (here is None and not os.path.isabs(p)):
+            out.append(False)
+            continue
+        full = os.path.normpath(os.path.join(here or '/', p, f))
+        out.append(full in targets or os.path.realpath(full) in targets)
+    return out
+
+
 def bash_writes(cmd, f, cwd=None):
     """A Bash command that writes task file f: a redirect into it, tee, sed -i, cp/mv/install onto it, or inline
     Python (python -c '...' or a python heredoc) whose program writes it (py_writes). Reading it (cat, grep, head,
-    sed without -i), python -m pytest, or an import never count. With cwd (the trial dir): after a `cd` to a directory
-    outside it (a scratch copy elsewhere), only an absolute path into cwd counts."""
+    sed without -i), python -m pytest, or an import never count. With cwd (the trial dir, the session's cwd): each
+    occurrence of f is resolved against the directory in force there (cd, variables assigned in the command, $PWD) and
+    only an occurrence that names the trial dir's file can count, so a write into a scratch copy elsewhere (cd /tmp/x;
+    cat > f, or cat > $S/f) does not (round 5, benchmark item 1)."""
     if f not in cmd:
         return False
     if cwd and not os.path.isabs(f):
-        roots = {os.path.normpath(cwd), os.path.realpath(cwd)}
-        away = [t.strip('\'"') for t in re.findall(r'\bcd\s+([^\s;&|]+)', cmd)]
-        away = [t for t in away if os.path.isabs(t) and not any(os.path.normpath(t) == r or
-                                                                os.path.normpath(t).startswith(r + os.sep) for r in roots)]
-        if away:
-            return any(bash_writes(cmd, os.path.join(r, f)) for r in roots)
+        inside = _occurrences_inside(cmd, f, cwd)
+        if not any(inside):
+            return False
+        # Mask the occurrences that name another directory's copy, so only the trial file's can match below.
+        parts, last, i = [], 0, 0
+        for m in re.finditer(re.escape(f), cmd):
+            if not inside[i]:
+                parts.append(cmd[last:m.start()] + '\x00' * len(f))
+                last = m.end()
+            i += 1
+        cmd = ''.join(parts) + cmd[last:]
     e = re.escape(f)
     if re.search(r'(?<![-=<])>>?\s*\S*' + e + r'(?![\w./])', cmd) or re.search(r'\btee\b[^|;&\n]*' + e, cmd) or \
             re.search(r'\bsed\s+(?:-\w*\s+)*-i[^|;&\n]*' + e, cmd) or \

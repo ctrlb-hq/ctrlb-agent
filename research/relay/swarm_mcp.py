@@ -1,8 +1,8 @@
 """swarm: an MCP stdio server giving one agent of a swarm a shared board on the lake (stream swarm_board).
 The research prototype of CtrlB Relay, kept as the reference the product's rules were ported to and from; it is not the
 plugin. Env: SWARM_RUN (shared by every agent of one run), SWARM_AGENT (this agent's id), SWARM_TOOLS (comma list of
-tools to expose, default peers,post,claim,release), SWARM_WAIT_MS (20), SWARM_LEASE_S (600), and lib_lake's CTRLB_URL,
-CTRLB_ORG, CTRLB_AUTH. Standard library only.
+tools to expose, default peers,post,claim,release), SWARM_WAIT_MS (20), SWARM_LEASE_S (600), SWARM_STALL_S (300), and
+lib_lake's CTRLB_URL, CTRLB_ORG, CTRLB_AUTH. Standard library only.
 
   peers()                    what every agent in this run has posted, claimed or released, newest first
   post(text)                 append a note (what you are about to do or have done)
@@ -10,6 +10,9 @@ CTRLB_ORG, CTRLB_AUTH. Standard library only.
                              write-first claim: write HOLD (or REOPEN) on the resource and on each of paths in one
                              write, wait, read each key's rows; held iff the first live hold of the current round is
                              ours on every deciding key. wait_s (at most 55) waits in line instead of refusing
+  claim(resource, takeover=true)
+                             take over a hold whose holder made no progress for SWARM_STALL_S (300): a HANDOFF with the
+                             stalled holder as giver (Seeker decision 33); refused not_stalled while it works
   release(resource, finished?)  hand back (RELEASE) or, for a task name, finish (DONE); a bundle's files go with it;
                              finished is the alias of done
   done(resource, evidence?)  finish a task name (DONE) with the evidence of its check {command, exit_code, summary} as
@@ -59,6 +62,11 @@ MAX_WAIT_S = 55
 WAIT_READ_EVERY = 5
 BACKOFF_S = (0.05, 0.5)
 MAX_PATHS = 32
+# Takeover (Seeker decision 33): a hold whose holder made no progress for STALL_S (the workspace's stallAfterSeconds)
+# can be taken over with claim(takeover=true): a HANDOFF with the stalled holder as giver and this text.
+STALL_S = int(os.environ.get('SWARM_STALL_S', '300'))
+NOT_STALLED, OTHER_USER = 'not_stalled', 'other_user'
+TAKEOVER_TEXT = 'stalled: taken over by '
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -125,6 +133,79 @@ def read_key(rows, now_us, lease_s, key=None):
     open_ = [r for r in holds if r['nonce'] not in closed]
     live = [r for r in open_ if now_us - int(r['ts']) < lease_us]
     return dict(live=live, open=open_, finished=finished, reopened=reopened)
+
+
+def _key_takeover_rows(st, holder, agent, token, resource, key, main):
+    """The rows a takeover writes on one key (Seeker decision 33), given that key's state: where the stalled holder is
+    first live, a RELEASE of its other live holds of the key and a HANDOFF of its first live hold to agent (token);
+    where it holds the key live but not first (a file decided on its task's key), a RELEASE of its open holds and
+    agent's HOLD (token) behind; where it holds nothing, agent's HOLD (token). The holder's rows carry its name: the
+    takeover is a HANDOFF the holder did not write, so the fold does not change."""
+    rel = lambda h: dict(agent=holder, kind='RELEASE', nonce=h['nonce'], to='', key=key, resource=resource)
+    hold = dict(agent=agent, kind='HOLD', nonce=token, to='', key=key, resource=resource, text=TAKEOVER_TEXT + agent)
+    live = st['live']
+    if live and live[0]['agent'] == holder:
+        out = [rel(h) for h in live[1:] if h['agent'] == holder]
+        out.append(dict(agent=holder, kind='HANDOFF', nonce=live[0]['nonce'], to=agent, token=token, key=key,
+                        resource=resource, text=TAKEOVER_TEXT + agent))
+        return out
+    if not main and any(h['agent'] == holder for h in live):
+        return [rel(h) for h in st['open'] if h['agent'] == holder] + [hold]
+    return [hold]
+
+
+def stall_reading(st, now_us, stall_after_s, activity_us=None, rows=()):
+    """The stall detector on a key's first live hold (Seeker decision 31, every hold since decision 34): its holder,
+    its newest progress (the hold's own stamp, a HANDOFF's for a handed hold, the holder's newest row of the key in
+    rows, or activity_us: its newest other progress, such as rows on the task's files), and whether it is stalled
+    (no progress for stall_after_s)."""
+    h = st['live'][0]
+    last, kind = int(h['ts']), 'hold'
+    for r in rows:
+        if r['agent'] == h['agent'] and int(r['ts']) > last:
+            last, kind = int(r['ts']), r['kind'].lower()
+    if activity_us is not None and int(activity_us) > last:
+        last, kind = int(activity_us), 'activity'
+    idle_s = (now_us - last) // 1_000_000
+    return dict(holder=h['agent'], last_activity=kind, last_activity_ts=last, idle_s=idle_s,
+                stall_after_s=stall_after_s, stalled=now_us - last >= stall_after_s * 1_000_000)
+
+
+def takeover_plan(rows, now_us, lease_s, key, agent, stall_after_s, activity_us=None, token=None, user=''):
+    """The takeover decision on one key (Seeker decision 33), a pure function of the key's rows: reason '' with the
+    rows to write when the first live hold is another agent's and stalled; reason not_stalled (nothing written) when it
+    is not; when there is nothing to take over (the key is free, its holder's lease ran out, or the caller holds it) the
+    ordinary claim's HOLD, and nothing on a finished key (the claim is refused finished_by). held: whether the taker
+    holds the key once the rows are written (decided by the fold, as the read after the wait decides). other_user
+    when another user's agent holds it (the receiver's hold belongs to the giver's user, so agents take over within
+    one user). holder and idle_s are the detector's reading. The taker's rows carry token as nonce (None in a plan:
+    tokens are random)."""
+    st = read_key(rows, now_us, lease_s, key)
+    if st['finished']:
+        return dict(held=False, reason='', holder='', idle_s=0, rows=[])
+    if not st['live'] or st['live'][0]['agent'] == agent:
+        # Nothing to take over: the ordinary claim's HOLD (a renew on the caller's own hold).
+        return dict(held=True, reason='', holder='', idle_s=0,
+                    rows=[dict(agent=agent, kind='HOLD', nonce=token, to='', key=key, resource='', text='')])
+    rd = stall_reading(st, now_us, stall_after_s, activity_us, rows)
+    if st['live'][0].get('user', '') != user:
+        return dict(held=False, reason=OTHER_USER, holder=rd['holder'], idle_s=rd['idle_s'], rows=[], stall=rd)
+    if not rd['stalled']:
+        return dict(held=False, reason=NOT_STALLED, holder=rd['holder'], idle_s=rd['idle_s'], rows=[], stall=rd)
+    return dict(held=True, reason='', holder=rd['holder'], idle_s=rd['idle_s'], stall=rd,
+                rows=_key_takeover_rows(st, rd['holder'], agent, token, '', key, True))
+
+
+def check_state(rows, now_us, lease_s, key, agent):
+    """Seeker's edit check of one file with holdRequired: reason held (held_by, another agent is first live), unheld
+    (nobody holds it live; lapsed when the agent's own hold ran out), or '' (the agent is first live)."""
+    st = read_key(rows, now_us, lease_s, key)
+    if st['live']:
+        h = st['live'][0]
+        return dict(reason='', held_by='') if h['agent'] == agent else dict(reason='held', held_by=h['agent'])
+    if any(h['agent'] == agent for h in st['open']):
+        return dict(reason='lapsed', held_by='')
+    return dict(reason='unheld', held_by='')
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -356,10 +437,11 @@ def _holdable(resource, key):
                          f"it with the {kind['kind']} tool and read it with {kind['kind']}s")
 
 
-def claim(resource, reopen=False, paths=None, wait_s=0):
+def claim(resource, reopen=False, paths=None, wait_s=0, takeover=False):
     """Seeker's ClaimBundle: the claim protocol on the resource's key and, for a bundle, on each of paths at once.
     A registered task claimed without paths takes its registered paths; a file registered to it alone is decided on the
-    task's key. wait_s (at most MAX_WAIT_S) waits in line instead of refusing at once."""
+    task's key. wait_s (at most MAX_WAIT_S) waits in line instead of refusing at once. takeover=true takes over a
+    stalled hold (Seeker decision 33, _takeover)."""
     key, rkind = relay_paths.key(resource)
     _holdable(resource, key)
     wait_s = min(float(wait_s or 0), MAX_WAIT_S)
@@ -391,7 +473,83 @@ def claim(resource, reopen=False, paths=None, wait_s=0):
             out['held_by'] = b['held_by']
         write('REFUSED', resource if b['index'] == 0 else b['key'], b['key'], text=msg, held_by=b['held_by'])
         return json.dumps(out)
+    if takeover and not reopen:
+        return json.dumps(_takeover(resource, keys, deciding_keys(keys, task, tasks), out))
     return json.dumps(_Claim(resource, keys, deciding_keys(keys, task, tasks), reopen, wait_s).run(out))
+
+
+def _activity(agent, keys):
+    """The newest row (any kind) agent wrote on any of keys in this run, in µs, or None: the prototype's stand-in for
+    Seeker's progress reading (relay rows on the task's key and files; the prototype has no edit stream)."""
+    if not keys:
+        return None
+    ks = ', '.join(f"'{L.q(k)}'" for k in keys)
+    try:
+        rows = L.search(STREAM, f"SELECT max(_timestamp) AS t FROM {STREAM} WHERE run_id = '{L.q(RUN)}' AND agent = "
+                                f"'{L.q(agent)}' AND key IN ({ks})", size=1, timeout=10)
+    except RuntimeError:
+        return None
+    t = rows[0].get('t') if rows else None
+    return int(t) if t else None
+
+
+def _takeover(resource, keys, decides, out):
+    """Seeker's claim with takeover (decision 33). When the first live hold of the resource key is another agent's and
+    its holder made no progress for STALL_S, write in one lake write, per key of the bundle, the rows of
+    _key_takeover_rows (a HANDOFF with the stalled holder as giver where it is first), then wait, read every key and
+    decide like a claim: held when first live on every deciding key (the read-your-write guard accepts the HANDOFF that
+    carries our token); a loser releases the token on every key, which closes a received hold by its nonce. Not
+    stalled: refused not_stalled with the reading, nothing written. Nothing to take over (free, finished, lapsed, our
+    own): an ordinary claim."""
+    key = keys[0]
+    rows, now = hold_rows(key), now_us()
+    st = read_key(rows, now, LEASE_S, key)
+    if st['finished'] or not st['live'] or st['live'][0]['agent'] == AGENT:
+        return _Claim(resource, keys, decides, False, 0).run(out)
+    holder, token = st['live'][0]['agent'], uuid.uuid4().hex
+    plan = takeover_plan(rows, now, LEASE_S, key, AGENT, STALL_S, _activity(holder, keys), token=token)
+    reading = {k: v for k, v in plan['stall'].items() if k != 'stalled'}
+    if plan['reason']:
+        msg = (f"{resource} is held by {holder}, who last worked on it {reading['idle_s']}s ago (stalled after "
+               f"{STALL_S}s); it was not taken over. Pick something else") if plan['reason'] == NOT_STALLED else (
+               f'{resource} is held by {holder} of another user; only that user\'s agents can take it over')
+        out.update(reason=plan['reason'], held_by=holder, stall=reading, message=msg)
+        return out
+    batch = [row(r['kind'], resource, key, text='' if r['kind'] == 'RELEASE' else r['text'], nonce=r['nonce'],
+                 agent=r['agent'], **({'to': r['to'], 'token': r['token']} if r['kind'] == 'HANDOFF' else {}))
+             for r in plan['rows']]
+    if len(keys) > 1:
+        for r in batch:
+            if r['kind'] == 'HANDOFF':
+                r['paths'] = json.dumps(keys[1:])
+    for i, k in enumerate(keys[1:], 1):
+        ks = read_key(hold_rows(k), now, LEASE_S, k)
+        first = ks['live'][0]['agent'] if ks['live'] else ''
+        if decides[i] and first not in ('', holder, AGENT):
+            msg = (f'{resource} was not taken over: {k}, which comes with it, is held by {first}; nothing was taken. '
+                   f'Pick something else')
+            out.update(held_by=first, conflict_key=k, message=msg)
+            write('REFUSED', k, k, text=msg, held_by=first)
+            return out
+        batch += [row(r['kind'], k, k, text='' if r['kind'] == 'RELEASE' else r['text'], nonce=r['nonce'],
+                      agent=r['agent'], **({'to': r['to'], 'token': r['token']} if r['kind'] == 'HANDOFF' else {}))
+                  for r in _key_takeover_rows(ks, holder, AGENT, token, k, k, False)]
+    c = _Claim(resource, keys, decides, False, 0)
+    try:
+        write_rows(batch)
+    except Exception:
+        c._abandon(token)
+        raise
+    time.sleep(WAIT_MS / 1000)
+    states = c._read(token)
+    if states is None:
+        return c._not_visible(out, token)
+    lost = c._lost(states)
+    if lost >= 0:
+        return c._refuse(out, states, lost, token, '')
+    c._held(out, states, token)
+    out.update(taken_over_from=holder, stall=reading)
+    return out
 
 
 class _Claim:
@@ -489,7 +647,9 @@ class _Claim:
         states = []
         for k in self.keys:
             rows = hold_rows(k)
-            if not any(r['nonce'] == nonce and r['kind'] in HOLDS for r in rows):
+            # A takeover's own row on a key the holder was first on is the HANDOFF that carries its token.
+            if not any(r['nonce'] == nonce and r['kind'] in HOLDS or r['kind'] == 'HANDOFF' and r.get('token') == nonce
+                       for r in rows):
                 return None
             states.append(read_key(rows, now_us(), LEASE_S, k))
         return states
@@ -552,7 +712,7 @@ class _Claim:
                 what = self.resource if not lost else f'{self.resource} (with {lost_key})'
                 out.update(reason=reason, message=f'{what} is still held by {holder} after waiting '
                                                   f'{round(time.time() - self.start)}s; nothing was taken. Pick '
-                                                  f'something else, or claim it again with wait_s',
+                                                  f'something else',
                            position=next((n + 1 for n, r in enumerate(st['live']) if r['agent'] == AGENT), 0))
             elif not lost:
                 out['message'] = f'{self.resource} is already held by {holder}; pick something else'
@@ -686,6 +846,8 @@ def tasks():
             d.update(state='finished', finished_by=st['finished']['agent'])
         elif st['live']:
             d.update(state='held', held_by=st['live'][0]['agent'])
+            rd = stall_reading(st, now_us(), STALL_S, _activity(st['live'][0]['agent'], [t['key']] + t['paths']))
+            d['stalled'] = rd['stalled']
         out.append(d)
     return json.dumps(dict(tasks=out))
 
@@ -803,7 +965,8 @@ ALL = dict(
                            'Call it before choosing a task.'),
     post=dict(fn=post, required=['text'], properties=dict(text=S),
               description='Post a short note to the shared board: what you are taking, or what you finished.'),
-    claim=dict(fn=claim, required=['resource'], properties=dict(resource=S, reopen=B, paths=A, wait_s={'type': 'number'}),
+    claim=dict(fn=claim, required=['resource'],
+               properties=dict(resource=S, reopen=B, paths=A, wait_s={'type': 'number'}, takeover=B),
                description='Take an exclusive claim on a resource: a task name such as "slugify" or a file path such '
                            'as "src/slugify.py". Returns held=true if it is yours; held=false with held_by if someone '
                            'else has it, or with finished_by if the task name is already finished, in which case pick '
@@ -812,7 +975,8 @@ ALL = dict(
                            'with the resource in one step; a registered task takes its registered files. wait_s (at '
                            'most 55): wait in line for the holder to let go instead of being refused at once; it ends '
                            'held, finished_by, or reason timed_out with held_by and position. reason belongs_to_task: '
-                           'the file is held through its task; claim the task instead.'),
+                           'the file is held through its task; claim the task instead. takeover=true: take over a '
+                           'hold whose holder has stopped (stalled in tasks); refused not_stalled while it works.'),
     handoff=dict(fn=handoff, required=['resource', 'to'], properties=dict(resource=S, to=S),
                  description='Hand a resource you hold to another agent of the run in one step: from then on it '
                              'holds it and you do not, and no third agent can take it in between.'),
