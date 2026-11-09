@@ -22,6 +22,9 @@ This directory is research code, not the plugin. Nothing in `plugin/`, `lib/`, `
 | `run_round6.py` | round 6 (relay-redirect-2026-11-09): redirect and swarm sizing (`pair-relay` hone and readtime, `quad-relay` hone, Sonnet `pair-relay` readtime), witnessed evidence (`pair-relay-witness`, `false-evidence`), handoff by the SessionEnd hook (`handoff1-stop` with SIGTERM, `handoff1-kill` with SIGKILL) and stale contracts (`contracts-provider`, `contracts-provider-staleoff`), one trial at a time in groups of identical settings, every task registered with a test command (`--every-task-test`; readtime's packages in a venv of its own), with a cost projection after the first cell and a stop above $40 |
 | `round6_analyse.py` | round 6's tables (A/E redirect, B hook handoffs, C stale contracts, D witnessed done, F REGISTRY.md turns, the overhead accounting on the Sonnet cell, cost and wall) beside the benchmark's and round 5's |
 | `test_round6.py` | offline tests of round 6's measures and tables on synthetic transcripts, stream logs and trial files |
+| `history_latency.py` | round 7 (relay-record-2026-11-10): times `GET history` for one resource with the index and the scan predicates, interleaved (decision 40) |
+| `forecast_eval.py` | round 7: the contention forecast on the held-out runs of rounds 5 and 6 from the history before them: hot-key precision and recall against the base rate, sizing, bundles against pair-none double edits (decision 41) |
+| `patterns_gate.py` | round 7: the patterns gate, per-group turns from Seeker's patterns against the overhead accounting, the hot key, and the round 5 wait-in-line loop (decision 42) |
 | `post_status.py` | posts a status note to a run on the lake, or reads the last notes back with `--tail` |
 | `dup_fix.py` | recounts duplicated work in finished `relay_proof.py` trials with `run_swarm.bash_writes` |
 | `test_bash_writes.py` | unit tests of `run_swarm.bash_writes` |
