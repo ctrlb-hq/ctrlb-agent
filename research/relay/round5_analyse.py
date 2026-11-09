@@ -40,9 +40,25 @@ def fmt(x):
 
 # ---------------------------------------------------------------- takeover proof (handoff1-control, toy)
 
-def takeover_section(md, an):
-    ts = trials(OUT, 'takeover', 'handoff1-control', 'toy')
-    base = trials(BENCH, 'arm3-short', 'handoff1-control', 'toy')
+def waits_after_stall(t, key, first_seen_s):
+    """Claims of key that waited in line and timed out (REFUSED 'after waiting') at or after the key's first stalled
+    reading: what the takeover is meant to replace."""
+    rows = sorted(t.get('relay_rows_compact') or [], key=lambda r: r['_timestamp'])
+    if not rows or first_seen_s is None:
+        return 0
+    t0 = rows[0]['_timestamp']
+    return sum(1 for r in rows if r['kind'] == 'REFUSED' and r['key'] == key and 'after waiting' in (r.get('text') or '')
+               and (r['_timestamp'] - t0) / 1e6 >= first_seen_s - 1)
+
+
+TAKEOVER_TITLE = ('## Takeover proof: handoff1-control (toy, 2 agents, leaseSeconds 600, stallAfterSeconds 60, agent-1 '
+                  'stopped at 60 s, rule text v8)\n')
+
+
+def takeover_section(md, an, sub='takeover', arm='handoff1-control', title=TAKEOVER_TITLE, key='takeover',
+                     baseline=True):
+    ts = trials(OUT, sub, arm, 'toy')
+    base = trials(BENCH, 'arm3-short', 'handoff1-control', 'toy') if baseline else []
     rows, per = [], []
     for t in ts:
         tk = t.get('takeover') or {}
@@ -62,8 +78,7 @@ def takeover_section(md, an):
                      ', '.join(str(x) for x in r['after_reading']) or '-',
                      ', '.join(str(x) for x in r['after_activity']) or '-', r['tasks'], r['dup_other'],
                      r['dup_takeover'], r['giver_after'], r['refused'], r['wall'], f"${r['cost']}"])
-    md.append('## Takeover proof: handoff1-control (toy, 2 agents, leaseSeconds 600, stallAfterSeconds 60, agent-1 '
-              'stopped at 60 s, rule text v8)\n')
+    md.append(title)
     md.append('Stalled keys: keys the 10 s poll of the run detail saw stalled. After reading / after activity: seconds '
               'from the first stalled reading of the key (poll) and from the holder\'s last activity (the takeover '
               'answer\'s stall reading) to the takeover row. Duplicated other: files edited by both agents that were '
@@ -83,13 +98,16 @@ def takeover_section(md, an):
                   handoffs=(t.get('handoffs') or {}).get('made')) for t in base]
         md.append('\nBenchmark (v7, no takeover), same shape: ' + '; '.join(
             f"#{x['trial']} stalled {x['stalls']}, {x['completed']}/12, {x['wall']} s" for x in b) + '.')
-    an['takeover'] = dict(trials=per, benchmark=[dict(trial=t['trial'], wall_s=t['wall_s']) for t in base])
+    an[key] = dict(trials=per, benchmark=[dict(trial=t['trial'], wall_s=t['wall_s']) for t in base])
 
 
 # ---------------------------------------------------------------- path-hold proof (handoff1-registry)
 
-def path_section(md, an):
-    ts = trials(OUT, 'path-hold', 'handoff1-registry', 'toy')
+PATH_TITLE = '\n## Path-hold proof: handoff1-registry (agent-1 stopped while it holds path:REGISTRY.md)\n'
+
+
+def path_section(md, an, sub='path-hold', title=PATH_TITLE, key='path_hold', baseline=True):
+    ts = trials(OUT, sub, 'handoff1-registry', 'toy')
     rows, per = [], []
     for t in ts:
         w = t.get('hold_watch') or {}
@@ -101,17 +119,20 @@ def path_section(md, an):
                  stalled_kind=reg.get('kind'), stalled_seen_s=reg.get('first_seen_s'),
                  taken_by=tos[0]['taker'] if tos else None, taken_s=tos[0]['at_s'] if tos else None,
                  after_reading=tos[0]['after_stalled_reading_s'] if tos else None,
-                 tasks=f"{tk.get('tasks_completed')}/{tk.get('tasks')}", wall=t['wall_s'], cost=t['cost_usd'])
+                 tasks=f"{tk.get('tasks_completed')}/{tk.get('tasks')}", wall=t['wall_s'], cost=t['cost_usd'],
+                 waits_after_stall=waits_after_stall(t, 'path:REGISTRY.md', reg.get('first_seen_s')))
         per.append(r)
         rows.append([r['trial'], fmt(r['held_at_stop']), fmt(r['stop_s']), fmt(r['stalled_kind']),
-                     fmt(r['stalled_seen_s']), fmt(r['taken_by']), fmt(r['taken_s']), fmt(r['after_reading']),
-                     r['tasks'], r['wall'], f"${r['cost']}"])
-    md.append('\n## Path-hold proof: handoff1-registry (agent-1 stopped while it holds path:REGISTRY.md)\n')
-    md.append(table(['trial', 'held at stop', 'stop s', 'stalled as', 'stalled seen s', 'taken over by', 'taken s',
-                     'after reading s', 'tasks', 'wall s', 'cost'], rows))
-    md.append('\nBenchmark G9 control trials 4 and 5 (v7, no takeover): agent-1 stopped holding REGISTRY.md, agent-2 '
-              'waited in line 10 times for about 9.5 minutes; walls 572 and 666 s; the detector reported 0 stalls.')
-    an['path_hold'] = per
+                     fmt(r['stalled_seen_s']), r['waits_after_stall'], fmt(r['taken_by']), fmt(r['taken_s']),
+                     fmt(r['after_reading']), r['tasks'], r['wall'], f"${r['cost']}"])
+    md.append(title)
+    md.append(table(['trial', 'held at stop', 'stop s', 'stalled as', 'stalled seen s', 'timed-out waits after',
+                     'taken over by', 'taken s', 'after reading s', 'tasks', 'wall s', 'cost'], rows))
+    if baseline:
+        md.append('\nBenchmark G9 control trials 4 and 5 (v7, no takeover): agent-1 stopped holding REGISTRY.md, '
+                  'agent-2 waited in line 10 times for about 9.5 minutes; walls 572 and 666 s; the detector reported '
+                  '0 stalls.')
+    an[key] = per
 
 
 # ---------------------------------------------------------------- contracts (section C)
@@ -224,6 +245,23 @@ def cost_section(md, an):
     an['cost'] = dict(trials=n, total_usd=round(total, 2))
 
 
+# ---------------------------------------------------------------- supplementary cells (Seeker 70074f5)
+
+def supplementary_section(md, an):
+    if not glob.glob(os.path.join(OUT, 'supp', '*', 'toy', '*.json')):
+        return
+    md.append('\n## Supplementary cells (Seeker 70074f5: a refused claim on a stalled hold says so, with the '
+              'takeover hint; handoff and takeover wait out recent closing rows)\n')
+    md.append('handoff1-control caught agent-1 holding a task in 1 of 5 trials, so handoff1-taskhold stops agent-1 '
+              'while Seeker\'s tasks shows it holding a task (polled every second from 30 s). handoff1-registry runs '
+              'again on the new build. Same settings as G1 (holdRequired, evidenceRequired, leaseSeconds 600, '
+              'stallAfterSeconds 60).\n')
+    takeover_section(md, an, sub='supp', arm='handoff1-taskhold', key='supp_taskhold', baseline=False,
+                     title='\n### Takeover: handoff1-taskhold (agent-1 stopped while it holds a task)\n')
+    path_section(md, an, sub='supp', key='supp_path_hold', baseline=False,
+                 title='\n### Path hold with the stalled-refusal hint: handoff1-registry\n')
+
+
 def main():
     md, an = ['# Round 5 tables (relay-stall-takeover-2026-11-09)\n', 'Generated by round5_analyse.py from the '
               'trial JSONs under results/relay-stall-takeover/.\n'], {}
@@ -231,6 +269,7 @@ def main():
     path_section(md, an)
     contracts_section(md, an)
     sonnet_section(md, an)
+    supplementary_section(md, an)
     cost_section(md, an)
     os.makedirs(OUT, exist_ok=True)
     with open(os.path.join(OUT, 'tables.md'), 'w') as fh:
