@@ -54,7 +54,7 @@ class MeasureTests(unittest.TestCase):
               .call(5, 'mcp__ctrlb__claim', {'resource': 'task 01 csv_utils'}, {'held': True, 'token': 'n1'})
               .call(40, 'mcp__ctrlb__done', {'resource': 'task 01 csv_utils', 'evidence': {'command': 'make verify-all',
                                                                                            'exit_code': 0}},
-                    'PreToolUse:mcp__ctrlb__done hook error: CtrlB Relay witness: no Bash command `make verify-all` '
+                    'PreToolUse:mcp__ctrlb__done hook error: CtrlB Relay (run r): done was not sent: the evidence names `make verify-all` '
                     'in this session', error=True)
               .call(50, 'mcp__ctrlb__done', {'resource': 'task 01 csv_utils', 'evidence': {'command': 'python3 -m '
                                                                                            'unittest x', 'exit_code': 0}},

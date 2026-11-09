@@ -1247,19 +1247,28 @@ def redirect_measures(per_agent, rows, t0):
     return out
 
 
+# The plugin's witness denial says this (lib/hooks_shared.py, witness).
+WITNESS_DENY_MARK = 'done was not sent'
+
+
 def witness_measures(per_agent, detail):
     """Round 6, section D (decision 38): every done call and how it came back: done; blocked by the plugin's witness
     hook (an error result: the PreToolUse denial; its text kept); refused witness_required or evidence_required by
     Seeker; other. With the run view's done_witnessed beside done_with_evidence and done_with_task_test."""
-    calls, out = [], dict(done=0, blocked_by_hook=0, witness_required=0, evidence_required=0, other=0, blocked=[])
+    calls, out = [], dict(done=0, blocked_by_hook=0, tool_error=0, witness_required=0, evidence_required=0, other=0, blocked=[],
+                          tool_errors=[])
     for a, s in per_agent.items():
         for x in s.get('flow') or []:
             if x['tool'] != 'done':
                 continue
             ans, ev = x['answer'], x['input'].get('evidence')
-            if x['error']:
+            if x['error'] and WITNESS_DENY_MARK in (x['text'] or ''):
                 kind = 'blocked_by_hook'
                 out['blocked'].append(dict(agent=a, ts_s=x['ts_s'], evidence=ev, text=x['text'][:300]))
+            elif x['error']:
+                # A call the tool refused (bad arguments), not the witness hook's denial.
+                kind = 'tool_error'
+                out['tool_errors'].append(dict(agent=a, ts_s=x['ts_s'], evidence=ev, text=x['text'][:300]))
             elif ans.get('done'):
                 kind = 'done'
             elif ans.get('reason') in ('witness_required', 'evidence_required'):
