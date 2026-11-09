@@ -259,6 +259,21 @@ def contracts_section(md, an):
 
 # ---------------------------------------------------------------- D: witnessed evidence
 
+def witness_of(t):
+    """A trial's witness measures, recomputed from its stored call flows with relay_proof's current classifier (only
+    the witness hook's denials count as blocked; trials of the first cell were measured before that fix)."""
+    w = t.get('witness') or {}
+    pa = t.get('per_agent') or {}
+    if pa and all('flow' in v for v in pa.values()):
+        import relay_proof as rp
+        run = dict(t.get('run_detail_summary') or {})
+        for k in ('done_witnessed', 'done_with_evidence', 'done_with_task_test'):
+            run.setdefault(k, w.get(k))
+        run.setdefault('done', w.get('done_total'))
+        return rp.witness_measures(pa, {'run': run})
+    return w
+
+
 def witness_section(md, an):
     rows, out, blocks = [], {}, []
     cells = [('pair-relay-witness hone', 'pair-relay-witness', 'hone'),
@@ -270,11 +285,12 @@ def witness_section(md, an):
         ts = trials(OUT, 'witness' if 'witness off' not in label else 'redirect', arm, proj)
         if not ts:
             continue
-        ws = [t.get('witness') or {} for t in ts]
+        ws = [witness_of(t) for t in ts]
         dw = sum(w.get('done_witnessed') or 0 for w in ws)
         dt = sum(w.get('done_total') or 0 for w in ws)
         o = dict(n=len(ts), calls=sum(len(w.get('calls') or []) for w in ws), done=sum(w.get('done') or 0 for w in ws),
                  blocked=sum(w.get('blocked_by_hook') or 0 for w in ws),
+                 tool_error=sum(w.get('tool_error') or 0 for w in ws),
                  witness_required=sum(w.get('witness_required') or 0 for w in ws),
                  evidence_required=sum(w.get('evidence_required') or 0 for w in ws),
                  done_witnessed=dw, done_run=dt, done_with_evidence=sum(w.get('done_with_evidence') or 0 for w in ws),
@@ -286,7 +302,7 @@ def witness_section(md, an):
         for t, w in zip(ts, ws):
             for b in w.get('blocked') or []:
                 blocks.append((label, t['trial'], b))
-        rows.append([label, o['n'], o['calls'], o['done'], o['blocked'], o['witness_required'], o['evidence_required'],
+        rows.append([label, o['n'], o['calls'], o['done'], o['blocked'], o['tool_error'], o['witness_required'], o['evidence_required'],
                      ratio(dw, dt), o['done_with_evidence'], o['done_with_task_test'], ', '.join(o['smoke']) or '-',
                      f"{o['unit']} / {o['accept']}", f"${o['cost']}"])
     md.append('\n## D: witnessed evidence (Haiku pairs; G-D has witnessRequired on)\n')
@@ -295,7 +311,7 @@ def witness_section(md, an):
               'witness_required / evidence_required: Seeker refused it. done_witnessed: the run view\'s count of '
               'finished tasks whose DONE carries witnessed true, over the finished tasks. Smoke: tasks given a harness '
               'smoke test because no unit test exercises their module.\n')
-    md.append(table(['cell', 'n', 'done calls', 'done', 'blocked by the hook', 'witness_required',
+    md.append(table(['cell', 'n', 'done calls', 'done', 'blocked by the hook', 'refused by the tool (bad arguments)', 'witness_required',
                      'evidence_required', 'done_witnessed', 'done_with_evidence', 'done_with_task_test',
                      'smoke-tested tasks', 'unit / acceptance', 'cost'], rows))
     if blocks:
