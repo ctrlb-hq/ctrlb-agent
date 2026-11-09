@@ -3,6 +3,7 @@ the edit check of decision 7. Both harnesses take the same output shapes: hookSp
 (SessionStart, SubagentStart, PreToolUse) and, on PreToolUse, permissionDecision "deny" with a non-empty
 permissionDecisionReason."""
 import datetime
+import os
 import json
 import re
 import time
@@ -26,25 +27,27 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
          "the same files. Pass run_id=\"{run}\" and agent=\"{agent}\" to the ctrlb relay tools (peers, post, claim, "
          "release, handoff, ask, answer, brief, briefs, tasks, contract, contracts). Claim the task by the name your orchestrator registered (for example "
          "claim(resource=\"task 03 median\"); tasks lists them). Its files come with it. If held is false with "
-         "finished_by, the task is done; if held is false with held_by, another agent has it: pick another. If tasks "
-         "shows a task you need as stalled, claim it with takeover=true, read its evidence and notes, and continue it. "
-         "Never wait in line on a stalled task. If a file you need is held by an agent that has stopped, the hold "
-         "shows as stalled; take it over the same way. If reason is unknown_task, claim again with the suggestion. If "
-         "reason is belongs_to_task, the file comes with a registered task: claim that task (task in the answer) "
-         "instead. If the claim answers ask_about, ask the task's owner about those before deciding them yourself. "
-         "Work only while you hold it. When the task is done, release "
+         "finished_by, the task is done; if held is false with held_by, another agent has it: pick another. If a claim "
+         "is refused and the answer lists free tasks, claim one of them next. If the list is empty, post a note saying "
+         "you have no task and stop. If tasks shows a task you need as stalled, claim it with takeover=true, read its "
+         "evidence and notes, and continue it. Never wait in line on a stalled task. If a file you need is held by an "
+         "agent that has stopped, the hold shows as stalled; take it over the same way. If reason is unknown_task, "
+         "claim again with the suggestion. If reason is belongs_to_task, the file comes with a registered task: claim "
+         "that task (task in the answer) instead. If the claim answers ask_about, ask the task's owner about those "
+         "before deciding them yourself. Work only while you hold it. When the task is done, release "
          "it with finished=true. Run the task's test command (tasks and claim show it as test); when it passes, call "
          "done on the task name with that command, its exit code and its last output line as the evidence. When the "
          "task has no test command, give the check you ran. A task is finished only when the record shows what was "
-         "checked. A file that belongs to no task is claimed by its path. A shared thing that is not a "
+         "checked. A file that belongs to no task is claimed by its path. Edit REGISTRY.md only between "
+         "claim(resource=\"slot:REGISTRY.md\", paths=[\"REGISTRY.md\"]) and its release, in the same turn; if it is "
+         "held, go on with your task and try again later. A shared thing that is not a "
          "file, such as the dev server or a port, is claimed as slot:<name> and released when you are done with it. Use "
          "the coordination tools before a prose note: handoff when you must leave a task you hold, so it moves to the "
          "agent you name in one step; ask when you are blocked on something only another agent or the orchestrator "
          "can decide; answer, with the question's id, when you can settle an open question; contract when you finish "
          "an interface others will build on (a type, a route, a config shape), with its name, the shape in a few "
-         "lines and the files that define it; contracts before you build on another agent's interface (changed_since "
-         "lists its files changed since its text was written, and changed_since_read says it changed since you last "
-         "read it: read it again). Post a note "
+         "lines and the files that define it. Before you build on a contract, read it with `contracts`. If it is "
+         "stale, read the file it names and check your assumptions against it. Post a note "
          "only for what none of them covers. If you were asked to do a finished task again, claim its name with "
          "reopen=true.")
 
@@ -335,3 +338,154 @@ def evidence_hint(run, agent, answer, transcript='', keys=()):
                                   f'passed, call done(resource="{resource}", run_id="{run}", agent="{agent}", '
                                   f'evidence={json.dumps(ev)}); otherwise run the task\'s test first. Report only a check '
                                   f'you ran.')
+
+# ---------------------------------------------------------------- the session record (Seeker decisions 36 and 38)
+
+HANDOFF_TEXT_MAX = 1500
+LINE_MAX = 200
+
+
+def _norm(cmd):
+    return ' '.join(str(cmd or '').split())
+
+
+def record_bash(run, agent, sid, command, code, line):
+    """Remember one Bash command of this session, its exit code (None when unknown) and last output line: every
+    command, not only tests (the done witness checks evidence against them)."""
+    if not run or not agent or not isinstance(command, str) or not command.strip():
+        return None
+    rec = dict(command=command.strip()[:COMMAND_MAX], exit_code=code, summary=(line or '')[:SUMMARY_MAX], ts=time.time())
+    common.SessionRecord(run, agent).update(sid, lambda d: d['bash'].append(rec))
+    return rec
+
+
+def record_edit(run, agent, sid, paths):
+    """Remember the files an applied edit tool call wrote in this session (in order, once each)."""
+    paths = [p for p in paths or [] if isinstance(p, str) and p]
+    if not run or not agent or not paths:
+        return []
+
+    def fn(d):
+        for p in paths:
+            if p in d['edited']:
+                d['edited'].remove(p)
+            d['edited'].append(p)
+    common.SessionRecord(run, agent).update(sid, fn)
+    return paths
+
+
+def record_note(run, agent, sid, text):
+    """Remember the agent's newest note (the ctrlb post tool's text)."""
+    if not run or not agent or not isinstance(text, str) or not text.strip():
+        return None
+    note = dict(text=text.strip()[:LINE_MAX * 2], ts=time.time())
+    common.SessionRecord(run, agent).update(sid, lambda d: d.update(note=note))
+    return note
+
+
+def mark_relay(run, agent, sid):
+    """Remember that the agent used the ctrlb relay tools in this session (the session-end handoff is then sent)."""
+    if run and agent:
+        common.SessionRecord(run, agent).update(sid, lambda d: d.update(relay=True))
+
+
+def _cut(s, n):
+    s = ' '.join(str(s or '').split())
+    return s if len(s) <= n else s[:n - 3] + '...'
+
+
+def handoff_text(rec, last_test=None):
+    """The open handoff's text (decision 36), one paragraph from the hook's own record: the files edited in this
+    session, the last test command it saw and its exit code, and the agent's last note."""
+    parts = ['Session ended.']
+    edited = [os.path.basename(p) if len(p) > 80 else p for p in (rec.get('edited') or [])]
+    if edited:
+        shown = edited[-12:]
+        more = f' and {len(edited) - len(shown)} more' if len(edited) > len(shown) else ''
+        parts.append('Edited: ' + ', '.join(shown) + more + '.')
+    else:
+        parts.append('Edited: nothing.')
+    tests = [b for b in rec.get('bash') or [] if is_test_command(b.get('command'))]
+    test = tests[-1] if tests else None
+    if last_test and (not test or (last_test.get('ts') or 0) > (test.get('ts') or 0)):
+        test = last_test
+    if test:
+        code = test.get('exit_code')
+        line = f" (last line: {_cut(test.get('summary'), LINE_MAX)})" if test.get('summary') else ''
+        parts.append(f"Last test: `{_cut(test.get('command'), 300)}` exit {code if code is not None else 'unknown'}{line}.")
+    else:
+        parts.append('Last test: none run.')
+    note = rec.get('note') or {}
+    if note.get('text'):
+        parts.append('Last note: ' + _cut(note['text'], 400))
+    return _cut(' '.join(parts), HANDOFF_TEXT_MAX)
+
+
+def _evidence_of(args):
+    """The done call's evidence as a dict, or None (free text, or nothing)."""
+    ev = args.get('evidence')
+    if isinstance(ev, str):
+        try:
+            ev = json.loads(ev)
+        except ValueError:
+            return None
+    return dict(ev) if isinstance(ev, dict) else None
+
+
+def _code(v):
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def witness(rec, tool_input):
+    """Decision 38: the PreToolUse output for a done call, checked against this session's Bash record. A command
+    containing the evidence command (white space collapsed), with an equal exit code (newest first): allow, with
+    witnessed true (and the exit code filled in from the record when the call left it out). No such command: deny,
+    naming what the hook saw. No evidence command: None, unless the agent set witnessed itself (then it is dropped).
+    The hook asserts only what it saw; it is as strong as the host it runs on."""
+    args = dict(tool_input) if isinstance(tool_input, dict) else {}
+    ev = _evidence_of(args)
+    cmd = _norm(ev.get('command')) if ev else ''
+    if not cmd:
+        if 'witnessed' in args:
+            args.pop('witnessed')
+            return _allow(args)
+        return None
+    want = _code(ev.get('exit_code')) if ev.get('exit_code') is not None else None
+    bash = rec.get('bash') or []
+    seen = [b for b in reversed(bash) if cmd in _norm(b.get('command'))]
+    for b in seen:
+        code = _code(b.get('exit_code'))
+        if code is None:
+            continue
+        if want is None or code == want:
+            ev['exit_code'] = code
+            args['evidence'] = ev
+            args['witnessed'] = True
+            return _allow(args)
+    run = args.get('run_id') or ''
+    head = f"CtrlB Relay{f' (run {run})' if run else ''}: done was not sent: the evidence names `{_cut(cmd, 300)}`"
+    head += f' with exit code {want}' if want is not None else ''
+    if seen:
+        b = seen[0]
+        saw = (f"; this session ran it with exit code {b.get('exit_code') if b.get('exit_code') is not None else 'unknown'}"
+               + (f" (last line: {_cut(b.get('summary'), LINE_MAX)})" if b.get('summary') else ''))
+    elif bash:
+        tests = [b for b in reversed(bash) if is_test_command(b.get('command'))]
+        b = tests[0] if tests else bash[-1]
+        saw = (f"; this session never ran it. The last {'test ' if tests else ''}command it ran was "
+               f"`{_cut(b.get('command'), 300)}` (exit code {b.get('exit_code') if b.get('exit_code') is not None else 'unknown'})")
+    else:
+        saw = '; there is no Bash command in this session'
+    return _deny(head + saw + '. Run the task\'s test, then call done with the command, its exit code and its last '
+                 'output line as you saw them.')
+
+
+def _allow(args):
+    return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'allow', 'updatedInput': args}}

@@ -222,6 +222,45 @@ class LastTest(TokenState):
         return self._locked(lambda d: (dict(d) if d.get('command') else None, False))
 
 
+class SessionRecord(TokenState):
+    """What the hooks saw one agent of one run do in its current session (Seeker decisions 36 and 38): {sid, bash:
+    [{command, exit_code, summary, ts}] (newest last, at most BASH_MAX), edited: [path], note: {text, ts}, relay: bool
+    (a ctrlb relay tool was called)}. A new session id starts a new record. Read by the session-end handoff (its text)
+    and by the done witness (was this command run, with this exit code, in this session)."""
+    BASH_MAX = 200
+    EDITED_MAX = 200
+
+    def __init__(self, run, agent):
+        super().__init__(run, agent)
+        self.file = self.file.replace(os.sep + 'tokens-', os.sep + 'session-')
+
+    def update(self, sid, fn):
+        """fn(record) changes the record in place; a record of another session is dropped first."""
+        def go(d):
+            if d.get('sid') != sid:
+                d.clear()
+                d.update(sid=sid, bash=[], edited=[], note=None, relay=False)
+            fn(d)
+            d['bash'] = d.get('bash', [])[-self.BASH_MAX:]
+            d['edited'] = d.get('edited', [])[-self.EDITED_MAX:]
+            return None, True
+        return self._locked(go)
+
+    def get(self, sid):
+        return self._locked(lambda d: (dict(d) if d.get('sid') == sid else
+                                       dict(sid=sid, bash=[], edited=[], note=None, relay=False), False))
+
+
+def handoff_all(cfg, run, agent, text, cwd='', timeout=0.8):
+    """POST /ai/relay/{dataset}/runs/{run}/handoffs with all=true and no receiver (Seeker decision 36): every hold the
+    agent has in the run is handed off openly (a task: RELEASE plus a NOTE with text) or released (a path, a slot), in
+    one write."""
+    body = dict(agent=agent, all=True, to='', text=text)
+    if cwd:
+        body['cwd'] = cwd
+    return request(cfg, 'POST', f"/ai/relay/{_seg(cfg['dataset'])}/runs/{_seg(run)}/handoffs", body, timeout=timeout)
+
+
 class FileState:
     """Upload progress for one transcript file: byte offset, line count, last timestamp, tool names by id, message
     ids already counted for tokens, and the last cumulative cost seen. Used as a context manager it holds the

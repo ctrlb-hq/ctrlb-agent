@@ -128,7 +128,6 @@ An exclusive claim on a resource, a file path or a task name.
 | `cwd` | Your working directory. An absolute path under it is keyed relative to it. |
 | `reopen` | `true` to claim a finished task name anyway and start a new round of work on it. It has no effect on a key that is not finished. |
 | `paths` | Files (or `slot:<name>` slots) that come with the resource: all are taken in one step with it, or none is (at most 32). A task your orchestrator registered brings its files when you leave this out. |
-| `wait_s` | Seconds to wait in line (at most 55) when another agent holds it, instead of a refusal at once: the claim is held as soon as it is your turn, or answers `reason: timed_out`. Waiters are served in the order they claimed. Available, not recommended: in the benchmark waiting did not beat claiming something else, and never wait on a stalled hold (take it over). |
 | `takeover` | `true` to take over a hold whose holder has stopped: the first live hold is another agent's (of your user) and is stalled, that is its holder wrote no relay row on the key or its files and edited none of them for the workspace's `stallAfterSeconds` (300 by default). The holder's hold is handed to you in one write (a `HANDOFF` with the holder as giver and the text `stalled: taken over by <you>`), with the task's files; its next edit of them is refused. On a free key, or one whose holder's lease ran out, it is an ordinary claim. |
 
 Answer when the claim is yours:
@@ -165,11 +164,15 @@ Answer when the run has registered tasks and none has that name:
 {"held": false, "resource": "median", "key": "name:median", "reason": "unknown_task", "suggestion": "task 03 median", "message": "median is not a task of this run. Did you mean \"task 03 median\"? Claim the task by the name your orchestrator registered"}
 ```
 
-Answer to `claim(resource="task 03 median", wait_s=30)` when another agent still held it after 30 s (a claim that got its turn answers `held: true` with `waited_ms`):
+Answer when another agent holds a registered task, or it is finished: the answer lists `free_tasks`, the run's registered tasks that nobody holds and nobody finished (at most 10), each with its `name`, `key`, `paths` and `test`. Claim one of them next. `since` is when the holder's hold began (µs).
 
 ```json
-{"held": false, "resource": "task 03 median", "key": "name:task 03 median", "reason": "timed_out", "held_by": "agent-b", "position": 2, "waited_ms": 30000, "message": "task 03 median is still held by agent-b after waiting 30s; nothing was taken. Pick something else"}
+{"held": false, "resource": "task 03 median", "key": "name:task 03 median", "paths": ["path:src/median.py"], "held_by": "agent-b", "since": 1793000100000000, "free_tasks": [{"name": "task 05 mode", "key": "name:task 05 mode", "paths": ["path:src/mode.py"], "test": "python3 -m pytest tests/test_mode.py"}], "message": "task 03 median is already held by agent-b; pick something else"}
 ```
+
+When no task is free, `free_tasks` is `[]` and the message says `there is no free task in this run`: post a note saying you have no task and stop. The run view counts such agents as `idle_agents`.
+
+Claims do not wait. A claim that sends `wait_s` is refused (HTTP 400): `wait_s is no longer accepted on claim: a refused claim lists free_tasks to claim instead; to wait for news use peers with wait_s`. In the benchmark the task an agent waited for was finished, not released.
 
 Answer to `claim(resource="task 03 median", takeover=true)` when agent-b stopped while holding it (`tasks` showed it `stalled`): you hold it and its files. Read its evidence and notes (`tasks`, `briefs`, `peers`) and continue it.
 
@@ -233,6 +236,7 @@ Finish a task you hold, when its test passes, and say what you checked. Run the 
 |---|---|
 | `resource` | Required. The task name as you claimed it. A file path is never done: release it (`a file path is never done: release it`). |
 | `evidence` | `{command, exit_code, summary}`: the test or check command you ran, its exit code, and one line of its output (at most 300 characters). Free text is kept as the summary. |
+| `witnessed` | Set by the Claude Code plugin, not by you: `true` when the plugin saw this session run the evidence's command with that exit code. Stored with the evidence. |
 | `cwd` | The working directory the claim was made with, if any. |
 | `run_id`, `agent` | Required, or from the headers. |
 
@@ -250,20 +254,34 @@ When the workspace requires evidence (the `evidenceRequired` setting), a done th
 
 `test` (and the end of the message) is the task's test command, when its registration names one: run it and call `done` again with it. Otherwise call `done` again with the command you ran. The Claude Code plugin remembers your last test command (`pytest`, `python -m unittest`, `go test`, `npm test`, `cargo test`, `make test`), its exit code and last output line, and quotes it after such a refusal so you can repeat the call with it; when the refusal carries the task's `test` and your last test command is not it, it shows the task's test instead and tells you to run it. It never fills the evidence in for you. Codex gets the refusal only.
 
+**Witnessed evidence.** The Claude Code plugin records every Bash command of the session with its exit code and last output line. Before a `done` with evidence goes out, it checks the evidence against that record: a command of this session that contains the evidence's command, with the same exit code. If there is one, the call goes out with `witnessed: true` (and the exit code from the record when you left it out). If not, the call is refused before it reaches CtrlB, with what the plugin saw, for example `done was not sent: the evidence names \`pytest tests/test_x.py\` with exit code 0; this session ran it with exit code 1`. The run view counts `done_witnessed` beside `done_with_evidence` and `done_with_task_test`. Codex's `done` carries no witness.
+
+When the workspace requires a witness (`witnessRequired`, with `evidenceRequired`), an unwitnessed `done` is refused and nothing is written:
+
+```json
+{"done": false, "resource": "task 03 median", "key": "name:task 03 median", "reason": "witness_required", "message": "..."}
+```
+
+A witness is only as strong as the machine the hook runs on: it says the plugin saw the command run, sent under the agent's key.
+
 ### handoff
 
 Hand a claim you hold to another agent of the run in one step. From then on it holds it, and you do not; no third agent can take it in between, as it could if you released it and the other agent claimed it.
 
 | Argument | |
 |---|---|
-| `resource` | Required. The resource as you claimed it. A task you hold with its files is handed with its files. |
-| `to` | Required. The agent id to hand it to. |
+| `resource` | Required, unless `all` is `true`. The resource as you claimed it. A task you hold with its files is handed with its files. |
+| `to` | The agent id to hand it to. Left out: an open handoff (below). |
+| `text` | Open handoff only: what you did and what is left (at most 2,000 characters). |
+| `all` | `true` with no `to`: hand off every hold you have in the run, in one write. |
 | `cwd` | The working directory the claim was made with, if any. |
 | `run_id`, `agent` | Required, or from the headers. |
 
 Answer when handed: `{handed: true, resource, key, to, lease_until, token, paths?}`. `lease_until` is the receiver's; the receiver can renew by claiming the resource again.
 
 Answer when you are not the holder: `{handed: false, resource, key, to, held_by?, message}`. Nothing is written.
+
+**Open handoff.** With no `to`, the task goes back to the run: your holds on it and its files are released in one write, with a note carrying your `text`. The next agent to claim it gets it as a released task, and `tasks` shows it `handed_off: true` with `handoff_text` and `handoff_by`. Answer: `{handed: true, open: true, resource, key, paths?, message}`. With `all: true`, every task you hold is handed off this way and every file and slot you hold is released, in one write: `{handed, open: true, released: [keys], tasks: [names], message}`. The Claude Code plugin does this when the session ends, with the files edited in the session, the last test command and its exit code, and the agent's last note as the text.
 
 - Handing to yourself renews your claim.
 - Hand off to an agent of your own user (an agent id under the same key).
@@ -331,7 +349,7 @@ For an orchestrator: register a task of the run, with the files that come with i
 | `text` | Required. What the task is. Cut at 2,000 characters. |
 | `paths` | Required. The task's files, at least one, at most 32. |
 | `ask_about` | Optional. The facts or questions whoever takes the task should ask you about (at most 16). `tasks` and a held claim of the task show them. |
-| `test` | Optional. The command that tests the task, for example `python3 -m pytest tests/test_median.py` (one line, at most 500 bytes). `tasks` and a held claim of the task show it, and its holder gives it as `done`'s evidence. |
+| `test` | Optional. The command that tests the task, for example `python3 -m pytest tests/test_median.py` (one line, at most 500 bytes). `tasks` and a held claim of the task show it, and its holder gives it as `done`'s evidence. Required when the workspace requires evidence (`evidenceRequired`): a task without one is then refused with `test_required`. |
 | `cwd` | Your working directory, for absolute paths. |
 | `run_id`, `agent` | Required, or from the headers. |
 
@@ -345,7 +363,7 @@ The run's registered tasks and their state now.
 |---|---|
 | `run_id` | Optional, from the header. |
 
-Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round, ask_about?}]}`, and `test` when the task's registration names one. `state` is `open`, `held` or `finished` in the task's current round; `ask_about` is what the task's owner wants its holder to ask about; `test` is the command that tests the task. A finished task with a `test` also carries `evidence_matches_test`: whether its done's command named that test. Each task also carries `evidence` (`{command, exit_code, summary}`, what the `done` that finished it says was checked) when it was finished with evidence, and `stalled`: `true` when it is held (or its holder's lease ran out) and not finished, and its holder wrote nothing on it and edited none of its files for the workspace's `stallAfterSeconds` (300 by default). Claim a stalled task you need with `takeover=true`; never wait in line on it. The run view counts them as `stalled_tasks`, and lists every stalled hold, bare files and slots too, in `detectors.stalled` (with `kind` and `resource`; `stalled_holds` is the total).
+Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round, ask_about?}]}`, and `test` when the task's registration names one. Each task may also carry `handed_off`, `handoff_text` and `handoff_by`, and the answer carries `free_tasks` and `idle_agents`. `free_tasks` counts the tasks nobody holds and nobody finished; `idle_agents` lists the agents whose last claim was refused with no free task left and that hold nothing. A spawner can read `free_tasks` before starting more agents. `handed_off` is `true` when the task's last holder handed it off openly (or its session ended holding it); `handoff_text` says what it did and what is left. `state` is `open`, `held` or `finished` in the task's current round; `ask_about` is what the task's owner wants its holder to ask about; `test` is the command that tests the task. A finished task with a `test` also carries `evidence_matches_test`: whether its done's command named that test. Each task also carries `evidence` (`{command, exit_code, summary}`, what the `done` that finished it says was checked) when it was finished with evidence, and `stalled`: `true` when it is held (or its holder's lease ran out) and not finished, and its holder wrote nothing on it and edited none of its files for the workspace's `stallAfterSeconds` (300 by default). Claim a stalled task you need with `takeover=true`; never wait in line on it. The run view counts them as `stalled_tasks`, and lists every stalled hold, bare files and slots too, in `detectors.stalled` (with `kind` and `resource`; `stalled_holds` is the total).
 
 ### contract
 
@@ -371,7 +389,7 @@ Read the contracts of the run before building on an interface another agent fini
 | `run_id`, `agent` | Optional, from the headers. With `agent`, each contract says whether it changed since you last read the contracts. |
 | `since` | When you last read the contracts: the `read_at` of that answer. Left out, your last `contracts` call is used. |
 
-Answer: `{contracts: [{name, key, agent, ts, age_s, text, paths, changed_since, text_since, text_changed_at?, changed_since_read?}], last_read?, read_at?}`, the newest contract of each name, newest first. `changed_since` lists its files claimed or edited after its current text was first written (`text_since`; writing the same text again does not reset it): read those files before trusting the contract. `text_changed_at` is set when the text changed from an earlier version. `changed_since_read` is true when the contract's text or files changed since you last read the contracts: read it again before building on it.
+Answer: `{contracts: [{name, key, agent, ts, age_s, text, paths, changed_since, text_since, text_changed_at?, changed_since_read?}], last_read?, read_at?}`, the newest contract of each name, newest first. Each contract also carries `stale`, `stale_since` and `changed_by` (below). `stale: true` means one of its files was edited after its text was written (`stale_since`, the first such edit; `changed_by`, who edited): read the file it names and check your assumptions against it before building on it. The provider clears it by writing the contract again with the new shape. Before you build on a contract, read it with `contracts`. The workspace setting `staleContracts` (on by default) shows these fields; the run view counts `stale_contracts`. `changed_since` lists its files claimed or edited after its current text was first written (`text_since`; writing the same text again does not reset it): read those files before trusting the contract. `text_changed_at` is set when the text changed from an earlier version. `changed_since_read` is true when the contract's text or files changed since you last read the contracts: read it again before building on it.
 
 ## Edits need a claim (hold required)
 
@@ -399,6 +417,7 @@ release(resource="slot:devserver")  # after
 - A slot's claim lasts two minutes, whatever the workspace's lease is. Claim it again before `lease_until` to keep it longer.
 - A slot is never finished: `release` always hands it back, like a file.
 - `slot:` is case-sensitive: `Slot:devserver` is a task name, not a slot.
+- A file that every task writes and no task owns, such as a shared `REGISTRY.md`, is held as a slot for the write only, with the file in `paths` so the edit check sees it held: `claim(resource="slot:REGISTRY.md", paths=["REGISTRY.md"])`, edit, `release(resource="slot:REGISTRY.md")`, in the same turn. If it is held, do other work and try again.
 
 ## The three agent rules
 

@@ -62,7 +62,8 @@ Then one `[[hooks.<Event>]]` table per event. Each runs `python3 -I <clone>/code
 |---|---|---|
 | `SessionStart` | `session-start` | Tells the agent its run id and agent id, and how to search its record |
 | `SubagentStart` | `subagent-start` | Uploads the parent's new lines, tells the subagent its parent and ids |
-| `PreCompact`, `SessionEnd` | `flush` | Uploads the lines added since the last upload |
+| `PreCompact` | `flush` | Uploads the lines added since the last upload |
+| `SessionEnd` | `session-end` | In a relay run (`CTRLB_RUN` set), hands off every hold the agent still has to nobody, in one write (tasks open for the next claimer, paths and slots released), then uploads like `flush`. Codex has no hook after a tool call, so the handoff's text cannot list edits or tests, and `done` carries no witness |
 | `Stop`, `SubagentStop` | `upload` | The same, in the background (`async = true`) |
 | `PreToolUse`, matcher `apply_patch` | `pre-tool` | Sends the patch's file paths to the edit check |
 
