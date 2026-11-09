@@ -123,7 +123,8 @@ An exclusive claim on a resource, a file path or a task name.
 
 | Argument | |
 |---|---|
-| `resource` | Required. A file path, for example `src/app.py`, or a task name. |
+| `resource` | Required, unless `next` is `true`. A file path, for example `src/app.py`, or a task name. |
+| `next` | `true` with no `resource`: claim the first free registered task of the run (nobody holds it, nobody finished it). |
 | `run_id`, `agent` | Required, or from the headers. |
 | `cwd` | Your working directory. An absolute path under it is keyed relative to it. |
 | `reopen` | `true` to claim a finished task name anyway and start a new round of work on it. It has no effect on a key that is not finished. |
@@ -151,6 +152,14 @@ Answer to `claim(resource="task 03 median")` when the orchestrator registered th
 ```json
 {"held": true, "resource": "task 03 median", "key": "name:task 03 median", "lease_until": 1793000600000000, "paths": ["path:src/median.py"]}
 ```
+
+Answer to `claim(next=true)`: the first free registered task is claimed, with its files, and answered as `task` with its `name`, `brief` (the registration's text), `paths` and `test`. Start with it; you need not call `tasks` or `peers` first.
+
+```json
+{"held": true, "resource": "task 03 median", "key": "name:task 03 median", "lease_until": 1793000600000000, "paths": ["path:src/median.py"], "task": {"name": "task 03 median", "brief": "Add median() to src/median.py ...", "paths": ["path:src/median.py"], "test": "python3 -m pytest tests/test_median.py"}}
+```
+
+When no registered task is free, `claim(next=true)` answers `held: false` with `free_tasks: []` and writes nothing: post a note saying you have no task and stop.
 
 Answer when a file of the task is held by another agent: nothing is taken.
 
@@ -236,13 +245,16 @@ Finish a task you hold, when its test passes, and say what you checked. Run the 
 |---|---|
 | `resource` | Required. The task name as you claimed it. A file path is never done: release it (`a file path is never done: release it`). |
 | `evidence` | `{command, exit_code, summary}`: the test or check command you ran, its exit code, and one line of its output (at most 300 characters). Free text is kept as the summary. |
+| `next` | `true`: finish this task and claim the next free registered task in the same write. The answer carries the next task as `task` (`{name, brief, paths, test}`), as `claim(next=true)` does, or `free_tasks: []` when none is free. |
 | `witnessed` | Set by the Claude Code plugin, not by you: `true` when the plugin saw this session run the evidence's command with that exit code. Stored with the evidence. |
 | `cwd` | The working directory the claim was made with, if any. |
 | `run_id`, `agent` | Required, or from the headers. |
 
 ```text
-done(resource="task 03 median", evidence={"command": "python3 -m pytest tests/test_median.py", "exit_code": 0, "summary": "4 passed in 0.03s"})
+done(resource="task 03 median", evidence={"command": "python3 -m pytest tests/test_median.py", "exit_code": 0, "summary": "4 passed in 0.03s"}, next=true)
 ```
+
+When your test passes, call `done` with the evidence and `next=true`: one call finishes the task and claims your next one.
 
 Answer: `{done, resource, key, evidence?, finished_after_lease?, paths?, message?, test?}`. `done: true` finishes the task: later claims are refused with `finished_by` unless they pass `reopen=true`, and its files are handed back with it (`paths`). The evidence is stored with the finish, and `tasks` and the run view show it. A done whose command is not the task's test is still accepted; the run view records `evidence_matches_test: false` for it and counts the tasks finished with their own test as `done_with_task_test`.
 
@@ -429,7 +441,7 @@ release(resource="slot:devserver")  # after
 - A slot's claim lasts two minutes, whatever the workspace's lease is. Claim it again before `lease_until` to keep it longer.
 - A slot is never finished: `release` always hands it back, like a file.
 - `slot:` is case-sensitive: `Slot:devserver` is a task name, not a slot.
-- A file that every task writes and no task owns, such as a shared `REGISTRY.md`, is held as a slot for the write only, with the file in `paths` so the edit check sees it held: `claim(resource="slot:REGISTRY.md", paths=["REGISTRY.md"])`, edit, `release(resource="slot:REGISTRY.md")`, in the same turn. If it is held, do other work and try again.
+- A file that every task writes and no task owns, such as a shared `REGISTRY.md`, is held as a slot for the write only, with the file in `paths` so the edit check sees it held. The Claude Code plugin does this for you for the files in its `autoSlots` setting (`REGISTRY.md` by default): its edit hook claims `slot:REGISTRY.md` with the file before each edit and releases it after, and an edit while another agent holds it is refused with `REGISTRY.md is held by <agent>, try again in a moment`. Without the plugin (Codex, a script over HTTP): `claim(resource="slot:REGISTRY.md", paths=["REGISTRY.md"])`, edit, `release(resource="slot:REGISTRY.md")`, in the same turn. If it is held, do other work and try again. See [Relay hooks](relay-hooks.md).
 
 ## The three agent rules
 

@@ -8,6 +8,8 @@ You are joining CtrlB Relay run `$ARGUMENTS`. Other agents in this run work in t
 
 Pass `run_id="$ARGUMENTS"` on every one of those calls. Pass `agent` as the agent id your session rule gives you (the line that starts "CtrlB Relay: your run id is ..."). If you have no such line, use your session id.
 
+Start with `claim(next=true)`: it claims the first free task your orchestrator registered, with its files, and answers it as `task` (its `name`, `brief`, `paths` and `test`). When your test passes, call `done` with the evidence and `next=true`: it finishes the task and claims your next one in the same call. Call `peers` only when you are waiting for an answer or a handoff. Put helper scripts and binaries in the run's scratch directory (your session rule names it), not in `/tmp`.
+
 Follow these three rules for the rest of the session.
 
 1. Other agents are working in this same directory right now. Before starting a task, look at the task's files to see whether it is already done or in progress, and pick one that is not.
@@ -22,6 +24,7 @@ Share what you read with briefs:
 
 How to read the answers:
 
+- `claim(next=true)` answers `held: true` with `task`: `{name, brief, paths, test}`. Work on that task. When nothing is free it answers `free_tasks: []` and takes nothing: post a note saying you have no task and stop.
 - `claim` answers `held: true` with the `key` it stored, for example `name:task 03 median`, and the files that came with it in `paths`, for example `["path:src/median.py"]`. You hold all of them.
 - `held: false` with `reason: unknown_task` means the run has registered tasks and none has that name. Claim again with the `suggestion`, or pick a name from `tasks`.
 - `held: false` with `held_by` means another agent is on it now (`since` is when its hold began). Pick another task; do not retry the same resource in a loop. A refused task claim lists `free_tasks`: registered tasks nobody holds and nobody finished, each with its `name`, `paths` and `test`. Claim one of them next. If the list is empty (`free_tasks: []`), post a note saying you have no task and stop.
@@ -47,6 +50,6 @@ How to read the answers:
   - `peers(kind="answer", since=<ts>, wait_s=30)` waits for an answer (or `kind="handoff"` for a handoff) instead of a sleep loop.
 
   Post a note only for what none of them covers.
-- `REGISTRY.md`, which every task writes and no task owns, is claimed as `slot:REGISTRY.md` with `paths=["REGISTRY.md"]` (the file comes with it): claim it, make your edit and release it in the same turn: `claim(resource="slot:REGISTRY.md", paths=["REGISTRY.md"])`, edit, `release(resource="slot:REGISTRY.md")`. If it is held, do other work of your task and try again.
+- `REGISTRY.md`, which every task writes and no task owns, is handled by the plugin: its edit hook claims `slot:REGISTRY.md` with the file before your edit and releases it after. Just edit it. If the edit is refused with "held by <agent>, try again in a moment", do other work of your task and try again.
 - A shared thing that is not a file, such as the dev server or a port, is claimed as `slot:<name>` and released when you are done with it: `claim(resource="slot:devserver")` before `npm run dev`, `release(resource="slot:devserver")` after. A slot's claim lasts two minutes; claim it again to keep it longer.
 - Claims are advisory unless the workspace turns on `enforce`. In `enforce` mode an edit to a file another agent holds is refused, with the claim call to make.
