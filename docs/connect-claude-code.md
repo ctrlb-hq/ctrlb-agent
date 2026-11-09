@@ -81,6 +81,8 @@ Before an edit, the hook sends the file path, relative to the session's working 
 
 The check gives up after two seconds. If CtrlB does not answer, the edit goes ahead and the error is written to `~/.ctrlb/hooks.log`. Claims are advisory unless the workspace turns on `enforce`. `CTRLB_ENFORCE=off` skips the check on one machine.
 
+In a relay run the plugin also registers a task for each sub-agent it spawns, keeps small text files from the session's scratch directories in the record, starts each session with the run's open tasks, contracts and handoffs, and claims shared files such as `REGISTRY.md` around each edit (`CTRLB_AUTO_SLOTS`, `CTRLB_SCRATCH_DIR`). See [Relay hooks](relay-hooks.md).
+
 ### When the session ends, and when the agent calls done
 
 - **Session end.** In a relay run (`CTRLB_RUN` set, or the agent called a relay tool), the `SessionEnd` hook hands off every hold the agent still has, in one write. Tasks go to nobody: the next agent to claim one gets it, with a note naming the files edited in this session, the last test command and its exit code, and the agent's last note. Paths and slots are released.
