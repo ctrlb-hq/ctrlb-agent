@@ -59,6 +59,10 @@ class Seeker:
     def __init__(self):
         self.records, self.check_fx, self.runs_fx = load('seeker/records.json'), load('seeker/check.json'), load('seeker/runs.json')
         self.calls, self.rows, self.refused, self.state = [], [], [], dict(check='allow', handoff='ok')
+        # Round 8 routes: each answers 'ok', or 'slow' (sleeps SLOW_S, longer than any hook budget), 'error' (500),
+        # 'missing' (404, a Seeker without the route); claims also 'held' (another agent holds it).
+        self.state.update(briefs='ok', claims='ok', release='ok', posts='ok', tasks='ok', contracts='ok', peers='ok',
+                          artifacts='ok')
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -114,6 +118,17 @@ class Seeker:
                                               'tasks': ['task 07 latency'], 'message': 'handed off 1 task, released 1 key'})
                 if self.path.startswith('/ai/relay/') and self.path.split('?')[0].endswith('/runs') and method == 'GET':
                     return self._answer(**outer.runs_fx['responses']['ok'])
+                m = re.match(r'^/ai/relay/([A-Za-z0-9_]+)/runs/([^/?]+)/(briefs|claims|posts|tasks|contracts|peers|artifacts)(?:\?(.*))?$', self.path)
+                if m:
+                    route = 'release' if m.group(3) == 'claims' and method == 'DELETE' else m.group(3)
+                    s = outer.state.get(route, 'ok')
+                    if s == 'slow':
+                        time.sleep(SLOW_S)
+                    if s == 'error':
+                        return self._answer(500, {'error': 'boom'})
+                    if s == 'missing':
+                        return self._answer(404, {'error': 'no route'})
+                    return self._answer(*r8_answer(route, method, body, m.group(4) or '', s))
                 return self._answer(404, {'error': 'no route'})
 
             def do_POST(self):
@@ -121,6 +136,9 @@ class Seeker:
 
             def do_GET(self):
                 self._handle('GET')
+
+            def do_DELETE(self):
+                self._handle('DELETE')
 
         self.httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H)
         self.httpd.daemon_threads = True
@@ -131,6 +149,55 @@ class Seeker:
         self.calls.clear()
         self.rows.clear()
         self.refused.clear()
+
+
+SLOW_S = 5
+R8_ARTIFACT = '# plan\nstep 1: parse\n'
+
+
+def r8_answer(route, method, body, query, state):
+    """(status, body) of the fake round 8 routes."""
+    body = body if isinstance(body, dict) else {}
+    if route == 'briefs' and method == 'POST':
+        res = body.get('resource') or ''
+        return 201, {'ok': True, 'key': res if res.startswith('contract:') else 'name:' + ' '.join(res.lower().split()),
+                     'resource': res, 'paths': ['path:' + p for p in body.get('paths') or []]}
+    if route == 'claims':
+        res = body.get('resource') or ''
+        k = 'slot:' + res[len('slot:'):].lower() if res.startswith('slot:') else res
+        if state == 'held':
+            return 200, {'held': False, 'resource': res, 'key': k, 'held_by': 'agent-b', 'message': f'{res} is already held by agent-b'}
+        return 200, {'held': True, 'resource': res, 'key': k, 'paths': ['path:' + p for p in body.get('paths') or []],
+                     'token': 'tok-slot', 'lease_until': 1793000120000000}
+    if route == 'release':
+        res = body.get('resource') or ''
+        return 200, {'released': 1, 'finished': False, 'resource': res, 'key': 'slot:' + res[len('slot:'):].lower(),
+                     'paths': ['path:REGISTRY.md']}
+    if route == 'posts':
+        return 201, {'ok': True, 'key': body.get('key', '')}
+    if route == 'tasks':
+        return 200, {'tasks': [
+            {'name': 'task 01 parse', 'key': 'name:task 01 parse', 'state': 'held', 'held_by': 'agent-b', 'stalled': True,
+             'test': 'python3 -m pytest tests/test_parse.py', 'paths': ['path:src/parse.py']},
+            {'name': 'task 02 emit', 'key': 'name:task 02 emit', 'state': 'open', 'handed_off': True,
+             'handoff_text': 'Session ended. Edited: src/emit.py. Last test: none run.', 'handoff_by': 'agent-c'},
+            {'name': 'task 00 setup', 'key': 'name:task 00 setup', 'state': 'finished', 'finished_by': 'agent-b'}],
+            'free_tasks': 1}
+    if route == 'contracts':
+        return 200, {'contracts': [{'name': 'parse api', 'key': 'contract:parse api', 'text': 'parse(s) -> Tree', 'paths': ['path:src/parse.py']}]}
+    if route == 'peers':
+        if 'kind=handoff' in query:
+            return 200, {'you': '', 'events': [{'agent': 'agent-c', 'kind': 'HANDOFF', 'resource': 'task 04 render', 'key': 'name:task 04 render',
+                                                'to': 'agent-1', 'text': 'render: tests pass, docs left'},
+                                               {'agent': 'agent-c', 'kind': 'HANDOFF', 'resource': 'task 09 other', 'to': 'agent-z', 'text': 'not yours'}]}
+        return 200, {'you': '', 'events': [{'agent': 'agent-1', 'kind': 'NOTE', 'text': 'parse: tokenizer done', 'key': ''},
+                                           {'agent': 'agent-b', 'kind': 'NOTE', 'text': 'someone else', 'key': ''},
+                                           {'agent': 'agent-1', 'kind': 'NOTE', 'text': 'artifact body', 'key': 'artifact:x.md'}]}
+    if route == 'artifacts':
+        return 200, {'artifacts': [{'key': 'artifact:plan.md', 'path': 'plan.md', 'agent': 'agent-1',
+                                    'hash': 'sha256:' + hashlib.sha256(R8_ARTIFACT.encode()).hexdigest(), 'text': R8_ARTIFACT, 'ts': 1},
+                                   {'key': 'artifact:../escape.md', 'path': '../escape.md', 'agent': 'agent-1', 'text': 'no', 'ts': 1}]}
+    return 404, {'error': 'no route'}
 
 
 def closed_port():
@@ -1417,8 +1484,9 @@ def test_round6_hooks(seeker):
     check('relay rule v9: redirect to a free task; an empty list means note and stop',
           'If a claim is refused and the answer lists free tasks, claim one of them next. If the list is empty, post a note '
           'saying you have no task and stop.' in rule and 'wait_s' not in rule)
-    check('relay rule v9: REGISTRY.md as a slot with the file, released in the same turn',
-          'Edit REGISTRY.md only between claim(resource="slot:REGISTRY.md", paths=["REGISTRY.md"]) and its release, in the same turn' in rule)
+    # Rule v10 (round 8) drops the v9 REGISTRY.md sentence: the hooks claim autoSlots files (test_round8_hooks).
+    check('relay rule v10: the v9 REGISTRY.md slot sentence is gone (the hooks handle it)',
+          'Edit REGISTRY.md only between' not in rule and 'REGISTRY.md' not in rule)
     home = os.path.join(WORK, 'home-r6')
     shutil.rmtree(home, ignore_errors=True)
     run = 'run-r6'
@@ -1518,7 +1586,7 @@ def test_round6_hooks(seeker):
           json.dumps(o)[:200])
     hk = load('../../plugin/hooks/hooks.json')['hooks']
     check('hooks.json: PreToolUse on the done tool, PostToolUse on edits and post, PostToolUseFailure on Bash',
-          len(hk['PreToolUse']) == 2 and hk['PreToolUse'][1]['matcher'] == 'mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'
+          len(hk['PreToolUse']) == 3 and hk['PreToolUse'][1]['matcher'] == 'mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'
           and hk['PostToolUse'][2]['matcher'].startswith('Edit|Write|MultiEdit|NotebookEdit|mcp__ctrlb__post')
           and hk['PostToolUseFailure'][0]['matcher'] == 'Bash' and hk['SessionEnd'][0]['hooks'][0]['command'].endswith('session-end'))
     # Codex: the same session-end handoff in a relay run, with what it can say.
@@ -1530,6 +1598,328 @@ def test_round6_hooks(seeker):
     check('codex session-end: one open handoff of all holds in a relay run, exits 0',
           p.returncode == 0 and len(calls) == 1 and calls[0]['body'].get('all') is True and calls[0]['body'].get('to') == ''
           and 'Codex' in calls[0]['body'].get('text', ''), json.dumps(calls)[:300])
+
+
+def _wait_for(pred, timeout=6.0):
+    t = time.time()
+    while time.time() - t < timeout:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return pred()
+
+
+def _log(home):
+    try:
+        with open(os.path.join(home, 'hooks.log')) as fh:
+            return fh.read()
+    except OSError:
+        return ''
+
+
+def test_round8_hooks(seeker):
+    """Round 8 (Seeker decisions 43 to 47, docs/relay-hooks.md). A: PreToolUse on the Agent tool registers a task named
+    from the description, with the prompt as its text and the workspace paths it names, and posts an interface block
+    as a contract; it prints nothing and returns inside its budget. B: PostToolUse on Write/Edit under the scratchpad
+    or the scratch directory posts a small text file as an artifact note (detached), once per content; binaries, big
+    files and secrets are skipped and logged. C: SessionStart in a relay run adds the record block and writes the
+    artefacts back. D: the scratch directory. E: autoSlots claim before the edit, deny when held, release after."""
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import hooks_shared as H
+    import relay_hooks as RH
+    rule = H.RELAY
+    check('relay rule v10: claim(next=true) first, done with next=true, peers only to wait',
+          'Start with `claim(next=true)`. When your test passes, call `done` with the evidence and `next=true`. Call `peers` '
+          'only when you are waiting for an answer or a handoff.' in rule)
+    check('relay rule v10: helper scripts and binaries go to the named scratch directory, not /tmp',
+          'Put helper scripts and binaries in the scratch directory {scratch}, not in /tmp.' in rule)
+    ws = os.path.join(WORK, 'ws-r8')
+    shutil.rmtree(ws, ignore_errors=True)
+    for f in ('src/parse.py', 'src/emit.py', 'docs/notes.md', 'REGISTRY.md'):
+        os.makedirs(os.path.dirname(os.path.join(ws, f)), exist_ok=True)
+        with open(os.path.join(ws, f), 'w') as fh:
+            fh.write('x\n')
+    run = 'run-r8'
+    home = os.path.join(WORK, 'home-r8')
+    shutil.rmtree(home, ignore_errors=True)
+    env = base_env(seeker.url, home, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    base = {'session_id': SID, 'transcript_path': '', 'cwd': ws}
+
+    # A: a spawn registers a task (and a contract).
+    prompt = ('Fix the tokenizer in src/parse.py (see `src/parse.py:12`) and src/emit.py; notes in docs/. Not src/gone.py, '
+              'not /etc/hostname, not https://example.test/a/b.py. Test: `python3 -m pytest tests/test_parse.py`.\n\n'
+              '## API\n\n```json\n{"tokens": ["str"], "pos": "int"}\n```\n')
+    agent_in = dict(base, hook_event_name='PreToolUse', tool_name='Agent',
+                    tool_input={'prompt': prompt, 'description': 'Fix the tokenizer', 'subagent_type': 'general-purpose'})
+    seeker.reset()
+    p, dt = hook('pre-agent', agent_in, env)
+    briefs = [c for c in seeker.calls if c['path'].endswith('/briefs')]
+    b0 = briefs[0]['body'] if briefs else {}
+    check('pre-agent: registers task 01 named from the description, the prompt as its text, workspace paths it names',
+          len(briefs) == 2 and b0.get('resource') == 'task 01 Fix the tokenizer' and b0.get('text') == prompt
+          and b0.get('paths') == ['src/parse.py', 'src/emit.py', 'docs'] and b0.get('agent') == 'agent-1' and b0.get('cwd') == ws
+          and briefs[0]['path'] == f'/ai/relay/agent_sessions/runs/{run}/briefs', json.dumps(b0)[:400])
+    check('pre-agent: the test command the prompt quotes is the task\'s test', b0.get('test') == 'python3 -m pytest tests/test_parse.py')
+    b1 = briefs[1]['body'] if len(briefs) > 1 else {}
+    check('pre-agent: the interface block is posted as a contract on the same paths',
+          b1.get('resource') == 'contract:task 01 Fix the tokenizer API' and b1.get('paths') == b0.get('paths')
+          and '"tokens": ["str"]' in b1.get('text', '') and b1['text'].startswith('```json'), json.dumps(b1)[:300])
+    check('pre-agent: prints nothing (the spawn goes ahead unchanged), exits 0', p.returncode == 0 and not p.stdout.strip() and not p.stderr.strip())
+    seeker.reset()
+    secret = 'sk-' + 'ant-api03-abcdefghijklmnopqrstuvwx'
+    hook('pre-agent', dict(agent_in, tool_input={'prompt': f'Update src/emit.py; the key is {secret}', 'description': 'emit/fix'}), env)
+    b = seeker.calls[0]['body'] if seeker.calls else {}
+    check('pre-agent: the second spawn is task 02; a "/" in the description is not a path; secrets are redacted; no contract',
+          len(seeker.calls) == 1 and b.get('resource') == 'task 02 emit fix' and secret not in json.dumps(b) and '[REDACTED]' in b.get('text', ''),
+          json.dumps(b)[:300])
+    seeker.reset()
+    hook('pre-agent', dict(agent_in, tool_input={'prompt': 'Look around and report.', 'description': 'explore'}), env)
+    check('pre-agent: a prompt naming no workspace path registers nothing', not seeker.calls)
+    plain = base_env(seeker.url, os.path.join(WORK, 'home-r8-plain'))
+    hook('pre-agent', agent_in, plain)
+    check('pre-agent outside a relay run (no CTRLB_RUN, no relay tool called): nothing written', not seeker.calls)
+    seeker.state['briefs'] = 'slow'
+    p, dt = hook('pre-agent', agent_in, env)
+    seeker.state['briefs'] = 'ok'
+    check(f'pre-agent budget: Seeker slower ({SLOW_S}s) than the {RH.REGISTER_S}s registration: returns inside the 5 s hook timeout, '
+          'no output, the spawn proceeds', p.returncode == 0 and not p.stdout.strip() and dt < RH.REGISTER_S + 1.0, f'{dt:.2f}s')
+    down = base_env(f'http://127.0.0.1:{closed_port()}', home, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    p, dt = hook('pre-agent', agent_in, down)
+    check('pre-agent, Seeker down: no output, fast', p.returncode == 0 and not p.stdout.strip() and dt < 2, f'{dt:.2f}s')
+    check('prompt_contract: a section under an "Interface:" label; none in plain prose',
+          RH.prompt_contract('Do it.\n\nInterface:\nparse(s: str) -> list[str]\n\nNotes:\nnone') == ('Interface', 'parse(s: str) -> list[str]')
+          and RH.prompt_contract('Fix the bug.\n```sh\nmake\n```\n') is None)
+
+    # D: the scratch directory, created by session-start and named in the rule.
+    seeker.reset()
+    shutil.rmtree(os.path.join(WORK, 'scratch-r8'), ignore_errors=True)
+    senv = dict(env, CTRLB_SCRATCH_DIR=os.path.join(WORK, 'scratch-r8', '{run}'))
+    p, dt = hook('session-start', dict(base, hook_event_name='SessionStart', source='startup'), senv)
+    ctx = out_of(p).get('additionalContext', '')
+    scratch = os.path.join(WORK, 'scratch-r8', run)
+    check('session-start: creates scratchDir ({run} replaced) and the rule names it',
+          os.path.isdir(scratch) and f'Put helper scripts and binaries in the scratch directory {scratch}, not in /tmp.' in ctx, ctx[-300:])
+    default = os.path.join(home, 'relay', run, 'scratch')
+    seeker.reset()
+    p, _ = hook('session-start', dict(base, hook_event_name='SessionStart', source='startup'), env)
+    ctx = out_of(p).get('additionalContext', '')
+    check('session-start: the default scratchDir is <CTRLB_HOME>/relay/<run id>/scratch', os.path.isdir(default) and default in ctx)
+
+    # C: the record block.
+    block = ctx[ctx.find('CtrlB Relay record of run'):] if 'CtrlB Relay record of run' in ctx else ''
+    gets = sorted(c['path'].split('?')[0].rsplit('/', 1)[-1] for c in seeker.calls if c['method'] == 'GET')
+    check('session-start (relay run): reads tasks, contracts, peers (notes, handoffs) and artifacts of this agent',
+          gets == ['artifacts', 'contracts', 'peers', 'peers', 'tasks'] and any('agent=agent-1' in c['path'] for c in seeker.calls
+                                                                                   if '/artifacts' in c['path']), ','.join(gets))
+    check('session-start block: open tasks with holder, stalled flag and test; a finished task left out',
+          'task 01 parse (held by agent-b, stalled; test: python3 -m pytest tests/test_parse.py)' in block
+          and 'task 02 emit (free, handed off)' in block and 'task 00 setup' not in block, block)
+    check('session-start block: contract names, the open handoff and the one addressed to this agent, not others',
+          'Contracts: parse api.' in block and 'task 02 emit handed off openly by agent-c' in block
+          and 'task 04 render handed to you by agent-c' in block and 'task 09 other' not in block, block)
+    check('session-start block: this agent\'s last notes only (no artifact notes)',
+          'Your last notes: parse: tokenizer done.' in block and 'someone else' not in block and 'artifact body' not in block, block)
+    restored = os.path.join(default, 'plan.md')
+    check('session-start: artefacts written back to scratchDir (a path escaping it is not), and the block says where',
+          os.path.isfile(restored) and open(restored).read() == R8_ARTIFACT and not os.path.exists(os.path.join(home, 'relay', run, 'escape.md'))
+          and f'Your artefacts from the previous session are in {default}.' in block, block)
+    check('session-start block: under 2 KB, after the rule', 0 < len(block.encode()) < 2048 and ctx.index('CtrlB Relay: your run id') < ctx.index(block))
+    seeker.reset()
+    for r in ('tasks', 'contracts', 'peers', 'artifacts'):
+        seeker.state[r] = 'slow'
+    p, dt = hook('session-start', dict(base, hook_event_name='SessionStart', source='resume'), env)
+    for r in ('tasks', 'contracts', 'peers', 'artifacts'):
+        seeker.state[r] = 'ok'
+    ctx = out_of(p).get('additionalContext', '')
+    check(f'session-start budget: Seeker slower ({SLOW_S}s) than the {RH.RECORD_S}s read: returns inside it with the rule and '
+          'the block from the local cache, saying so', p.returncode == 0 and dt < RH.RECORD_S + 1.0 and 'your run id is run-r8' in ctx
+          and 'from the local cache of' in ctx and 'task 01 parse (held by agent-b' in ctx, f'{dt:.2f}s')
+    fresh = base_env(f'http://127.0.0.1:{closed_port()}', os.path.join(WORK, 'home-r8-fresh'), CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    p, dt = hook('session-start', dict(base, hook_event_name='SessionStart', source='startup'), fresh)
+    ctx = out_of(p).get('additionalContext', '')
+    check('session-start, Seeker down and no cache: the rule alone, fast', 'your run id is run-r8' in ctx and 'CtrlB Relay record' not in ctx
+          and dt < 2, f'{dt:.2f}s')
+    seeker.reset()
+    hook('session-start', dict(base, hook_event_name='SessionStart', source='startup'), base_env(seeker.url, os.path.join(WORK, 'home-r8-plain')))
+    check('session-start without CTRLB_RUN: no record read', not seeker.calls)
+
+    # B: artefacts.
+    pad = os.path.join(WORK, 'pad-r8')
+    shutil.rmtree(pad, ignore_errors=True)
+    os.makedirs(os.path.join(pad, 'notes'))
+    bhome = os.path.join(WORK, 'home-r8b')
+    shutil.rmtree(bhome, ignore_errors=True)
+    benv = base_env(seeker.url, bhome, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    post = dict(base, hook_event_name='PostToolUse', scratchpad_dir=pad)
+
+    def write(rel, data, root=pad, tool='Write'):
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb' if isinstance(data, bytes) else 'w') as fh:
+            fh.write(data)
+        return hook('post-tool', dict(post, tool_name=tool, tool_input={'file_path': path, 'content': 'x'},
+                                      tool_response={'filePath': path}), benv)
+
+    def posts():
+        return [c for c in seeker.calls if c['path'].endswith('/posts')]
+
+    seeker.reset()
+    text = 'step 1: parse\nstep 2: emit\n'
+    p, dt = write('notes/plan.md', text)
+    _wait_for(lambda: posts())
+    ps = posts()
+    body = ps[0]['body'] if ps else {}
+    check('post-tool Write under the scratchpad: one artifact NOTE keyed artifact:<relative path>, the text and its hash',
+          len(ps) == 1 and body.get('key') == 'artifact:notes/plan.md' and body.get('text') == text and body.get('agent') == 'agent-1'
+          and body.get('hash') == 'sha256:' + hashlib.sha256(text.encode()).hexdigest()
+          and ps[0]['path'] == f'/ai/relay/agent_sessions/runs/{run}/posts', json.dumps(body)[:300])
+    check('post-tool artifact: no output, exits 0', p.returncode == 0 and not p.stdout.strip())
+    seeker.reset()
+    write('notes/plan.md', text, tool='Edit')
+    time.sleep(1.0)
+    check('post-tool artifact: the same content again posts nothing', not posts())
+    write('notes/plan.md', text + 'step 3: ship\n', tool='Edit')
+    _wait_for(lambda: posts())
+    check('post-tool artifact: changed content is posted again', len(posts()) == 1)
+    seeker.reset()
+    write('tool.bin', b'\x7fELF\x00\x01\x02')
+    write('big.txt', 'y' * (40 * 1024))
+    pw = 'hunter2' + 'pass'
+    write('creds.txt', f'password = {pw}\n')
+    write('.env', 'X=1\n')
+    outside = os.path.join(WORK, 'ws-r8', 'src', 'parse.py')
+    hook('post-tool', dict(post, tool_name='Write', tool_input={'file_path': outside, 'content': 'x'}), benv)
+    time.sleep(1.0)
+    log = _log(bhome)
+    check('post-tool artifact: binary, over 32 KB, secret content and a .env file are skipped and logged; a file outside the '
+          'scratch directories is not an artefact', not posts() and 'artifact skipped: tool.bin: binary' in log
+          and 'artifact skipped: big.txt: 40960 bytes' in log and 'artifact skipped: creds.txt: matches a secret pattern' in log
+          and 'artifact skipped: .env: secret-looking file name' in log and 'parse.py' not in log, log[-600:])
+    check('post-tool artifact: the hook log never holds the secret', pw not in log)
+    sdir = os.path.join(bhome, 'relay', run, 'scratch')
+    seeker.reset()
+    write('helpers/run.sh', '#!/bin/sh\necho hi\n', root=sdir)
+    _wait_for(lambda: posts())
+    check('post-tool artifact: a file under scratchDir is an artefact too', [c['body'].get('key') for c in posts()] == ['artifact:helpers/run.sh'])
+    seeker.reset()
+    seeker.state['posts'] = 'slow'
+    p, dt = write('notes/slow.md', 'slow post\n')
+    check(f'post-tool artifact budget: Seeker slower ({SLOW_S}s) than the hook: returns at once (the post is detached)',
+          p.returncode == 0 and not p.stdout.strip() and dt < 1.5, f'{dt:.2f}s')
+    _wait_for(lambda: 'artifact posted: run-r8/agent-1 notes/slow.md' in _log(bhome), SLOW_S + 3)
+    seeker.state['posts'] = 'error'
+    write('notes/err.md', 'failed post\n')
+    _wait_for(lambda: 'artifact post run-r8/agent-1 notes/err.md: SeekerError' in _log(bhome))
+    seeker.state['posts'] = 'ok'
+    seeker.reset()
+    write('notes/err.md', 'failed post\n', tool='Edit')
+    _wait_for(lambda: posts())
+    check('post-tool artifact: a post that failed is tried again on the next write of the same content', len(posts()) == 1)
+    seeker.reset()
+    seeker.state['artifacts'] = 'missing'
+    p, _ = hook('session-start', dict(base, hook_event_name='SessionStart', source='startup', scratchpad_dir=pad), benv)
+    seeker.state['artifacts'] = 'ok'
+    ctx = out_of(p).get('additionalContext', '')
+    check('session-start, a Seeker without the artifacts read: artefacts restored from the local copies of what this machine posted',
+          os.path.isfile(os.path.join(sdir, 'notes', 'plan.md')) and open(os.path.join(sdir, 'notes', 'plan.md')).read() == text + 'step 3: ship\n'
+          and f'Your artefacts from the previous session are in {sdir}.' in ctx, ctx[-300:])
+
+    # E: autoSlots.
+    ehome = os.path.join(WORK, 'home-r8e')
+    shutil.rmtree(ehome, ignore_errors=True)
+    eenv = base_env(seeker.url, ehome, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    reg = os.path.join(ws, 'REGISTRY.md')
+    pre = dict(base, hook_event_name='PreToolUse', tool_name='Edit', tool_input={'file_path': reg, 'old_string': 'x', 'new_string': 'y'})
+    epost = dict(pre, hook_event_name='PostToolUse', tool_response={'filePath': reg})
+    seeker.reset()
+    p, dt = hook('pre-tool', pre, eenv)
+    claims = [c for c in seeker.calls if c['path'].endswith('/claims')]
+    check('autoSlots pre-tool: claims slot:REGISTRY.md with the file, no edit check, edit allowed (no output)',
+          len(claims) == 1 and claims[0]['method'] == 'POST' and claims[0]['body'].get('resource') == 'slot:REGISTRY.md'
+          and claims[0]['body'].get('paths') == ['REGISTRY.md'] and not [c for c in seeker.calls if c['path'].endswith('/check')]
+          and p.returncode == 0 and not p.stdout.strip(), json.dumps(claims)[:300])
+    saved, common.HOME = common.HOME, ehome
+    try:
+        tok = common.TokenState(run, 'agent-1').get(['slot:registry.md', 'path:REGISTRY.md'])
+    finally:
+        common.HOME = saved
+    check('autoSlots pre-tool: the slot\'s token is kept for the slot and the file', tok == {'slot:registry.md': 'tok-slot', 'path:REGISTRY.md': 'tok-slot'}, str(tok))
+    seeker.reset()
+    p, dt = hook('post-tool', epost, eenv)
+    rel = [c for c in seeker.calls if c['path'].endswith('/claims')]
+    check('autoSlots post-tool: releases slot:REGISTRY.md (the agent spends no turn on it)',
+          len(rel) == 1 and rel[0]['method'] == 'DELETE' and rel[0]['body'].get('resource') == 'slot:REGISTRY.md' and not p.stdout.strip())
+    seeker.reset()
+    hook('post-tool', epost, eenv)
+    check('autoSlots post-tool: nothing to release when the hook holds no slot', not seeker.calls)
+    seeker.state['claims'] = 'held'
+    p, _ = hook('pre-tool', pre, eenv)
+    seeker.state['claims'] = 'ok'
+    o = out_of(p)
+    check('autoSlots pre-tool: held by another agent: the edit is denied with "held by <agent>, try again in a moment"',
+          o.get('permissionDecision') == 'deny' and o.get('permissionDecisionReason') == 'CtrlB Relay: REGISTRY.md is held by agent-b, try again in a moment.',
+          json.dumps(o))
+    seeker.state['claims'] = 'slow'
+    p, dt = hook('pre-tool', pre, eenv)
+    seeker.state['claims'] = 'ok'
+    check(f'autoSlots budget: Seeker slower ({SLOW_S}s) than the {RH.SLOT_S}s claim: fails open inside the pre-tool budget (edit allowed)',
+          p.returncode == 0 and not p.stdout.strip() and dt < H.CHECK_S + 1.0 and 'auto slot fail open' in _log(ehome), f'{dt:.2f}s')
+    seeker.state['claims'] = 'error'
+    p, _ = hook('pre-tool', pre, eenv)
+    seeker.state['claims'] = 'ok'
+    check('autoSlots: Seeker error: fails open (edit allowed)', p.returncode == 0 and not p.stdout.strip())
+    seeker.reset()
+    hook('pre-tool', pre, eenv)
+    seeker.state['release'] = 'slow'
+    p, dt = hook('post-tool', epost, eenv)
+    seeker.state['release'] = 'ok'
+    check(f'autoSlots release budget: Seeker slower ({SLOW_S}s) than the {RH.RELEASE_S}s release: returns inside it (the slot lapses)',
+          p.returncode == 0 and not p.stdout.strip() and dt < RH.RELEASE_S + 1.0, f'{dt:.2f}s')
+    seeker.reset()
+    hook('pre-tool', pre, eenv)
+    p, _ = hook('post-tool-failure', dict(pre, hook_event_name='PostToolUseFailure', error='old_string not found'), eenv)
+    check('autoSlots post-tool-failure: a failed edit releases the slot too',
+          [c['method'] for c in seeker.calls if c['path'].endswith('/claims')] == ['POST', 'DELETE'] and not p.stdout.strip())
+    seeker.reset()
+    hook('pre-tool', dict(pre, tool_input={'file_path': os.path.join(ws, 'src', 'parse.py'), 'old_string': 'x', 'new_string': 'y'}), eenv)
+    check('autoSlots: a file not in the list is not claimed (the edit check runs as before)',
+          not [c for c in seeker.calls if c['path'].endswith('/claims')] and [c for c in seeker.calls if c['path'].endswith('/check')])
+    seeker.reset()
+    hook('pre-tool', pre, dict(eenv, CTRLB_AUTO_SLOTS=''))
+    check('autoSlots off (CTRLB_AUTO_SLOTS empty): no claim', not [c for c in seeker.calls if c['path'].endswith('/claims')])
+    seeker.reset()
+    hook('pre-tool', pre, base_env(seeker.url, os.path.join(WORK, 'home-r8-plain')))
+    check('autoSlots outside a relay run: no claim', not [c for c in seeker.calls if c['path'].endswith('/claims')])
+
+    # hooks.json, Codex and the docs.
+    hk = load('../../plugin/hooks/hooks.json')['hooks']
+    agent_hook = [g for g in hk['PreToolUse'] if g.get('matcher') == 'Agent|Task']
+    fail_edit = [g for g in hk['PostToolUseFailure'] if g.get('matcher') == 'Edit|Write|MultiEdit|NotebookEdit']
+    check('hooks.json: PreToolUse Agent|Task runs pre-agent (timeout 5); PostToolUseFailure on edit tools; SessionStart timeout 10',
+          len(agent_hook) == 1 and agent_hook[0]['hooks'][0]['command'].endswith('hook.py" pre-agent') and agent_hook[0]['hooks'][0]['timeout'] == 5
+          and 'async' not in agent_hook[0]['hooks'][0] and len(fail_edit) == 1 and fail_edit[0]['hooks'][0]['command'].endswith('post-tool-failure')
+          and hk['SessionStart'][0]['hooks'][0]['timeout'] == 10)
+    seeker.reset()
+    cenv = base_env(seeker.url, os.path.join(WORK, 'home-r8-codex'), CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    p, dt = chook('session-start', {'session_id': CSID, 'transcript_path': '', 'cwd': ws, 'hook_event_name': 'SessionStart',
+                                    'source': 'startup'}, cenv)
+    ctx = out_of(p).get('additionalContext', '')
+    check('codex session-start (relay run): the same record block and scratch directory',
+          'CtrlB Relay record of run run-r8' in ctx and 'task 01 parse (held by agent-b' in ctx
+          and os.path.join(WORK, 'home-r8-codex', 'relay', run, 'scratch') in ctx, ctx[-300:])
+    doc = open(os.path.join(ROOT, 'docs', 'relay-hooks.md')).read()
+    check('docs/relay-hooks.md: every round 8 hook with its event, fields, output and budget, citing the hooks reference',
+          all(w in doc for w in ('PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'SessionStart', 'SessionEnd', 'scratchpad_dir',
+                                 'tool_input.prompt', 'tool_input.description', 'permissionDecision', 'additionalContext',
+                                 'autoSlots', 'scratchDir', 'fail open', 'code.claude.com/docs/en/hooks')))
+    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
+    claim_doc = tools[tools.index('### claim'):tools.index('### release')]
+    check('relay-tools: claim next and done next documented',
+          '| `next` |' in claim_doc and '`free_tasks: []`' in claim_doc and 'done(resource="task 03 median", evidence=' in tools
+          and 'next=true' in tools[tools.index('#### done'):tools.index('### handoff')])
+    skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+    check('relay skill: claim(next=true), done with next=true, autoSlots instead of the REGISTRY.md claim',
+          '`claim(next=true)`' in skill and '`next=true`' in skill and 'claim(resource="slot:REGISTRY.md"' not in skill)
 
 
 def main():
@@ -1548,6 +1938,7 @@ def main():
     test_takeover_wording()
     test_done_evidence(seeker)
     test_round6_hooks(seeker)
+    test_round8_hooks(seeker)
     test_failure_safety(seeker)
     test_config_and_status(seeker)
     test_codex_rows(seeker)
