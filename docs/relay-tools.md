@@ -1,12 +1,12 @@
 ---
 title: Relay tools
-description: The seventeen tools CtrlB's MCP server gives an agent, and an eighteenth, done, their arguments and answers, and the three agent rules to paste into a prompt.
+description: The eighteen tools CtrlB's MCP server gives an agent, and a nineteenth, done, their arguments and answers, and the three agent rules to paste into a prompt.
 slug: relay-tools
 ---
 
 # Relay tools
 
-CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent seventeen tools, and an eighteenth, `done`, that finishes a task with the evidence of its check. Four search the session store. Thirteen, and `done`, are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
+CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent eighteen tools, and a nineteenth, `done`, that finishes a task with the evidence of its check. Four search the session store. Fourteen, and `done`, are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
 
 To add the server by hand in Claude Code:
 
@@ -364,6 +364,18 @@ The run's registered tasks and their state now.
 | `run_id` | Optional, from the header. |
 
 Answer: `{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round, ask_about?}]}`, and `test` when the task's registration names one. Each task may also carry `handed_off`, `handoff_text` and `handoff_by`, and the answer carries `free_tasks` and `idle_agents`. `free_tasks` counts the tasks nobody holds and nobody finished; `idle_agents` lists the agents whose last claim was refused with no free task left and that hold nothing. A spawner can read `free_tasks` before starting more agents. `handed_off` is `true` when the task's last holder handed it off openly (or its session ended holding it); `handoff_text` says what it did and what is left. `state` is `open`, `held` or `finished` in the task's current round; `ask_about` is what the task's owner wants its holder to ask about; `test` is the command that tests the task. A finished task with a `test` also carries `evidence_matches_test`: whether its done's command named that test. Each task also carries `evidence` (`{command, exit_code, summary}`, what the `done` that finished it says was checked) when it was finished with evidence, and `stalled`: `true` when it is held (or its holder's lease ran out) and not finished, and its holder wrote nothing on it and edited none of its files for the workspace's `stallAfterSeconds` (300 by default). Claim a stalled task you need with `takeover=true`; never wait in line on it. The run view counts them as `stalled_tasks`, and lists every stalled hold, bare files and slots too, in `detectors.stalled` (with `kind` and `resource`; `stalled_holds` is the total).
+
+### history
+
+Before you start on a file (or a task), what past runs did with it. It reads the whole record of the workspace, not only this run.
+
+| Argument | |
+|---|---|
+| `resource` | Required. A file path as in your worktree, or a task name; keyed as a claim is. |
+| `since` | How far back to look: `30d`, `12h`, `30m`. Default `90d`. |
+| `cwd` | Your working directory, for absolute paths. |
+
+Answer: `{resource, key, runs, counts: {holds, edits, refusals, evidence, notes}, last_holders: [{run_id, agent, key, task?, held_at, ended_at?, ended, to?}], last_evidence, open_notes}`. `last_holders` are the three newest holds of the file (or of a task whose files include it) and how each ended: `released`, `done`, `handed_off`, `taken_over`, `lapsed` or `live`. `last_evidence` is the newest `done` on a task that includes the file (`{run_id, task, command, exit_code, summary, witnessed}`), or `null`. `open_notes` are the questions about it nobody answered in their run, and the handoff notes of a task nobody has held since. Many refusals, or holds that ended `taken_over` or `lapsed`, mean the file is contended or work on it tends to stall: claim it early and say what you are doing with `post`. Full history (every hold, edit, refusal, evidence and note, paged) is `GET <your CtrlB URL>/ai/relay/<dataset>/history?resource=<path>`.
 
 ### contract
 
