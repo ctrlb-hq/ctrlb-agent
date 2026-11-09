@@ -1195,31 +1195,66 @@ def test_validate():
 
 
 def test_wait_wording():
-    """Round 3 (Seeker relay-plan decisions 25, 27, 28, 29): the session rule, the relay skill and the tool docs tell
-    the agent to claim with wait_s=30 when the task it wants is held and it has nothing else to do, what
-    belongs_to_task means, that contracts says what changed since it last read them, and to ask about a task's
-    ask_about."""
+    """Round 3 (Seeker relay-plan decisions 25, 27, 28, 29), with round 5's v8 text: the session rule, the relay skill
+    and the tool docs no longer recommend claim(wait_s) (the benchmark found it did not beat polling; wait_s stays in
+    the tool, documented as available), keep what timed_out means, what belongs_to_task means, that contracts says what
+    changed since it last read them, and to ask about a task's ask_about."""
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import hooks_shared as H
     rule = H.RELAY
-    wait = 'Claim with wait_s=30 when the task you want is held and you have nothing else to do'
-    check('relay rule: claim with wait_s=30 when the task is held and there is nothing else to do', wait in rule and 'timed_out' in rule)
+    check('relay rule v8: no claim(wait_s) recommendation', 'wait_s' not in rule and 'wait in line' not in rule.replace('Never wait in line', ''))
     check('relay rule: belongs_to_task means claim the task it names', 'If reason is belongs_to_task' in rule and 'claim that task (task in the answer)' in rule)
     check('relay rule: contracts changed_since and changed_since_read', 'changed_since_read' in rule and 'changed_since' in rule)
     check('relay rule: ask about a task\'s ask_about', 'If the claim answers ask_about' in rule)
     skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
-    check('relay skill: wait_s, timed_out and position', 'Claim with `wait_s=30` when the task you want is held and you have nothing else to do' in skill
-          and '`reason: timed_out`' in skill and '`position`' in skill)
+    check('relay skill: timed_out and position explained, claim wait_s not recommended',
+          'Claim with `wait_s=30`' not in skill and '`reason: timed_out`' in skill and '`position`' in skill
+          and not [ln for ln in skill.splitlines() if 'wait_s' in ln and 'claim(' in ln])
     check('relay skill: belongs_to_task, ask_about, changed_since_read, peers wait_s',
           '`reason: belongs_to_task`' in skill and '`ask_about`' in skill and '`changed_since_read`' in skill
           and 'peers(kind="answer", since=<ts>, wait_s=30)' in skill)
     tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
     check('relay-tools: claim wait_s, the timed_out and belongs_to_task answers, ask_about',
-          '| `wait_s` |' in tools and '"reason": "timed_out"' in tools and '"position": 2' in tools
+          '| `wait_s` | Seconds to wait in line' in tools and 'Available, not recommended' in tools
+          and 'Claim with `wait_s=30`' not in tools and '"reason": "timed_out"' in tools and '"position": 2' in tools
           and '"reason": "belongs_to_task"' in tools and '"task": "task 03 median"' in tools and '"ask_about"' in tools)
     check('relay-tools: peers since and wait_s, task ask_about, contracts since',
           '| `since` | Only events after this' in tools and '| `ask_about` |' in tools
           and '| `since` | When you last read the contracts' in tools)
+
+
+def test_takeover_wording():
+    """Round 5 (Seeker decisions 33 and 34): the v8 rule text and the relay skill tell the agent to take over a stalled
+    task (or a file held by an agent that stopped) with takeover=true instead of waiting in line; the tool docs give
+    takeover, not_stalled, other_user, taken_over_from and stall; a held refusal of an edit carries the takeover hint;
+    a held takeover's token is kept like a claim's."""
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import hooks_shared as H
+    rule = H.RELAY
+    v8 = ("If tasks shows a task you need as stalled, claim it with takeover=true, read its evidence and notes, and "
+          "continue it. Never wait in line on a stalled task. If a file you need is held by an agent that has stopped, "
+          "the hold shows as stalled; take it over the same way.")
+    check('relay rule v8: take over a stalled task or file, never wait in line on it', v8 in rule)
+    check('relay rule v8: the claim(wait_s=30) sentence is gone, every other sentence kept',
+          'wait_s' not in rule and registered_rule(rule) and 'If reason is belongs_to_task' in rule
+          and 'changed_since_read' in rule and 'If the claim answers ask_about' in rule
+          and "Run the task's test command" in rule and rule.index('another agent has it: pick another') < rule.index(v8))
+    skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+    check('relay skill: takeover=true on a stalled task or file, not_stalled, other_user, taken_over_from',
+          'claim it with `takeover=true`' in skill and 'Never wait in line on a stalled task' in skill
+          and '`reason: not_stalled`' in skill and '`reason: other_user`' in skill and '`taken_over_from`' in skill)
+    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
+    check('relay-tools: takeover argument and its answers',
+          '| `takeover` |' in tools and '"taken_over_from": "agent-b"' in tools and '"reason": "not_stalled"' in tools
+          and '`reason: other_user`' in tools and '"stall_after_s": 300' in tools and '`stalled_holds`' in tools)
+    check('pre-tool hint: a held refusal suggests takeover=true when the holder has stopped',
+          'takeover=true' in H.STALLED_HINT and 'stalled' in H.STALLED_HINT)
+    got = H.record_tokens('run-takeover', 'agent-a', 'mcp__ctrlb__claim',
+                          {'held': True, 'key': 'name:task 03 median', 'paths': ['path:src/median.py'],
+                           'token': 'tok-1', 'taken_over_from': 'agent-b'})
+    check('post-tool: a held takeover keeps its token for the task and its files like a claim',
+          sorted(got) == ['name:task 03 median', 'path:src/median.py']
+          and common.TokenState('run-takeover', 'agent-a').get(['name:task 03 median']) == {'name:task 03 median': 'tok-1'})
 
 
 def test_done_evidence(seeker):
@@ -1238,7 +1273,7 @@ def test_done_evidence(seeker):
     check('relay rule v7: run the task\'s test command and give it as the done evidence; the check you ran when there is none',
           v7 in rule)
     check('relay rule v7: the v6 sentence is replaced', "call done on the task name with the command you ran and its result" not in rule)
-    check('relay rule v7: every earlier sentence kept', registered_rule(rule) and 'Claim with wait_s=30' in rule
+    check('relay rule v7: every earlier sentence kept (v8 drops the wait_s one)', registered_rule(rule)
           and 'If reason is belongs_to_task' in rule and 'changed_since_read' in rule and 'If the claim answers ask_about' in rule
           and rule.index('release it with finished=true') < rule.index(v7))
     tests = ['pytest -q tests/test_x.py', 'python -m pytest', 'python3 -m unittest discover', 'cd app && go test ./...',
@@ -1363,6 +1398,7 @@ def main():
     test_release_wording()
     test_briefs_wording()
     test_wait_wording()
+    test_takeover_wording()
     test_done_evidence(seeker)
     test_failure_safety(seeker)
     test_config_and_status(seeker)

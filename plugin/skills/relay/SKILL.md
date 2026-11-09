@@ -24,7 +24,12 @@ How to read the answers:
 
 - `claim` answers `held: true` with the `key` it stored, for example `name:task 03 median`, and the files that came with it in `paths`, for example `["path:src/median.py"]`. You hold all of them.
 - `held: false` with `reason: unknown_task` means the run has registered tasks and none has that name. Claim again with the `suggestion`, or pick a name from `tasks`.
-- `held: false` with `held_by` means another agent is on it now. Pick another task; do not retry the same resource in a loop. Claim with `wait_s=30` when the task you want is held and you have nothing else to do: the claim waits in line and answers `held: true` as soon as it is your turn, or `held: false` with `reason: timed_out`, `held_by` and your `position` in line.
+- `held: false` with `held_by` means another agent is on it now. Pick another task; do not retry the same resource in a loop.
+- If `tasks` shows a task you need as `stalled`, claim it with `takeover=true`, read its evidence and notes, and continue it. Never wait in line on a stalled task. If a file you need is held by an agent that has stopped, the hold shows as stalled; take it over the same way: `claim(resource="REGISTRY.md", takeover=true)`.
+  - A takeover answers `held: true` with `taken_over_from` (the agent that stopped) and `stall` (its reading: `holder`, `last_activity`, `idle_s`, `stall_after_s`); a task's files come with it. The stopped agent's next edit of them is refused.
+  - `held: false` with `reason: not_stalled` means the holder is still working (`stall.idle_s` is under `stall.stall_after_s`): pick other work. `reason: other_user` means another user's agent holds it: only that user's agents can take it over.
+  - A free task, or one whose holder's lease ran out, is claimed as usual.
+- `held: false` with `reason: timed_out`, `held_by` and your `position` in line is the answer of a claim that waited (`wait_s`) and was not served in time.
 - `held: false` with `reason: belongs_to_task` means the file comes with a registered task (`task` in the answer): claim that task instead, and its files come with it.
 - A held claim of a task may answer `ask_about`: facts or questions the task's owner wants you to ask about. `ask` them before deciding them yourself.
 - A held claim of a task (and `tasks`) may show `test`: the command that tests the task, for example `"test": "python3 -m pytest tests/test_median.py"`. That is the check to run before `done`.
