@@ -13,7 +13,7 @@ for _lib in (os.path.join(_HERE, '..', 'lib'), os.path.join(_HERE, '..', '..', '
 import common, relay_hooks, rows_claude  # noqa: E402
 from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, context as _context, decide, record_tokens, _tool_answer,  # noqa: E402
                           bash_result, evidence_hint, is_test_command, record_test, record_bash, record_edit, record_note,
-                          mark_relay, handoff_text, witness, _deny, index_block, parent_line)
+                          mark_relay, handoff_text, witness, _deny, index_block, parent_line, precompact_note)
 from paths import edit_paths as normalise_edit_paths  # noqa: E402
 
 SYNC_S, ASYNC_S = 5, 90
@@ -206,6 +206,12 @@ def main():
         out = _context('SubagentStart', SUBAGENT.format(sid=sid) + ('\n\n' + line if line else '') + '\n\n' + relay)
     elif mode == 'flush':
         upload(cfg, inp, SYNC_S)
+        if inp.get('hook_event_name') == 'PreCompact':
+            # item 3: the running note goes to the compaction summary (Claude Code reads PreCompact stdout as its
+            # instructions); printed as plain text, nothing on no note or no answer in time
+            note = precompact_note(cfg, inp.get('cwd') or '', sid)
+            if note:
+                print(note)
     elif mode == 'session-end':
         try:
             session_end(cfg, inp)

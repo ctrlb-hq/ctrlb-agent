@@ -2123,6 +2123,58 @@ def test_session_index(seeker):
           f'- {s1} | asked:' in cctx and cctx.index('Session index:') < cctx.index('CtrlB Relay:'), cctx[:200])
 
 
+def test_running_note_hooks(seeker):
+    """Item 3: PreCompact prints the session's latest running note as the compaction summary's instructions (Claude
+    Code); a resumed or compacted session starts with the note above the index (both harnesses); no note, nothing."""
+    seeker.reset()
+    seeker.notes.clear()
+    env = base_env(seeker.url, os.path.join(WORK, 'home-note'))
+    sid = '5f0c7a52-0000-4000-8000-0000000000d1'
+    proj = os.path.join(WORK, 'projects', '-work-note')
+    os.makedirs(proj, exist_ok=True)
+    path = os.path.join(proj, sid + '.jsonl')
+    with open(path, 'w') as fh:
+        fh.write(line('user', 'Port the note writer.', '2026-11-03T13:00:00Z', dict(sessionId=sid, cwd='/work/note')))
+    inp = dict(session_id=sid, transcript_path=path, cwd='/work/note', hook_event_name='PreCompact', trigger='auto',
+               custom_instructions=None)
+    p, _ = hook('flush', inp, env)
+    check('running note: PreCompact with no note prints nothing (rows still flushed)', p.stdout.strip() == ''
+          and any(r['session_id'] == sid for r in seeker.rows), repr(p.stdout[:200]))
+    seeker.notes[sid] = (412, '1. Task: port the note writer [seq 0].\n3. Next step: run the tests [seq 410].')
+    p, dt = hook('flush', inp, env)
+    out = p.stdout
+    q = [urllib.parse.parse_qs(urllib.parse.urlsplit(c['path']).query) for c in seeker.calls if '/index?' in c['path']][-1]
+    check('running note: PreCompact prints the note as plain text for the summary, asked by session_id, under 10,000 chars',
+          'record seq 412' in out and 'run the tests [seq 410]' in out and 'Write the summary with it in view' in out
+          and not out.lstrip().startswith('{') and len(out) < 10000 and q.get('session_id') == [sid] and q.get('limit') == ['1'],
+          repr(out[:200]))
+    p, _ = hook('session-start', dict(session_id=sid, transcript_path=path, cwd='/work/note', hook_event_name='SessionStart',
+                                      source='compact'), env)
+    ctx = out_of(p).get('additionalContext', '')
+    check('running note: a compacted session starts with its note above the index',
+          'Running note of session ' + sid in ctx and ctx.index('Running note') < ctx.index('Session index:'), ctx[:300])
+    p, _ = hook('session-start', dict(session_id=sid, transcript_path=path, cwd='/work/note', hook_event_name='SessionStart',
+                                      source='startup'), env)
+    check('running note: a new session (startup) gets no note', 'Running note' not in out_of(p).get('additionalContext', ''))
+    seeker.state['index'] = 'slow'
+    p, dt = hook('flush', inp, env)
+    seeker.state['index'] = 'ok'
+    check(f'running note: a slow Seeker: PreCompact prints nothing and ends inside its budget ({dt:.1f}s)',
+          p.stdout.strip() == '' and dt < 9)
+    # Codex has no PreCompact output; its SessionStart after compaction carries the note
+    chome = os.path.join(WORK, 'codex-home-note')
+    shutil.rmtree(chome, ignore_errors=True)
+    os.makedirs(os.path.join(chome, 'sessions'))
+    main = os.path.join(chome, 'sessions', f'rollout-2026-09-06T11-58-07-{CSID}.jsonl')
+    shutil.copy(os.path.join(FIX, 'codex-rollout.jsonl'), main)
+    seeker.notes[CSID] = (7, '1. Task: the engine PR body [seq 13].')
+    p, _ = chook('session-start', dict(session_id=CSID, transcript_path=main, cwd='/work/note', hook_event_name='SessionStart',
+                                       source='compact'), base_env(seeker.url, os.path.join(WORK, 'home-note-codex'), CODEX_HOME=chome))
+    cctx = out_of(p).get('additionalContext', '')
+    check('running note (codex): SessionStart after compaction carries the note', 'the engine PR body [seq 13]' in cctx, cctx[:200])
+    seeker.notes.clear()
+
+
 def main():
     seeker = Seeker()
     test_layout()
@@ -2145,6 +2197,7 @@ def main():
     test_codex_rows(seeker)
     test_private_tags(seeker)
     test_session_index(seeker)
+    test_running_note_hooks(seeker)
     test_codex_hooks(seeker)
     test_codex_install()
     test_root_install()

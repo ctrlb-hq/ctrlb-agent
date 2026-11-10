@@ -135,6 +135,24 @@ def index_block(cfg, cwd, sid='', source='', budget=INDEX_S):
     return str(ans.get('text') or '')
 
 
+PRECOMPACT_NOTE = ("A running hand-off note for this session was kept by a small model while the session ran (record seq "
+                   "{seq}). Write the summary with it in view: keep its task, current state, next step and seq pointers "
+                   "where they still hold, and correct them from the conversation where they do not.\n\n{text}")
+NOTE_MAX = 9000     # Claude Code takes at most 10,000 characters of a PreCompact hook's stdout
+
+
+def precompact_note(cfg, cwd, sid, budget=INDEX_S):
+    """Item 3: the session's latest running note as instructions for the compaction summary (a PreCompact hook's stdout
+    is used as such), or '' (no note, an error, a timeout)."""
+    if not sid:
+        return ''
+    ans = _within(lambda: common.session_index(cfg, dict(_index_query(cwd, sid), limit=1), timeout=budget), budget)
+    note = ans.get('note') if isinstance(ans, dict) else None
+    if not isinstance(note, dict) or not str(note.get('text') or '').strip():
+        return ''
+    return PRECOMPACT_NOTE.format(seq=note.get('seq'), text=str(note['text']).strip())[:NOTE_MAX]
+
+
 def parent_line(cfg, cwd, parent, budget=INDEX_S):
     """The parent session's index line for a subagent, or '' (not found, an error, a timeout)."""
     if not parent:

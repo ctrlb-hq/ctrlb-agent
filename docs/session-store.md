@@ -47,6 +47,16 @@ At the start of each session the plugin and the Codex hooks put a short index of
 
 The same index is the `session_index` tool (`cwd`, `branch`, `limit`, `since`, `session_id`) and `GET /ai/sessions/{dataset}/index`. It answers `{sessions: [{session_id, user_name?, started, duration_s, seq_from, seq_to, first_message, files_edited, last_command, last_message, cost_usd, note_seq?, line}], note?, expand, text}`. `text` is the index as the hooks inject it.
 
+## The running note
+
+When the workspace's `sessions.runningNote` setting is on (the default), CtrlB keeps a short hand-off note for each session while it runs: every 120,000 characters of new records, the workspace's model updates a note of at most 500 words with the task, the current state, the next step, and the key decisions, dropped approaches and files, each pointing into the record by `seq`. The note is a row of the session (`block_type` `note`), so it is searchable.
+
+- **Before compaction** (Claude Code): the PreCompact hook gives the latest note to the compaction as its instructions, so the summary is written with the note in view. Codex ignores a PreCompact hook's output.
+- **After compaction, or when you resume a session** (both harnesses): the session starts with its latest note above the session index.
+- **No note yet**, or CtrlB slow or unreachable: nothing is added.
+
+The note's records lag the session by up to 120,000 characters: the note is updated once that much is new. Search the record for anything after it.
+
 ## The write-first claim
 
 Two agents can claim the same key at the same moment. If each read the record first and wrote a hold only when it saw none, both would read nothing and both would write: both would think they hold it. A claim in CtrlB writes first and decides on a second read:
