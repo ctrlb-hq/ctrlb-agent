@@ -275,3 +275,86 @@ def rollouts(root=None):
     """Every rollout file under $CODEX_HOME/sessions, oldest first."""
     root = root or os.path.join(codex_home(), 'sessions')
     return sorted(glob.glob(os.path.join(root, '**', 'rollout-*.jsonl'), recursive=True))
+
+
+# ---------------------------------------------------------------- shell results for the hooks protocol
+
+_CODE_RES = (re.compile(r'^\s*(?:Error:\s*)?Exit code:?\s*(-?\d+)', re.M), re.compile(r'Process exited with code (-?\d+)'))
+_OUTPUT_RE = re.compile(r'^Output:\s*$', re.M)
+
+
+def _last(text):
+    for ln in reversed((text or '').splitlines()):
+        if ln.strip():
+            return ln.strip()[:300]
+    return ''
+
+
+def shell_result(resp):
+    """(exit code, last output line) of a Codex shell call's result, as a PostToolUse tool_response or a rollout
+    output carries it: an object (exit_code / exitCode, or metadata.exit_code; output, aggregated_output, stdout,
+    stderr), its JSON text, or text whose header says "Exit code: N" (or "Process exited with code N") before an
+    "Output:" line. (None, line) when no exit code is found."""
+    if isinstance(resp, list):
+        resp = '\n'.join(x.get('text') or '' if isinstance(x, dict) else str(x) for x in resp)
+    if isinstance(resp, str) and resp.lstrip().startswith('{'):
+        try:
+            resp = json.loads(resp)
+        except ValueError:
+            pass
+    if isinstance(resp, dict):
+        meta = resp.get('metadata') if isinstance(resp.get('metadata'), dict) else {}
+        code = None
+        for v in (resp.get('exit_code'), resp.get('exitCode'), meta.get('exit_code')):
+            if isinstance(v, int) and not isinstance(v, bool):
+                code = v
+                break
+        text = next((resp.get(k) for k in ('output', 'aggregated_output', 'formatted_output', 'stdout', 'content')
+                     if isinstance(resp.get(k), str) and resp.get(k).strip()), '') or (resp.get('stderr') or '')
+        if code is None:
+            c, line = shell_result(text) if text else (None, '')
+            return c, line
+        m = _OUTPUT_RE.search(text)
+        return code, _last(text[m.end():] if m else text)
+    if isinstance(resp, str):
+        code = None
+        for r in _CODE_RES:
+            m = r.search(resp)
+            if m:
+                code = int(m.group(1))
+                break
+        m = _OUTPUT_RE.search(resp)
+        return code, _last(resp[m.end():] if m else resp)
+    return None, ''
+
+
+def shell_runs(path, start=0):
+    """The shell calls of a rollout from byte offset start, with their results: [{call_id, command, exit_code,
+    summary}] (exit_code None when the output names none), and the offset read to. For the Stop hook when Codex fires
+    no PostToolUse for a shell call."""
+    out, calls = [], {}
+    try:
+        fh = open(path, 'rb')
+    except (OSError, TypeError):
+        return out, start
+    with fh:
+        fh.seek(start)
+        for raw in fh:
+            start += len(raw)
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                continue
+            p = rec.get('payload') if isinstance(rec, dict) and rec.get('type') == 'response_item' else None
+            if not isinstance(p, dict):
+                continue
+            pt = p.get('type')
+            if pt in ('custom_tool_call', 'function_call', 'local_shell_call'):
+                r = dict(cwd='')
+                _tool_use(r, p, dict(names={}))
+                if r.get('command'):
+                    calls[r['tool_use_id']] = r['command']
+            elif pt in ('custom_tool_call_output', 'function_call_output') and p.get('call_id') in calls:
+                code, line = shell_result(p.get('output'))
+                out.append(dict(call_id=p['call_id'], command=calls.pop(p['call_id']), exit_code=code, summary=line))
+    return out, start

@@ -3,8 +3,9 @@
   [mcp_servers.ctrlb]   Seeker's /mcp URL; the key is read from the CTRLB_KEY environment variable
                         (bearer_token_env_var), never written into the file; X-CtrlB-Run and X-CtrlB-Agent are sent
                         from CTRLB_RUN and CTRLB_AGENT when they are set (env_http_headers)
-  [[hooks.<Event>]]     SessionStart, SubagentStart, PreCompact, SessionEnd, Stop, SubagentStop and PreToolUse
-                        (matcher apply_patch), each calling codex/hook.py from this repo
+  [[hooks.<Event>]]     SessionStart, SubagentStart, PreCompact, SessionEnd, Stop, SubagentStop, PreToolUse
+                        (matcher apply_patch) and PostToolUse (matcher Bash, Codex's name for a shell call), each
+                        calling codex/hook.py from this repo
   [otel]                only with --otel: Codex's own OTLP log export, straight to the lake's OTLP endpoint
 
 Usage:
@@ -32,7 +33,8 @@ HOOKS = [('SessionStart', 'session-start', 10, None, False),
          ('SessionEnd', 'session-end', 10, None, False),
          ('Stop', 'upload', 120, None, True),
          ('SubagentStop', 'upload', 120, None, True),
-         ('PreToolUse', 'pre-tool', 5, 'apply_patch', False)]
+         ('PreToolUse', 'pre-tool', 5, 'apply_patch', False),
+         ('PostToolUse', 'post-tool', 5, 'Bash', False)]
 EVENT_KEYS = {'hooks.' + h[0] for h in HOOKS}
 HEADER_RE = re.compile(r'^\s*\[(\[?)\s*([^\[\]]+?)\s*\]\]?\s*(?:#.*)?$')
 KEY_RE = re.compile(r'^\s*([A-Za-z0-9_\-."\' ]+?)\s*=')

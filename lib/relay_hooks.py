@@ -7,8 +7,8 @@ A  a sub-agent spawn (PreToolUse on Agent) registers a task: `task <n> <descript
    does not answer, and the spawn always goes ahead.
 B  a small text file written under the session's scratchpad or the run's scratch directory is posted as a NOTE keyed
    artifact:<relative path> with its hash, by a detached process; the same content is posted once.
-C  a session of a relay run (CTRLB_RUN) starts with a block of the record: open tasks and holders, contracts, open
-   handoffs, its own last notes, and its artefacts written back to the scratch directory.
+C  a session of a relay run (CTRLB_RUN) gets its artefacts written back to the scratch directory. Under the hooks
+   protocol (hooks_shared.Machine) the record block (open tasks, contracts, handoffs, notes) is no longer injected.
 D  the scratch directory: common.scratch_dir.
 E  autoSlots: an edit of a listed file is wrapped in a slot:<path> claim (pre-tool) and its release (post-tool).
 
@@ -19,7 +19,6 @@ import os
 import re
 import subprocess
 import sys
-import threading
 import time
 
 if __name__ == '__main__':
@@ -33,10 +32,9 @@ from paths import edit_paths as normalise_edit_paths, is_path, key as resource_k
 REGISTER_S = 2.5        # A: the task and contract writes together (the hook's alarm is REGISTER_S + 0.5)
 SLOT_S = 1.5            # E: the slot claim, inside pre-tool's two-second alarm
 RELEASE_S = 1.0         # E: the slot release, synchronous in post-tool
-RECORD_S = 3.0          # C: every read of the session-start block together
+RECORD_S = 3.0          # C: the session-start read of the agent's artefacts
 ARTIFACT_POST_S = 10    # B: the detached post
 ARTIFACT_MAX = 32 * 1024
-BLOCK_MAX = 2000        # C: the context block, in bytes (under 2 KB)
 TEXT_MAX = 2000         # Seeker cuts a brief's text here
 MAX_PATHS = 32          # Seeker takes at most 32 paths per task or contract
 ARTIFACT = 'artifact:'
@@ -385,48 +383,6 @@ def _get(cfg, run, tail, query, deadline, out, name):
         out[name + '_error'] = f'{type(e).__name__}: {str(e)[:120]}'
 
 
-def read_record(cfg, run, agent, budget=RECORD_S):
-    """The record parts the session-start block needs, read in parallel inside budget: tasks, contracts, notes,
-    handoffs and this agent's artefacts. A part that did not arrive comes from the local cache (the last read that
-    did); fresh parts refresh the cache. Returns (parts, names of the parts taken from the cache)."""
-    deadline = time.time() + budget
-    got = {}
-    reads = [('tasks', 'tasks', None), ('contracts', 'contracts', dict(agent=agent)),
-             ('notes', 'peers', dict(kind='note', limit=100)), ('handoffs', 'peers', dict(kind='handoff', limit=50)),
-             ('artifacts', 'artifacts', dict(agent=agent))]
-    threads = [threading.Thread(target=_get, args=(cfg, run, tail, q, deadline, got, name), daemon=True)
-               for name, tail, q in reads]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(max(0, deadline - time.time()))
-    cache = common.RunState(run, agent, 'record')
-    try:
-        old = cache.read()
-    except Exception:
-        old = {}
-    parts, stale = {}, []
-    for name, _, _ in reads:
-        if isinstance(got.get(name), dict):
-            parts[name] = got[name]
-        else:
-            if name in got or name + '_error' in got:
-                common.log(f"session-start record {run}/{agent}: {name}: {got.get(name + '_error') or 'not an object'}")
-            else:
-                common.log(f"session-start record {run}/{agent}: {name}: no answer inside {budget}s")
-            if isinstance(old.get(name), dict):
-                parts[name] = old[name]
-            stale.append(name)
-    fresh = {k: v for k, v in parts.items() if k not in stale}
-    if fresh:
-        try:
-            cache.change(lambda d: d.update(fresh, ts=time.time()))
-        except Exception:
-            pass
-    parts['cache_ts'] = old.get('ts')
-    return parts, stale
-
-
 def restore_artifacts(parts, run, agent, scratch):
     """Write this agent's artefacts into the scratch directory, those it does not have yet: from Seeker's answer, else
     from the local copies of the artefacts this machine posted. Returns the relative paths now there."""
@@ -463,66 +419,6 @@ def restore_artifacts(parts, run, agent, scratch):
     return have
 
 
-def _cut(s, n):
-    s = ' '.join(str(s or '').split())
-    return s if len(s) <= n else s[:n - 3] + '...'
-
-
-def record_block(parts, stale, run, agent, scratch, artefacts):
-    """The session-start context block, under BLOCK_MAX bytes: open tasks with holder, stalled flag and test; contract
-    names; handoffs addressed to this agent or open; its last notes; and where its artefacts are. '' when there is
-    nothing to say."""
-    tasks = [t for t in (parts.get('tasks') or {}).get('tasks') or [] if isinstance(t, dict) and t.get('state') != 'finished']
-    lines = []
-    if tasks:
-        items = []
-        for t in tasks[:12]:
-            who = f"held by {t['held_by']}" if t.get('held_by') else 'free'
-            flags = ', stalled' if t.get('stalled') else ''
-            flags += ', handed off' if t.get('handed_off') else ''
-            test = f"; test: {_cut(t['test'], 80)}" if t.get('test') else ''
-            items.append(f"{t.get('name')} ({who}{flags}{test})")
-        more = f' and {len(tasks) - 12} more' if len(tasks) > 12 else ''
-        lines.append('Open tasks: ' + '; '.join(items) + more + '.')
-    contracts = [c.get('name') for c in (parts.get('contracts') or {}).get('contracts') or [] if isinstance(c, dict) and c.get('name')]
-    if contracts:
-        lines.append('Contracts: ' + ', '.join(_cut(c, 60) for c in contracts[:12]) + '. Read them with `contracts` before building on them.')
-    hand = []
-    for t in tasks:
-        if t.get('handed_off') and not t.get('held_by'):
-            hand.append(f"{t.get('name')} handed off openly by {t.get('handoff_by') or '?'}: {_cut(t.get('handoff_text'), 200)}")
-    for e in (parts.get('handoffs') or {}).get('events') or []:
-        if isinstance(e, dict) and e.get('to') == agent:
-            hand.append(f"{e.get('resource') or e.get('key')} handed to you by {e.get('agent')}: {_cut(e.get('text'), 160)}")
-    if hand:
-        lines.append('Handoffs: ' + ' | '.join(hand[:4]) + '.')
-    notes = [e for e in (parts.get('notes') or {}).get('events') or [] if isinstance(e, dict) and e.get('agent') == agent
-             and not str(e.get('key') or '').startswith(ARTIFACT)][:5]
-    if notes:
-        lines.append('Your last notes: ' + ' | '.join(_cut(e.get('text'), 120) for e in notes) + '.')
-    if artefacts:
-        lines.append(f'Your artefacts from the previous session are in {scratch}.')
-    if not lines:
-        return ''
-    head = f'CtrlB Relay record of run {run} at session start'
-    if stale and parts.get('cache_ts'):
-        head += f" ({', '.join(stale)} from the local cache of {time.strftime('%H:%M:%S', time.localtime(parts['cache_ts']))}; CtrlB did not answer in time)"
-    text = head + ':\n' + '\n'.join(lines)
-    while len(text.encode()) > BLOCK_MAX and len(lines) > 1:
-        # Drop the least needed line first: notes, then handoffs, then contracts; the artefacts line stays.
-        for drop in ('Your last notes:', 'Handoffs:', 'Contracts:'):
-            idx = next((i for i, ln in enumerate(lines) if ln.startswith(drop)), None)
-            if idx is not None:
-                del lines[idx]
-                break
-        else:
-            break
-        text = head + ':\n' + '\n'.join(lines)
-    if len(text.encode()) > BLOCK_MAX:
-        text = text.encode()[:BLOCK_MAX - 3].decode(errors='ignore') + '...'
-    return text
-
-
 def make_scratch(cfg, run):
     """Create the run's scratch directory (decision D); returns its path ('' when it cannot be made)."""
     d = common.scratch_dir(cfg, run)
@@ -534,15 +430,25 @@ def make_scratch(cfg, run):
         return ''
 
 
-def session_start_block(cfg, run, agent, source='', budget=RECORD_S):
-    """Decision 45: the record block for a session whose environment carries a run id (CTRLB_RUN), except after a
-    compaction (the same session goes on, with its scratch files in place). '' otherwise or when there is nothing."""
+def artefacts_line(cfg, run, agent, source='', budget=RECORD_S, machine=None):
+    """Decision 45 under the hooks protocol: the session start no longer injects the record (open tasks, contracts,
+    handoffs, notes): the hooks hold the agent's task and the injected text is who it is and how to talk to peers.
+    This agent's artefacts are still written back to the scratch directory (one read), and one line says where. ''
+    after a compaction, without a run id (CTRLB_RUN), or when there is nothing to write back."""
     if not cfg.get('run') or not run or not agent or source == 'compact':
         return ''
     scratch = make_scratch(cfg, run)
-    parts, stale = read_record(cfg, run, agent, budget)
-    artefacts = restore_artifacts(parts, run, agent, scratch) if scratch else []
-    return record_block(parts, stale, run, agent, scratch, artefacts)
+    if not scratch:
+        return ''
+    got = {}
+    if machine is not None:
+        machine.count('read')
+    _get(cfg, run, 'artifacts', dict(agent=agent), time.time() + budget, got, 'artifacts')
+    if 'artifacts_error' in got:
+        common.log(f"session-start artefacts {run}/{agent}: {got['artifacts_error']}")
+    parts = {'artifacts': got['artifacts']} if isinstance(got.get('artifacts'), dict) else {}
+    have = restore_artifacts(parts, run, agent, scratch)
+    return f'Your artefacts from the previous session are in {scratch}.' if have else ''
 
 
 if __name__ == '__main__':

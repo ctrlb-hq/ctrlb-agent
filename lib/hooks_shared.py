@@ -23,35 +23,25 @@ SUBAGENT = ("You are a subagent of session {sid}. That session's full record, in
             "decided, is searchable with the ctrlb tools (search_sessions with session_id {sid}, fetch_records, "
             "next_actions). Search it before exploring files or rerunning commands.")
 
-# Rule text v10 (round 8): claim(next=true) first, done with next=true, peers only to wait; the REGISTRY.md sentence
-# is gone (the hooks claim autoSlots files, decision 47); helper files go to the run's scratch directory (decision D).
-RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other agents in this run may be working in "
-         "the same files. Pass run_id=\"{run}\" and agent=\"{agent}\" to the ctrlb relay tools (peers, post, claim, "
-         "release, handoff, ask, answer, brief, briefs, tasks, contract, contracts). Start with `claim(next=true)`. When "
-         "your test passes, call `done` with the evidence and `next=true`. Call `peers` only when you are waiting for an "
-         "answer or a handoff. Claim the task by the name your orchestrator registered (for example "
-         "claim(resource=\"task 03 median\"); tasks lists them). Its files come with it. If held is false with "
-         "finished_by, the task is done; if held is false with held_by, another agent has it: pick another. If a claim "
-         "is refused and the answer lists free tasks, claim one of them next. If the list is empty, post a note saying "
-         "you have no task and stop. If tasks shows a task you need as stalled, claim it with takeover=true, read its "
-         "evidence and notes, and continue it. Never wait in line on a stalled task. If a file you need is held by an "
-         "agent that has stopped, the hold shows as stalled; take it over the same way. If reason is unknown_task, "
-         "claim again with the suggestion. If reason is belongs_to_task, the file comes with a registered task: claim "
-         "that task (task in the answer) instead. If the claim answers ask_about, ask the task's owner about those "
-         "before deciding them yourself. Work only while you hold it. When the task is done, release "
-         "it with finished=true. Run the task's test command (tasks and claim show it as test); when it passes, call "
-         "done on the task name with that command, its exit code and its last output line as the evidence. When the "
-         "task has no test command, give the check you ran. A task is finished only when the record shows what was "
-         "checked. A file that belongs to no task is claimed by its path. A shared thing that is not a "
-         "file, such as the dev server or a port, is claimed as slot:<name> and released when you are done with it. Use "
-         "the coordination tools before a prose note: handoff when you must leave a task you hold, so it moves to the "
-         "agent you name in one step; ask when you are blocked on something only another agent or the orchestrator "
-         "can decide; answer, with the question's id, when you can settle an open question; contract when you finish "
-         "an interface others will build on (a type, a route, a config shape), with its name, the shape in a few "
-         "lines and the files that define it. Before you build on a contract, read it with `contracts`. If it is "
-         "stale, read the file it names and check your assumptions against it. Post a note "
-         "only for what none of them covers. If you were asked to do a finished task again, claim its name with "
-         "reopen=true. Put helper scripts and binaries in the scratch directory {scratch}, not in /tmp.")
+# The injected Relay text (the hooks protocol, docs/relay-hooks.md): who the agent is, that the hooks hold files and
+# tasks for it, that a blocked edit names the holder, and how to talk to peers. Nothing about claim, release, renew or
+# done: the hooks do those. The round 8 rule text (v10), for a harness without hooks, is in docs/relay-tools.md.
+RELAY_IDS = 'CtrlB Relay: your run id is {run} and your agent id is {agent}.'
+RELAY_HOOKS = ("Relay holds files and tasks for you through the plugin's hooks, so never claim or release anything by "
+               "hand. If an edit is blocked, the message names the agent that holds the file: leave that file to it, "
+               "or ask it.")
+RELAY_PEERS = ('To talk to the other agents, pass run_id="{run}" and agent="{agent}" to the ctrlb tools peers (what the '
+               'others are doing), post (a note to all), ask (a question to one agent) and answer (with the '
+               "question's id).")
+RELAY_SCRATCH = 'Put helper scripts and binaries in the scratch directory {scratch}, not in /tmp.'
+RELAY = ' '.join([RELAY_IDS, RELAY_HOOKS, RELAY_PEERS, RELAY_SCRATCH])
+RELAY_NO_RUN = ' '.join([RELAY_IDS, RELAY_PEERS, RELAY_SCRATCH])
+
+
+def relay_text(cfg, run, agent, scratch):
+    """The injected Relay text: with a run id (CTRLB_RUN or the config's run) the hooks line too; without one the
+    hooks never claim, so only the ids, the peers line and the scratch directory."""
+    return (RELAY if cfg.get('run') else RELAY_NO_RUN).format(run=run, agent=agent, scratch=scratch)
 
 
 # Seeker decision 33: a hold whose holder has stopped is taken over, not waited out.
@@ -491,3 +481,366 @@ def witness(rec, tool_input):
 
 def _allow(args):
     return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'allow', 'updatedInput': args}}
+
+
+# ---------------------------------------------------------------- the hooks protocol (docs/relay-hooks.md)
+
+CLAIM_S = 2.0           # a claim on write, after the edit check's CHECK_S (the pre-tool alarm is PRE_TOOL_ALARM_S)
+PRE_TOOL_ALARM_S = 4.5  # inside the PreToolUse hook's 5 s timeout
+NEXT_S = 5.0            # SessionStart's claim(next=true), inside the hook's 10 s timeout
+DONE_S = 3.0            # the done a passing test sends, inside the PostToolUse hook's 5 s timeout
+RENEW_AT = 0.2          # renew a hold when an edit comes within this share of its lease of the lease end
+READ_ONLY_AGENTS = ('Explore', 'Plan', 'claude-code-guide', 'statusline-setup')
+BRIEF_PATHS = 12
+
+
+def _now_us():
+    return int(time.time() * 1e6)
+
+
+def _lease_s(until_us, at=None):
+    """The length of a lease that ends at until_us (µs), from the time of the answer that carried it."""
+    try:
+        if not until_us:
+            return 0
+        return max(1, round(float(until_us) / 1e6 - (at if at is not None else time.time())))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bare(k):
+    return k[len(PATH):] if isinstance(k, str) and k.startswith(PATH) else str(k)
+
+
+def brief_text(task, lead=''):
+    """The context that names a held task: its name, files, test command (to run as written) and ask_about."""
+    files = [_bare(p) for p in task.get('paths') or []]
+    shown = ', '.join(files[:BRIEF_PATHS]) + (f' and {len(files) - BRIEF_PATHS} more' if len(files) > BRIEF_PATHS else '')
+    parts = [f'{lead}CtrlB Relay: you hold task "{task.get("name")}".']
+    if task.get('taken_over_from'):
+        parts.append(f'You took it over from {task["taken_over_from"]}, who stopped; read its files and notes first.')
+    if shown:
+        parts.append(f'Its files: {shown}.')
+    if task.get('test'):
+        parts.append(f"When your change is ready, run its test exactly as written: `{task['test']}`. When it passes, "
+                     "the hooks record it and hand you your next task.")
+    asks = [a for a in task.get('ask_about') or [] if isinstance(a, str) and a.strip()]
+    if asks:
+        parts.append('Ask about these before deciding them yourself: ' + '; '.join(asks) + '.')
+    return ' '.join(parts)
+
+
+class Machine:
+    """One agent session's protocol state (docs/relay-hooks.md, "The agent-side state machine"): a JSON file under
+    <CTRLB_HOME>/state/, written by the hooks only, held exclusively while it is read and written (never across a Seeker call).
+    key names the file: the session id, or <session id>.<agent id> for a Claude Code sub-agent."""
+
+    def __init__(self, cfg, run, agent, key, cwd=''):
+        self.cfg, self.run, self.agent, self.cwd = cfg, run, agent, cwd or ''
+        d = os.path.join(common.HOME, 'state')
+        os.makedirs(d, exist_ok=True)
+        self.file = os.path.join(d, common.safe_segment(key) + '.json')
+
+    # -- the state file
+
+    def _blank(self):
+        return dict(agent=self.agent, run=self.run, state='idle', tasks={}, holds={}, pending_done=None,
+                    calls=dict(claim=0, check=0, done=0, read=0))
+
+    def _locked(self, fn):
+        import fcntl
+        with open(self.file + '.mutex', 'w') as mx:
+            fcntl.flock(mx, fcntl.LOCK_EX)
+            try:
+                try:
+                    with open(self.file) as fh:
+                        d = json.load(fh)
+                except Exception:
+                    d = {}
+                if not isinstance(d, dict) or d.get('run') != self.run or d.get('agent') != self.agent:
+                    d = self._blank()
+                for k, v in self._blank().items():
+                    d.setdefault(k, v)
+                out = fn(d)
+                d['state'] = d['state'] if d['state'] == 'ended' else ('holding' if d['tasks'] or d['holds'] else
+                                                                       d['state'] if d['state'] == 'idle' else 'free')
+                tmp = self.file + '.tmp'
+                with open(tmp, 'w') as fh:
+                    json.dump(d, fh)
+                os.replace(tmp, self.file)
+                return out
+            finally:
+                fcntl.flock(mx, fcntl.LOCK_UN)
+
+    def read(self):
+        return self._locked(lambda d: json.loads(json.dumps(d)))
+
+    def change(self, fn):
+        return self._locked(fn)
+
+    def count(self, name):
+        """Count one hook call to Seeker that is not a claim, check or done (the session-start read)."""
+        self.change(lambda d: d['calls'].update({name: d['calls'].get(name, 0) + 1}))
+
+    def _call(self, name, what, fn):
+        """One Seeker call by the hook: counted in the state file and logged with its answer. Raises what fn raises."""
+        self.change(lambda d: d['calls'].update({name: d['calls'].get(name, 0) + 1}))
+        try:
+            ans = fn()
+        except BaseException as e:
+            common.log(f"relay-hook {self.agent} {name} {what} -> {type(e).__name__}: {str(e)[:160]}")
+            raise
+        brief = {k: ans.get(k) for k in ('held', 'done', 'reason', 'held_by', 'finished_by', 'task', 'renewed', 'mode')
+                 if isinstance(ans, dict) and ans.get(k) not in (None, '', False)} if isinstance(ans, dict) else ans
+        common.log(f"relay-hook {self.agent} {name} {what} -> {json.dumps(brief)[:240]}")
+        return ans if isinstance(ans, dict) else {}
+
+    # -- what the state keeps from Seeker's answers
+
+    def _take_task(self, d, ans, name=None, at=None):
+        """Keep a held task from a claim answer (a claim of the task by name, or claim(next=true) with next_task)."""
+        nt = ans.get('next_task') if isinstance(ans.get('next_task'), dict) else {}
+        name = nt.get('name') or name or ans.get('resource') or ''
+        paths = [p for p in (nt.get('paths') or ans.get('paths') or []) if isinstance(p, str)]
+        until = ans.get('lease_until') or 0
+        task = dict(name=name, key=nt.get('key') or ans.get('key') or '', paths=paths,
+                    test=nt.get('test') or ans.get('test') or '', ask_about=nt.get('ask_about') or ans.get('ask_about') or [],
+                    lease_until=until, lease_s=_lease_s(until, at))
+        if ans.get('taken_over_from'):
+            task['taken_over_from'] = ans['taken_over_from']
+        d['tasks'][name] = task
+        for k in [task['key']] + paths:
+            if k:
+                d['holds'][k] = dict(resource=name, task=name, lease_until=until, lease_s=task['lease_s'])
+        return task
+
+    def _take_hold(self, d, resource, ans, at=None):
+        until = ans.get('lease_until') or 0
+        k = ans.get('key') or resource_key(resource, self.cwd)[0]
+        d['holds'][k] = dict(resource=resource, task=None, lease_until=until, lease_s=_lease_s(until, at))
+
+    def _drop_task(self, d, name):
+        t = d['tasks'].pop(name, None) or {}
+        for k in [t.get('key')] + list(t.get('paths') or []):
+            if k and (d['holds'].get(k) or {}).get('task') == name:
+                d['holds'].pop(k, None)
+
+    # -- events
+
+    def start(self, source='', agent_type=''):
+        """SessionStart or SubagentStart: the idle rule. Returns the brief text to inject ('' when nothing is held).
+        After a compaction, resume or clear of a session that holds tasks, the briefs again, with no call."""
+        st = self.read()
+        if source in ('compact', 'resume', 'clear') and st['tasks'] and st['state'] != 'ended':
+            return '\n'.join(brief_text(t) for t in st['tasks'].values())
+        if source == 'compact':
+            return ''      # the same session goes on: it ran its start already
+        if st['state'] == 'ended':
+            self.change(lambda d: d.update(self._blank()))
+        if not self.cfg.get('run') or not self.run or not self.agent:
+            return ''
+        if agent_type in READ_ONLY_AGENTS:
+            self.change(lambda d: d.update(state='free'))
+            return ''
+        at = time.time()
+        try:
+            ans = self._call('claim', 'next=true', lambda: common.claim_next(self.cfg, self.run, self.agent, self.cwd,
+                                                                             timeout=NEXT_S))
+        except Exception:
+            self.change(lambda d: d.update(state='free'))
+            return ''
+        if ans.get('held') is True:
+            record_tokens(self.run, self.agent, 'claim', ans)
+            task = self.change(lambda d: self._take_task(d, ans, at=at))
+            return brief_text(task)
+        self.change(lambda d: d.update(state='free'))
+        return ''
+
+    def end(self):
+        """SessionEnd: the open handoff (hook.py) released every hold; the machine ends."""
+        self.change(lambda d: d.update(state='ended', tasks={}, holds={}, pending_done=None))
+
+    def pre_edit(self, paths):
+        """PreToolUse on an edit of paths (as paths.edit_paths gives them). Returns the hook output or None (the edit
+        goes ahead with nothing said). Raises when the edit check itself fails (the caller fails open)."""
+        run, agent, cwd = self.run, self.agent, self.cwd
+        if not paths or not run or not agent:
+            return None
+        keys = {p: resource_key(p, cwd)[0] for p in paths}
+        try:
+            held = common.TokenState(run, agent).get(sorted(set(keys.values())))
+        except Exception:
+            held = {}
+        tokens = {p: held[k] for p, k in keys.items() if k in held}
+        res = self._call('check', ','.join(paths)[:200],
+                         lambda: common.check(self.cfg, run, agent, paths, cwd, timeout=CHECK_S, tokens=tokens))
+        mode = res.get('mode') or 'advisory'
+        if mode == 'off':
+            return None
+        has_own = isinstance(res.get('own'), list)
+        own = {o.get('path'): o for o in res.get('own') or [] if isinstance(o, dict)}
+        conflicts = {c.get('path'): c for c in res.get('conflicts') or [] if isinstance(c, dict)}
+        st = self.read()
+        blocked, briefs, failed, claimed_tasks, renewed = [], [], [], set(), set()
+        for p in paths:
+            c = conflicts.get(p)
+            if c and c.get('held_by') and c['held_by'] != agent:
+                blocked.append((p, c['held_by'], _said(c)))
+                continue
+            if p in own:
+                self._renew(st, p, keys[p], own[p], renewed)
+                continue
+            if c or has_own:
+                # nobody holds it (or the caller's lease lapsed): claim it on write
+                try:
+                    out = self._claim_on_write(p, claimed_tasks)
+                except BaseException as e:
+                    if isinstance(e, KeyboardInterrupt):
+                        raise
+                    failed.append(p)
+                    continue
+                kind, val = out
+                if kind == 'brief':
+                    briefs.append(val)
+                elif kind == 'blocked':
+                    blocked.append(val)
+                elif kind == 'failed':
+                    failed.append(p)
+        enforce = mode == 'enforce'
+        lines = []
+        for p, holder, said in blocked:
+            if enforce:
+                lines.append(f'{said}. Do not edit it: leave it to {holder}, or ask {holder} with ask(to="{holder}", '
+                             f'run_id="{run}", agent="{agent}").')
+            else:
+                lines.append(f'{said}. Another agent is working on this file: leave it to {holder}, or ask {holder} '
+                             f'before you change it.')
+        if failed:
+            lines.append(('Relay did not answer in time, so ' + ', '.join(failed) + ' could not be held for you'
+                          + ('; the edit was not made. Try the edit again.' if enforce else '.')))
+        if enforce and (blocked or failed):
+            return _deny(f'CtrlB Relay (run {run}): ' + ' '.join(lines))
+        if not lines and not briefs:
+            return None
+        text = ' '.join(([f'CtrlB Relay (run {run}): ' + ' '.join(lines)] if lines else []) + briefs)
+        return context('PreToolUse', text)
+
+    def _claim_on_write(self, p, claimed_tasks):
+        """claim(resource=p) for this agent; on belongs_to_task the task instead. ('held', None), ('brief', text),
+        ('blocked', (path, holder, said)) or ('failed', None)."""
+        at = time.time()
+        ans = self._call('claim', p, lambda: common.claim(self.cfg, self.run, self.agent, p, cwd=self.cwd, timeout=CLAIM_S))
+        if ans.get('held') is True:
+            record_tokens(self.run, self.agent, 'claim', ans)
+            self.change(lambda d: self._take_hold(d, p, ans, at))
+            return 'held', None
+        if ans.get('reason') == 'belongs_to_task' and ans.get('task'):
+            name = ans['task']
+            if name in claimed_tasks:
+                return 'held', None
+            claimed_tasks.add(name)
+            at = time.time()
+            t = self._call('claim', name, lambda: common.claim(self.cfg, self.run, self.agent, name, cwd=self.cwd,
+                                                                timeout=CLAIM_S))
+            if t.get('held') is True:
+                record_tokens(self.run, self.agent, 'claim', t)
+                task = self.change(lambda d: self._take_task(d, t, name=name, at=at))
+                return 'brief', brief_text(task)
+            holder = t.get('held_by') or t.get('finished_by') or ans.get('held_by') or ''
+            if holder:
+                said = (f'{p} belongs to task "{name}", finished by {holder}' if t.get('finished_by') and not t.get('held_by')
+                        else f'{p} belongs to task "{name}", held by {holder}')
+                return 'blocked', (p, holder, said)
+            return 'failed', None
+        if ans.get('held_by') or ans.get('finished_by'):
+            holder = ans.get('held_by') or ans.get('finished_by')
+            return 'blocked', (p, holder, f'{p} is held by {holder}')
+        return 'failed', None
+
+    def _renew(self, st, p, key, own, renewed):
+        """Own hold within RENEW_AT of its lease end: claim again, which renews (the task for a file of a held task,
+        else the path). The lease end is the earlier of check's and the held task's; no injection."""
+        hold = st['holds'].get(key) or {}
+        task = st['tasks'].get(hold.get('task') or '') if hold.get('task') else None
+        ends = [own.get('lease_until') or 0]
+        lease = own.get('lease_s') or hold.get('lease_s') or 0
+        if task:
+            ends.append(task.get('lease_until') or 0)
+            lease = task.get('lease_s') or lease
+        ends = [e for e in ends if e]
+        until = min(ends) if ends else 0
+        resource = task['name'] if task else p
+        if not until or not lease or resource in renewed:
+            return
+        if _now_us() < until - RENEW_AT * lease * 1e6:
+            return
+        renewed.add(resource)
+        at = time.time()
+        try:
+            ans = self._call('claim', f'{resource} (renew)', lambda: common.claim(self.cfg, self.run, self.agent, resource,
+                                                                                   cwd=self.cwd, timeout=CLAIM_S))
+        except BaseException as e:
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            return
+        if ans.get('held') is True:
+            record_tokens(self.run, self.agent, 'claim', ans)
+            if task:
+                self.change(lambda d: self._take_task(d, ans, name=task['name'], at=at))
+            else:
+                self.change(lambda d: self._take_hold(d, p, ans, at))
+
+    def post_bash(self, command, code, line):
+        """PostToolUse (or PostToolUseFailure) on Bash: send a done that failed earlier, then, when the command names
+        a held task's test and exited 0, done with that run as witnessed evidence and next=true. Returns the hook
+        output or None."""
+        if not self.cfg.get('run') or not self.run or not self.agent:
+            return None
+        st = self.read()
+        texts = []
+        pending = st.get('pending_done')
+        if pending and pending.get('task') in st['tasks']:
+            texts.append(self._done(pending['task'], pending['evidence']))
+        elif pending:
+            self.change(lambda d: d.update(pending_done=None))
+        if code == 0 and isinstance(command, str):
+            for name, t in self.read()['tasks'].items():
+                if t.get('test') and names_test(command, t['test']):
+                    ev = dict(command=command.strip()[:COMMAND_MAX], exit_code=0, summary=(line or '')[:SUMMARY_MAX])
+                    texts.append(self._done(name, ev))
+                    break
+        texts = [t for t in texts if t]
+        return context('PostToolUse', '\n'.join(texts)) if texts else None
+
+    def _done(self, name, ev):
+        """done(resource=name, evidence=ev, witnessed=true, next=true). Returns the text to inject ('' for none). A
+        failed call is kept as pending_done and sent again on the next Bash event."""
+        at = time.time()
+        try:
+            ans = self._call('done', name, lambda: common.done(self.cfg, self.run, self.agent, name, ev, cwd=self.cwd,
+                                                                witnessed=True, next_=True, timeout=DONE_S))
+        except BaseException as e:
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            self.change(lambda d: d.update(pending_done=dict(task=name, evidence=ev)))
+            return ''
+        self.change(lambda d: d.update(pending_done=None))
+        if ans.get('done') is not True:
+            msg = ans.get('message') or ans.get('reason') or 'no reason given'
+            return f'CtrlB Relay (run {self.run}): task "{name}" was not marked finished: {msg}'
+        record_tokens(self.run, self.agent, 'done', ans)
+        nxt = ans.get('next') if isinstance(ans.get('next'), dict) else {}
+
+        def fn(d):
+            self._drop_task(d, name)
+            if nxt.get('held') is True:
+                return self._take_task(d, nxt, at=at)
+            return None
+        task = self.change(fn)
+        head = f'CtrlB Relay: task "{name}" is finished, with your test run as the record.'
+        if task:
+            record_tokens(self.run, self.agent, 'claim', nxt)
+            return brief_text(task, lead=head + ' Next: ')
+        if nxt.get('reason') == 'awaiting_answers':
+            return head + ' The free tasks wait for answers to open questions: ' + (nxt.get('message') or '')
+        return head + ' No other task is free in this run.'

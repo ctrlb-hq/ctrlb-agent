@@ -11,9 +11,9 @@ for _lib in (os.path.join(_HERE, '..', 'lib'), os.path.join(_HERE, '..', '..', '
         sys.path.insert(0, _lib)
         break
 import common, relay_hooks, rows_claude  # noqa: E402
-from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, context as _context, decide, record_tokens, _tool_answer,  # noqa: E402
-                          bash_result, evidence_hint, is_test_command, record_test, record_bash, record_edit, record_note,
-                          mark_relay, handoff_text, witness, _deny)
+from hooks_shared import (RECALL, SUBAGENT, PRE_TOOL_ALARM_S, Machine, relay_text, context as _context, decide,  # noqa: E402
+                          record_tokens, _tool_answer, bash_result, evidence_hint, is_test_command, record_test, record_bash,
+                          record_edit, record_note, mark_relay, handoff_text, witness, _deny)
 from paths import edit_paths as normalise_edit_paths  # noqa: E402
 
 SYNC_S, ASYNC_S = 5, 90
@@ -23,6 +23,19 @@ HANDOFF_S = 0.8
 DONE_TOOLS = ('mcp__ctrlb__done', 'mcp__plugin_ctrlb-agent_ctrlb__done')
 AGENT_TOOLS = ('Agent', 'Task')         # the sub-agent tool (Task is its earlier name)
 AGENT_ALARM_S = relay_hooks.REGISTER_S + 0.5
+SUBAGENT_S = 9.5        # SubagentStart's claim and upload together, inside the hook's 10 s timeout
+
+
+def machine(cfg, inp):
+    """The session's protocol machine (docs/relay-hooks.md) when the run id comes from CTRLB_RUN or the config, else
+    None (the hooks then never claim). A sub-agent has its own machine, keyed <session id>.<agent id>."""
+    if not cfg.get('run'):
+        return None
+    run, agent, sid = _who(cfg, inp)
+    if not run or not agent or not sid:
+        return None
+    sub = inp.get('agent_id') or ''
+    return Machine(cfg, run, agent, sid + ('.' + sub if sub else ''), inp.get('cwd') or '')
 
 
 def upload(cfg, inp, budget):
@@ -72,6 +85,12 @@ def session_end(cfg, inp):
     return ans
 
 
+def end_machine(cfg, inp):
+    m = machine(cfg, inp)
+    if m:
+        m.end()
+
+
 def pre_tool(cfg, inp):
     """Decision 7 on an edit; decision 38 (the witness) on a done call. Returns the hook output, or None for no output
     (allowed, off, or nothing to check)."""
@@ -99,6 +118,9 @@ def pre_tool(cfg, inp):
             return None
     if cfg['enforce'] == 'off':
         return None
+    m = machine(cfg, inp)
+    if m:      # the hooks protocol: check, then claim on write, renew near the lease end, or name the holder
+        return m.pre_edit(normalise_edit_paths(paths, cwd))
     return decide(cfg, run, agent, paths, cwd)
 
 
@@ -128,7 +150,8 @@ def post_tool(cfg, inp):
         record_bash(own_run, own_agent, sid, args.get('command'), code, line)
         if is_test_command(args.get('command')):
             record_test(own_run, own_agent, args['command'], code, line)
-        return None
+        m = machine(cfg, inp)
+        return m.post_bash(args.get('command'), code, line) if m else None
     if tool in rows_claude.EDIT_TOOLS:
         cwd = inp.get('cwd') or ''
         paths = rows_claude.edit_paths(tool, args)
@@ -173,7 +196,7 @@ def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ''
     if mode in ('pre-tool', 'pre-agent'):
         signal.signal(signal.SIGALRM, _alarm)
-        signal.setitimer(signal.ITIMER_REAL, CHECK_S if mode == 'pre-tool' else AGENT_ALARM_S)
+        signal.setitimer(signal.ITIMER_REAL, PRE_TOOL_ALARM_S if mode == 'pre-tool' else AGENT_ALARM_S)
     try:
         inp = json.load(sys.stdin)
     except Exception:
@@ -188,19 +211,31 @@ def main():
     if mode == 'session-start':
         run, agent = common.run_id(cfg, sid), common.agent_name(cfg, sid)
         scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
-        text = RECALL.format(sid=sid) + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
-        try:      # decision 45: a relay run's session starts with the record
-            block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
+        text = RECALL.format(sid=sid) + '\n\n' + relay_text(cfg, run, agent, scratch)
+        m = machine(cfg, inp)
+        try:      # the hooks protocol: claim(next=true), and the task's brief when one is held
+            brief = m.start(inp.get('source') or '') if m else ''
         except Exception as e:
-            common.log(f"session-start record: {type(e).__name__}: {str(e)[:200]}")
+            common.log(f"session-start claim: {type(e).__name__}: {str(e)[:200]}")
+            brief = ''
+        try:      # decision 45, now only the agent's artefacts written back to the scratch directory
+            block = relay_hooks.artefacts_line(cfg, run, agent, inp.get('source') or '', machine=m)
+        except Exception as e:
+            common.log(f"session-start artefacts: {type(e).__name__}: {str(e)[:200]}")
             block = ''
-        out = _context('SessionStart', text + ('\n\n' + block if block else ''))
+        out = _context('SessionStart', '\n\n'.join(x for x in (text, brief, block) if x))
     elif mode == 'subagent-start':
-        upload(cfg, dict(inp, agent_transcript_path=None), SYNC_S - 1)
+        t0 = time.time()
         run = common.run_id(cfg, sid)
-        relay = RELAY.format(run=run, agent=common.agent_name(cfg, sid, inp.get('agent_id') or ''),
-                             scratch=common.scratch_dir(cfg, run))
-        out = _context('SubagentStart', SUBAGENT.format(sid=sid) + '\n\n' + relay)
+        relay = relay_text(cfg, run, common.agent_name(cfg, sid, inp.get('agent_id') or ''), common.scratch_dir(cfg, run))
+        m = machine(cfg, inp)
+        try:      # the idle rule for the sub-agent's own machine (a read-only agent type claims nothing)
+            brief = m.start('', inp.get('agent_type') or '') if m else ''
+        except Exception as e:
+            common.log(f"subagent-start claim: {type(e).__name__}: {str(e)[:200]}")
+            brief = ''
+        upload(cfg, dict(inp, agent_transcript_path=None), max(0.5, min(SYNC_S - 1, SUBAGENT_S - (time.time() - t0))))
+        out = _context('SubagentStart', '\n\n'.join(x for x in (SUBAGENT.format(sid=sid), relay, brief) if x))
     elif mode == 'flush':
         upload(cfg, inp, SYNC_S)
     elif mode == 'session-end':
@@ -208,6 +243,10 @@ def main():
             session_end(cfg, inp)
         except Exception as e:
             common.log(f"session-end: {type(e).__name__}: {str(e)[:200]}")
+        try:
+            end_machine(cfg, inp)
+        except Exception as e:
+            common.log(f"session-end machine: {type(e).__name__}: {str(e)[:200]}")
         upload(cfg, inp, SYNC_S)
     elif mode == 'upload':
         upload(cfg, inp, ASYNC_S)

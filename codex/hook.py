@@ -1,21 +1,27 @@
-"""Every ctrlb-agent hook for Codex. Usage: hook.py <session-start|subagent-start|flush|upload|session-end|pre-tool>, with the
-hook's JSON on stdin (Codex 0.166: session_id, transcript_path, cwd, hook_event_name; agent_id and
-agent_transcript_path on subagent events and on tool calls inside a subagent; tool_name and tool_input on PreToolUse).
+"""Every ctrlb-agent hook for Codex. Usage: hook.py <session-start|subagent-start|flush|upload|session-end|pre-tool|
+post-tool>, with the hook's JSON on stdin (Codex 0.166: session_id, transcript_path, cwd, hook_event_name; agent_id and
+agent_transcript_path on subagent events and on tool calls inside a subagent; tool_name and tool_input on PreToolUse;
+tool_name, tool_input and tool_response on PostToolUse, whose shell calls are named Bash).
 codex/install.py writes the [[hooks.*]] tables that call it. Output shapes are Claude Code's, which Codex accepts:
 hookSpecificOutput.additionalContext, and on PreToolUse permissionDecision "deny" with a permissionDecisionReason.
 
 A hook never fails or blocks a session: every error goes to ~/.ctrlb/hooks.log and the hook exits 0. pre-tool fails
 open (no output) on any error and gives up after two seconds.
 
-Round 8 (docs/relay-hooks.md): session-start creates the run's scratch directory and, in a relay run (CTRLB_RUN), adds
-the record block (decision 45). Codex gets no spawn registration (decision 43), no artefact posting (decision 44) and
-no autoSlots (decision 47): its hooks have no sub-agent tool input to read and no hook after a tool call, so a slot
-claimed before a patch could not be released after it."""
+The hooks protocol (docs/relay-hooks.md, "The agent-side state machine"), in a run (CTRLB_RUN): session-start claims
+the next task and names it; pre-tool checks a patch's files, claims a file nobody holds (or its task), renews near the
+lease end and names the holder of a file another agent holds; post-tool on a Bash call that runs a held task's test
+and exits 0 sends done with that run as witnessed evidence and claims the next task. A Codex sub-agent's machine is
+keyed by its own thread id; SubagentStart only joins (the sub-agent's own SessionStart claims). If no PostToolUse
+reached the hook in a session (hooks not trusted for it, or a Codex without it), the Stop hook reads the rollout's
+shell calls for a passing test instead. Codex gets no spawn registration (decision 43), no artefact posting (decision
+44) and no autoSlots (decision 47)."""
 import json, os, signal, sys, time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 import common, relay_hooks, rows_codex  # noqa: E402
-from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, context, decide  # noqa: E402
+from hooks_shared import PRE_TOOL_ALARM_S, RECALL, SUBAGENT, Machine, relay_text, context, decide  # noqa: E402
+from paths import edit_paths as normalise_edit_paths  # noqa: E402
 
 SYNC_S, ASYNC_S = 5, 90
 HANDOFF_S = 0.8
@@ -76,18 +82,80 @@ def pre_tool(cfg, inp):
     run, parent = session_run(cfg, sid, inp.get('transcript_path'))
     sub = inp.get('agent_id') or ''
     agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid, parent)
+    m = machine(cfg, inp)
+    if m:
+        return m.pre_edit(normalise_edit_paths(paths, inp.get('cwd') or ''))
     return decide(cfg, run, agent, paths, inp.get('cwd') or '')
 
 
+SHELL_NAMES = ('Bash',) + rows_codex.SHELL_TOOLS
+
+
+def _ids(cfg, inp):
+    """(run, agent, machine key) of the thread a hook fires in: a tool call inside a sub-agent carries the parent's
+    session_id and the sub-agent's agent_id (its thread id)."""
+    sid = inp.get('session_id') or ''
+    run, parent = session_run(cfg, sid, inp.get('transcript_path'))
+    sub = inp.get('agent_id') or ''
+    agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid, parent)
+    return run, agent, sub or sid
+
+
+def machine(cfg, inp):
+    """The thread's protocol machine in a run (CTRLB_RUN or the config's run), else None."""
+    if not cfg.get('run'):
+        return None
+    run, agent, key = _ids(cfg, inp)
+    if not run or not agent or not key:
+        return None
+    return Machine(cfg, run, agent, key, inp.get('cwd') or '')
+
+
+def post_tool(cfg, inp):
+    """PostToolUse on a shell call: the machine's done on a passing test. Returns the hook output or None."""
+    if (inp.get('tool_name') or '') not in SHELL_NAMES:
+        return None
+    m = machine(cfg, inp)
+    if not m:
+        return None
+    m.change(lambda d: d.update(post_seen=True))
+    args = inp.get('tool_input')
+    cmd = rows_codex.shell_command(args) if isinstance(args, dict) else args if isinstance(args, str) else ''
+    code, line = rows_codex.shell_result(inp.get('tool_response'))
+    return m.post_bash(cmd, code, line)
+
+
+def stop_fallback(cfg, inp):
+    """The Stop hook, when no PostToolUse reached this session: the rollout's shell calls since the last Stop, each
+    through the machine's Bash rule (a passing run of a held task's test sends done)."""
+    m = machine(cfg, inp)
+    path = inp.get('agent_transcript_path') or inp.get('transcript_path')
+    if not m or not path:
+        return
+    st = m.read()
+    if st.get('post_seen') or not st['tasks']:
+        return
+    runs, offset = rows_codex.shell_runs(path, int(st.get('rollout_offset') or 0))
+    m.change(lambda d: d.update(rollout_offset=offset))
+    for r in runs:
+        m.post_bash(r['command'], r['exit_code'], r['summary'])
+
+
+def end_machine(cfg, inp):
+    m = machine(cfg, inp)
+    if m:
+        m.end()
+
+
 def _alarm(*_):
-    raise TimeoutError(f'pre-tool over {CHECK_S}s')
+    raise TimeoutError(f'pre-tool over {PRE_TOOL_ALARM_S}s')
 
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ''
     if mode == 'pre-tool':
         signal.signal(signal.SIGALRM, _alarm)
-        signal.setitimer(signal.ITIMER_REAL, CHECK_S)
+        signal.setitimer(signal.ITIMER_REAL, PRE_TOOL_ALARM_S)
     try:
         inp = json.load(sys.stdin)
     except Exception:
@@ -105,20 +173,26 @@ def main():
         head = SUBAGENT.format(sid=parent) if parent else RECALL.format(sid=sid)
         agent = rows_codex.agent_for(cfg, sid, parent)
         scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
-        text = head + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
-        try:      # decision 45: a relay run's session starts with the record
-            block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
+        text = head + '\n\n' + relay_text(cfg, run, agent, scratch)
+        m = machine(cfg, inp)
+        try:      # the hooks protocol: claim(next=true), and the task's brief when one is held
+            brief = m.start(inp.get('source') or '') if m else ''
         except Exception as e:
-            common.log(f"codex session-start record: {type(e).__name__}: {str(e)[:200]}")
+            common.log(f"codex session-start claim: {type(e).__name__}: {str(e)[:200]}")
+            brief = ''
+        try:      # decision 45, now only the agent's artefacts written back to the scratch directory
+            block = relay_hooks.artefacts_line(cfg, run, agent, inp.get('source') or '', machine=m)
+        except Exception as e:
+            common.log(f"codex session-start artefacts: {type(e).__name__}: {str(e)[:200]}")
             block = ''
-        out = context('SessionStart', text + ('\n\n' + block if block else ''))
+        out = context('SessionStart', '\n\n'.join(x for x in (text, brief, block) if x))
     elif mode == 'subagent-start':
         upload(cfg, [inp.get('transcript_path')], SYNC_S - 1, event, sid)
         run, _ = session_run(cfg, sid, inp.get('transcript_path'))
         sub = inp.get('agent_id') or ''
         agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid)
         out = context('SubagentStart', SUBAGENT.format(sid=sid) + '\n\n'
-                      + RELAY.format(run=run, agent=agent, scratch=common.scratch_dir(cfg, run)))
+                      + relay_text(cfg, run, agent, common.scratch_dir(cfg, run)))
     elif mode == 'flush':
         upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
     elif mode == 'session-end':
@@ -126,9 +200,22 @@ def main():
             session_end(cfg, inp)
         except Exception as e:
             common.log(f"codex session-end: {type(e).__name__}: {str(e)[:200]}")
+        try:
+            end_machine(cfg, inp)
+        except Exception as e:
+            common.log(f"codex session-end machine: {type(e).__name__}: {str(e)[:200]}")
         upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
     elif mode == 'upload':
+        try:
+            stop_fallback(cfg, inp)
+        except Exception as e:
+            common.log(f"codex stop fallback: {type(e).__name__}: {str(e)[:200]}")
         upload(cfg, [inp.get('agent_transcript_path') or inp.get('transcript_path')], ASYNC_S, event, sid)
+    elif mode == 'post-tool':
+        try:
+            out = post_tool(cfg, inp)
+        except Exception as e:
+            common.log(f"codex post-tool: {type(e).__name__}: {str(e)[:200]}")
     elif mode == 'pre-tool':
         try:
             out = pre_tool(cfg, inp)

@@ -334,6 +334,28 @@ def claim(cfg, run, agent, resource, paths=None, cwd='', timeout=2):
     return request(cfg, 'POST', _run_path(cfg, run, 'claims'), body, timeout=timeout)
 
 
+def claim_next(cfg, run, agent, cwd='', timeout=5):
+    """POST .../claims with next=true and no resource (Seeker decision 46): the run's first free registered task.
+    Held: {held, resource, key, paths, token, lease_until, test?, ask_about?, next_task: {name, key, brief, paths, test?,
+    ask_about?}}; nothing free: {held: false, free_tasks: [], message}."""
+    body = dict(agent=agent, next=True)
+    if cwd:
+        body['cwd'] = cwd
+    return request(cfg, 'POST', _run_path(cfg, run, 'claims'), body, timeout=timeout)
+
+
+def done(cfg, run, agent, resource, evidence, cwd='', witnessed=False, next_=False, timeout=3):
+    """POST .../done: {done, resource, key, paths?, evidence?, reason?, message?, next?: <a claim answer>}."""
+    body = dict(agent=agent, resource=resource, evidence=evidence)
+    if witnessed:
+        body['witnessed'] = True
+    if next_:
+        body['next'] = True
+    if cwd:
+        body['cwd'] = cwd
+    return request(cfg, 'POST', _run_path(cfg, run, 'done'), body, timeout=timeout)
+
+
 def release(cfg, run, agent, resource, cwd='', timeout=2):
     """DELETE .../claims: {released, finished, resource, key, paths?}. A slot or a path is always handed back."""
     body = dict(agent=agent, resource=resource)
