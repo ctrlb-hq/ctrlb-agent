@@ -800,6 +800,166 @@
    ]
   },
   {
+   "name": "row 6: a claim on write of a task's file refused waiting_on (the task's after list is not finished), advisory: inject the unfinished tasks",
+   "row": "edit waiting_on advisory",
+   "steps": [
+    {
+     "event": "pre-tool",
+     "input": {
+      "tool_name": "Edit",
+      "file": "tests/test_all.py"
+     },
+     "answers": {
+      "check": [
+       {
+        "body": {
+         "mode": "advisory",
+         "allowed": true,
+         "conflicts": [],
+         "own": []
+        }
+       }
+      ],
+      "claims": [
+       {
+        "body": {
+         "held": false,
+         "resource": "tests/test_all.py",
+         "reason": "belongs_to_task",
+         "task": "verify"
+        }
+       },
+       {
+        "body": {
+         "held": false,
+         "resource": "verify",
+         "key": "name:verify",
+         "reason": "waiting_on",
+         "waiting_on": [
+          "task 01 parse",
+          "task 02 emit"
+         ],
+         "free_tasks": [],
+         "message": "verify waits on task 01 parse, task 02 emit, not finished yet: it is handed out when they are"
+        }
+       }
+      ]
+     },
+     "expect": {
+      "calls": [
+       [
+        "POST",
+        "check",
+        {}
+       ],
+       [
+        "POST",
+        "claims",
+        {
+         "resource": "tests/test_all.py"
+        }
+       ],
+       [
+        "POST",
+        "claims",
+        {
+         "resource": "verify"
+        }
+       ]
+      ],
+      "decision": null,
+      "context_has": [
+       "tests/test_all.py belongs to task \"verify\", which waits on task 01 parse, task 02 emit: not finished yet",
+       "Leave it until they are finished"
+      ],
+      "state": {
+       "tasks": []
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "row 6: a claim on write of a task's file refused waiting_on (the task's after list is not finished), enforce: deny naming the unfinished tasks",
+   "row": "edit waiting_on enforce",
+   "steps": [
+    {
+     "event": "pre-tool",
+     "input": {
+      "tool_name": "Edit",
+      "file": "tests/test_all.py"
+     },
+     "answers": {
+      "check": [
+       {
+        "body": {
+         "mode": "enforce",
+         "allowed": false,
+         "conflicts": [],
+         "own": []
+        }
+       }
+      ],
+      "claims": [
+       {
+        "body": {
+         "held": false,
+         "resource": "tests/test_all.py",
+         "reason": "belongs_to_task",
+         "task": "verify"
+        }
+       },
+       {
+        "body": {
+         "held": false,
+         "resource": "verify",
+         "key": "name:verify",
+         "reason": "waiting_on",
+         "waiting_on": [
+          "task 01 parse",
+          "task 02 emit"
+         ],
+         "free_tasks": [],
+         "message": "verify waits on task 01 parse, task 02 emit, not finished yet: it is handed out when they are"
+        }
+       }
+      ]
+     },
+     "expect": {
+      "calls": [
+       [
+        "POST",
+        "check",
+        {}
+       ],
+       [
+        "POST",
+        "claims",
+        {
+         "resource": "tests/test_all.py"
+        }
+       ],
+       [
+        "POST",
+        "claims",
+        {
+         "resource": "verify"
+        }
+       ]
+      ],
+      "decision": "deny",
+      "context_has": [
+       "tests/test_all.py belongs to task \"verify\", which waits on task 01 parse, task 02 emit: not finished yet",
+       "Do not edit it until they are finished"
+      ],
+      "state": {
+       "tasks": []
+      }
+     }
+    }
+   ]
+  },
+  {
    "name": "row 7: edit of a held task's file within 20% of the lease end: claim the task again (renew), nothing said",
    "row": "edit renew",
    "state_before": "$holding1_near",
@@ -979,6 +1139,140 @@
        ]
       ],
       "context_has": [
+       "No other task is free in this run"
+      ],
+      "state": {
+       "state": "free",
+       "tasks": [],
+       "holds": []
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "row 8: the done of the last task of verify's after list hands out verify: its brief names the tasks it comes after",
+   "row": "bash test pass, next has after",
+   "state_before": "$holding1",
+   "steps": [
+    {
+     "event": "post-tool",
+     "input": {
+      "tool_name": "Bash",
+      "command": "python3 -m unittest tests/test_parse.py",
+      "stdout": "OK\n"
+     },
+     "answers": {
+      "done": [
+       {
+        "body": {
+         "done": true,
+         "resource": "task 01 parse",
+         "key": "name:task 01 parse",
+         "next": {
+          "held": true,
+          "resource": "verify",
+          "key": "name:verify",
+          "paths": [
+           "path:tests/test_all.py"
+          ],
+          "token": "tok-v",
+          "lease_until": "{now+1800}",
+          "test": "python3 -m unittest discover tests",
+          "after": [
+           "task 01 parse",
+           "task 02 emit"
+          ],
+          "next_task": {
+           "name": "verify",
+           "key": "name:verify",
+           "brief": "Run the full suite.",
+           "paths": [
+            "path:tests/test_all.py"
+           ],
+           "test": "python3 -m unittest discover tests",
+           "after": [
+            "task 01 parse",
+            "task 02 emit"
+           ]
+          }
+         }
+        }
+       }
+      ]
+     },
+     "expect": {
+      "calls": [
+       [
+        "POST",
+        "done",
+        {
+         "resource": "task 01 parse",
+         "next": true
+        }
+       ]
+      ],
+      "context_has": [
+       "Next: CtrlB Relay: you hold task \"verify\"",
+       "It comes after task 01 parse, task 02 emit, which are finished",
+       "`python3 -m unittest discover tests`"
+      ],
+      "state": {
+       "state": "holding",
+       "tasks": [
+        "verify"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "row 8: done, nothing free because verify waits on an unfinished task: said so, state free",
+   "row": "bash test pass, next waiting_on",
+   "state_before": "$holding1",
+   "steps": [
+    {
+     "event": "post-tool",
+     "input": {
+      "tool_name": "Bash",
+      "command": "python3 -m unittest tests/test_parse.py",
+      "stdout": "OK\n"
+     },
+     "answers": {
+      "done": [
+       {
+        "body": {
+         "done": true,
+         "resource": "task 01 parse",
+         "key": "name:task 01 parse",
+         "next": {
+          "held": false,
+          "reason": "waiting_on",
+          "free_tasks": [],
+          "waiting_on": [
+           "task 02 emit"
+          ],
+          "message": "There is no free task in this run: post a note saying you have no task and stop (verify waits on task 02 emit, not finished yet; the agent whose done finishes the last of them is handed it)"
+         }
+        }
+       }
+      ]
+     },
+     "expect": {
+      "calls": [
+       [
+        "POST",
+        "done",
+        {
+         "resource": "task 01 parse"
+        }
+       ]
+      ],
+      "context_has": [
+       "No other task is free now: the open tasks wait on task 02 emit"
+      ],
+      "context_not": [
        "No other task is free in this run"
       ],
       "state": {

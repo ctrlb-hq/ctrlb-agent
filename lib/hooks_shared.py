@@ -513,10 +513,14 @@ def _bare(k):
 
 
 def brief_text(task, lead=''):
-    """The context that names a held task: its name, files, test command (to run as written) and ask_about."""
+    """The context that names a held task: its name, files, the tasks it comes after, test command (to run as
+    written) and ask_about."""
     files = [_bare(p) for p in task.get('paths') or []]
     shown = ', '.join(files[:BRIEF_PATHS]) + (f' and {len(files) - BRIEF_PATHS} more' if len(files) > BRIEF_PATHS else '')
     parts = [f'{lead}CtrlB Relay: you hold task "{task.get("name")}".']
+    after = [a for a in task.get('after') or [] if isinstance(a, str) and a.strip()]
+    if after:
+        parts.append(f'It comes after {", ".join(after)}, which are finished.')
     if task.get('taken_over_from'):
         parts.append(f'You took it over from {task["taken_over_from"]}, who stopped; read its files and notes first.')
     if shown:
@@ -606,6 +610,9 @@ class Machine:
         task = dict(name=name, key=nt.get('key') or ans.get('key') or '', paths=paths,
                     test=nt.get('test') or ans.get('test') or '', ask_about=nt.get('ask_about') or ans.get('ask_about') or [],
                     lease_until=until, lease_s=_lease_s(until, at))
+        after = nt.get('after') or ans.get('after') or []
+        if after:
+            task['after'] = [a for a in after if isinstance(a, str)]
         if ans.get('taken_over_from'):
             task['taken_over_from'] = ans['taken_over_from']
         d['tasks'][name] = task
@@ -681,7 +688,7 @@ class Machine:
         own = {o.get('path'): o for o in res.get('own') or [] if isinstance(o, dict)}
         conflicts = {c.get('path'): c for c in res.get('conflicts') or [] if isinstance(c, dict)}
         st = self.read()
-        blocked, briefs, failed, claimed_tasks, renewed = [], [], [], set(), set()
+        blocked, briefs, failed, waiting, claimed_tasks, renewed = [], [], [], [], set(), set()
         for p in paths:
             c = conflicts.get(p)
             if c and c.get('held_by') and c['held_by'] != agent:
@@ -704,6 +711,8 @@ class Machine:
                     briefs.append(val)
                 elif kind == 'blocked':
                     blocked.append(val)
+                elif kind == 'waiting':
+                    waiting.append(val)
                 elif kind == 'failed':
                     failed.append(p)
         enforce = mode == 'enforce'
@@ -715,10 +724,15 @@ class Machine:
             else:
                 lines.append(f'{said}. Another agent is working on this file: leave it to {holder}, or ask {holder} '
                              f'before you change it.')
+        for p, name, on in waiting:
+            # a waiting_on answer is treated like another agent's hold: named in advisory, denied in enforce
+            said = f'{p} belongs to task "{name}", which waits on {", ".join(on)}: not finished yet'
+            lines.append(f'{said}. Do not edit it until they are finished.' if enforce else
+                         f'{said}. Leave it until they are finished.')
         if failed:
             lines.append(('Relay did not answer in time, so ' + ', '.join(failed) + ' could not be held for you'
                           + ('; the edit was not made. Try the edit again.' if enforce else '.')))
-        if enforce and (blocked or failed):
+        if enforce and (blocked or failed or waiting):
             return _deny(f'CtrlB Relay (run {run}): ' + ' '.join(lines))
         if not lines and not briefs:
             return None
@@ -727,7 +741,7 @@ class Machine:
 
     def _claim_on_write(self, p, claimed_tasks):
         """claim(resource=p) for this agent; on belongs_to_task the task instead. ('held', None), ('brief', text),
-        ('blocked', (path, holder, said)) or ('failed', None)."""
+        ('blocked', (path, holder, said)), ('waiting', (path, task, [unfinished task names])) or ('failed', None)."""
         at = time.time()
         ans = self._call('claim', p, lambda: common.claim(self.cfg, self.run, self.agent, p, cwd=self.cwd, timeout=CLAIM_S))
         if ans.get('held') is True:
@@ -746,6 +760,9 @@ class Machine:
                 record_tokens(self.run, self.agent, 'claim', t)
                 task = self.change(lambda d: self._take_task(d, t, name=name, at=at))
                 return 'brief', brief_text(task)
+            if t.get('reason') == 'waiting_on':
+                on = [w for w in t.get('waiting_on') or [] if isinstance(w, str)] or ['other tasks']
+                return 'waiting', (p, name, on)
             holder = t.get('held_by') or t.get('finished_by') or ans.get('held_by') or ''
             if holder:
                 said = (f'{p} belongs to task "{name}", finished by {holder}' if t.get('finished_by') and not t.get('held_by')
@@ -843,4 +860,8 @@ class Machine:
             return brief_text(task, lead=head + ' Next: ')
         if nxt.get('reason') == 'awaiting_answers':
             return head + ' The free tasks wait for answers to open questions: ' + (nxt.get('message') or '')
+        if nxt.get('reason') == 'waiting_on':
+            on = [w for w in nxt.get('waiting_on') or [] if isinstance(w, str)]
+            return (head + ' No other task is free now: the open tasks wait on ' + (', '.join(on) or 'other tasks')
+                    + ', not finished yet; the agent that finishes the last of them is handed the next one.')
         return head + ' No other task is free in this run.'
