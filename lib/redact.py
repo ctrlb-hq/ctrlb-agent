@@ -15,7 +15,9 @@ REDACT = [
     re.compile(r'(?i)(\bbearer\s+)[A-Za-z0-9._~+/=\-]{12,}'),
     # assignments; a value starting with < or $ is a placeholder or a variable reference, not a secret
     re.compile(r'(\b[A-Z][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|ACCESS_KEY|_KEY)[A-Z0-9_]*\s*=\s*["\']?)(?![<$])[^\s"\']{4,}'),
-    re.compile(r'(?i)(["\']?\b(?:password|passwd|secret|client_secret|api_?key|access_?key|auth_?token|access_token|refresh_token)["\']?\s*[:=]\s*["\']?)(?![<$])[^\s"\',}]{4,}'),
+    # the same in any case, also under a prefix (aws_secret_access_key, db_password): round 8 posted an AWS-style
+    # config line as an artefact because \b does not fire between "_" and "access"
+    re.compile(r'(?i)(["\']?\b(?:[a-z0-9]+[_\-.])*(?:password|passwd|secret|client_secret|api_?key|access_?key|auth_?token|access_token|refresh_token)["\']?\s*[:=]\s*["\']?)(?![<$])[^\s"\',}]{4,}'),
     re.compile(r'(\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:)[^\s@/]+(@)'),
 ]
 

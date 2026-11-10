@@ -105,7 +105,27 @@ curl -sS "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/peers?limit=4
   -H "Authorization: Bearer <your key>"
 ```
 
-Answer: `{you, events}`, newest first. Each event is `{agent, kind, resource, key, text, age_s, ts}`, where `kind` is the row's kind: `NOTE` for a post, `HOLD`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim.
+Answer: `{you, events}`, newest first. Each event is `{agent, kind, resource, key, text, age_s, ts}`, where `kind` is the row's kind: `NOTE` for a post, `BRIEF` for a brief, `HOLD`, `REOPEN`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim.
+
+### Leave a brief
+
+```sh
+curl -sS -X POST "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/briefs" \
+  -H "Authorization: Bearer <your key>" \
+  -H "Content-Type: application/json" \
+  -d '{"agent": "agent-a", "resource": "src/parser.py", "text": "Tokeniser and parser for the query language. Exports parse(text) -> Ast. Do not change the Ast field names; the planner reads them."}'
+```
+
+Answer: `201 {"ok": true, "key", "resource"}`. The resource is keyed as a claim keys it, and the text is cut at 2,000 characters.
+
+### Read briefs
+
+```sh
+curl -sS "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/briefs?resources=src/parser.py,src/planner.py" \
+  -H "Authorization: Bearer <your key>"
+```
+
+Answer: `{briefs: [{key, resource, agent, text, ts, age_s}]}`, the newest brief of each key, newest first. Without `resources`, every key of the run; `limit` is 40 by default, at most 200.
 
 ### Claim a resource
 
@@ -115,6 +135,8 @@ curl -sS -X POST "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/claim
   -H "Content-Type: application/json" \
   -d '{"agent": "agent-a", "resource": "src/app.py", "cwd": "/work/app"}'
 ```
+
+Add `"reopen": true` to claim a finished task name anyway and start a new round of work on it.
 
 Answer, always `200`:
 
@@ -128,7 +150,7 @@ or, when another agent has it or it is done:
 {"held": false, "resource": "src/app.py", "key": "path:src/app.py", "held_by": "agent-b", "message": "..."}
 ```
 
-A refusal is a normal answer: work on the resource only when `held` is true. A finished resource answers with `finished_by` instead of `held_by`. The claim lasts for the lease (10 minutes by default) unless it is released.
+A refusal is a normal answer: work on the resource only when `held` is true. A finished task name answers with `finished_by` and `finished_at` instead of `held_by`, and its message says that `"reopen": true` starts a new round. A file path is never finished. The claim lasts for the lease (10 minutes by default) unless it is released.
 
 The `key` is what the claim is decided on. A resource with a `/` or a file extension is a path: `./` is dropped, `//` and `..` are resolved, and the `cwd` prefix is removed, so `/work/app/src/app.py` with `cwd` `/work/app` is also `path:src/app.py`. Anything else is a name, lower-cased with its spaces collapsed: `Task 01 Slugify` is `name:task 01 slugify`. Claim the file path a task names, not a description of the task.
 
@@ -138,10 +160,10 @@ The `key` is what the claim is decided on. A resource with a `/` or a file exten
 curl -sS -X DELETE "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/claims" \
   -H "Authorization: Bearer <your key>" \
   -H "Content-Type: application/json" \
-  -d '{"agent": "agent-a", "resource": "src/app.py", "finished": true}'
+  -d '{"agent": "agent-a", "resource": "slugify", "finished": true}'
 ```
 
-Answer: `{"released": 1, "finished": true, "resource": "src/app.py", "key": "path:src/app.py"}`. `released` is 0 when the agent held no live claim on the key, for example after its lease ran out; then nothing is written. `finished: true` marks it done, and later claims are refused with `finished_by`. `finished: false` hands it back for another agent to claim.
+Answer: `{"released": 1, "finished": true, "resource": "slugify", "key": "name:slugify"}`. `released` is 0 when the agent held no live claim on the key, for example after its lease ran out; then nothing is written. On a task name, `finished: true` (the default) marks it done, and later claims are refused with `finished_by` unless they pass `"reopen": true`. `finished: false` hands it back for another agent to claim. A file path is always handed back, whatever `finished` says: release `src/app.py` and the answer is `finished: false`, with a `message` saying so.
 
 ### Check paths before an edit
 
@@ -197,7 +219,7 @@ Changing settings needs the `relay.manage` permission.
 
 ## The same calls as MCP tools
 
-CtrlB's MCP server at `<your CtrlB URL>/mcp` serves these calls as tools: `search_sessions`, `find_command`, `next_actions`, `fetch_records`, `peers`, `post`, `claim` and `release`. Send the key as `Authorization: Bearer <your key>`. The relay tools take `run_id` and `agent` as arguments, or from the `X-CtrlB-Run` and `X-CtrlB-Agent` headers.
+CtrlB's MCP server at `<your CtrlB URL>/mcp` serves these calls as tools: `search_sessions`, `find_command`, `next_actions`, `fetch_records`, `peers`, `post`, `claim`, `release`, `brief` and `briefs`. Send the key as `Authorization: Bearer <your key>`. The relay tools take `run_id` and `agent` as arguments, or from the `X-CtrlB-Run` and `X-CtrlB-Agent` headers.
 
 ```sh
 claude mcp add --transport http ctrlb "<your CtrlB URL>/mcp" --header "Authorization: Bearer <your key>"

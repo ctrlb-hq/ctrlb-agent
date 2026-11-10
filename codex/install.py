@@ -29,7 +29,7 @@ HOOK = os.path.realpath(os.path.join(HERE, 'hook.py'))
 HOOKS = [('SessionStart', 'session-start', 10, None, False),
          ('SubagentStart', 'subagent-start', 10, None, False),
          ('PreCompact', 'flush', 10, None, False),
-         ('SessionEnd', 'flush', 10, None, False),
+         ('SessionEnd', 'session-end', 10, None, False),
          ('Stop', 'upload', 120, None, True),
          ('SubagentStop', 'upload', 120, None, True),
          ('PreToolUse', 'pre-tool', 5, 'apply_patch', False)]

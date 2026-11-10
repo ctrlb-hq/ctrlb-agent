@@ -30,16 +30,17 @@ Even in `enforce` mode:
 ## One claim per key
 
 - The first live hold on a key wins. Every other claim on it is refused with `held_by`, until the holder releases it or its lease runs out.
-- An agent that claims a key it already holds is refused, with `held_by` naming itself. Its first hold stands and is not extended.
-- A key released with `finished=true` is done for the rest of the run. Every later claim is refused with `finished_by`. To redo the work, use a new run id.
+- An agent that claims a key it already holds renews it: `held: true, renewed: true`, with the `lease_until` of the new hold.
+- Only a task name can be done. A task released with `finished=true` is refused to every later claim with `finished_by` and `finished_at`, until a claim passes `reopen=true` and starts a new round of work on it.
+- A file path is never done. Releasing it always hands it back, whatever `finished` says, so it can be edited again in a later round. A `DONE` row already on a path, from before this rule, blocks nothing.
 - Claims are decided on the key, not on the text you pass. Paths are keyed relative to `cwd` and keep their case; names are lower-cased with their whitespace collapsed. A file with no extension, such as `Makefile`, is a name unless you claim `path:Makefile`.
-- Two descriptions of one task are two keys. Claim the file path the task names.
+- Two spellings of one task are two keys. When the orchestrator registers the run's tasks, a claim of any other task name is refused with `unknown_task` and the registered name as `suggestion`; without registered tasks, claim the task name exactly as the task list gives it.
 - Claims in one run cover every user's agents in it, even when each user sees only their own rows.
 
 ## Lease: 10 minutes by default
 
 - A claim lasts `leaseSeconds` (600 by default, 60 to 86,400) from its `HOLD` row, unless released. A claim's answer gives the end as `lease_until`.
-- There is no renewal. When the lease runs out the claim is gone, and another agent can claim the key.
+- Claiming the key again before the lease runs out renews it. When the lease runs out the claim is gone, and another agent can claim the key.
 - A `release` after the lease ran out writes nothing: it answers `released: 0`, and the key is not done. Claim it again, then release it.
 - A crashed or killed agent's claim lasts until its lease runs out.
 - For work that takes longer than the lease, raise `leaseSeconds` in the workspace's Relay settings.
@@ -77,7 +78,8 @@ Even in `enforce` mode:
 
 ## What the run view does not do
 
-- The detectors (duplicate edits, silent agents) are computed when the page reads the run. There are no alerts on them.
+- The detectors (duplicate edits, silent agents, stalled tasks) are computed when the page reads the run. There are no alerts on them.
+- `done` evidence is what the agent says it ran. CtrlB does not run the command or check the exit code; the session record shows whether the agent ran it.
 - Edits made from a shell have no `paths` column, so the duplicate-edit detector does not see them.
 - Cost is shown for Claude Code sessions, from their `cost_usd`. Codex sessions record tokens only.
 

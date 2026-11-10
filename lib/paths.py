@@ -1,8 +1,10 @@
 """Resource keys of CtrlB Relay (relay-plan section 3, decision 6), identical to Seeker's internal/pkg/relay Key. Both
 sides pass the same table, tests/fixtures/keys.json (copied from Seeker's tests/fixtures/keys.json).
 
-key(resource, cwd) -> (key, kind). The resource is trimmed of surrounding whitespace. One that already carries a key
-prefix ("path:" or "name:", as claim echoes it) is keyed as that kind again, so key(key(r)) is key(r). One containing a
+key(resource, cwd) -> (key, kind). The resource is trimmed of surrounding whitespace. One that already carries a prefix
+of the kinds table (lib/keys.json, the same file Seeker embeds: "path:", "name:", "slot:", "contract:", case-sensitive)
+is keyed as that kind again, so key(key(r)) is key(r): a path body is cleaned as a path, any other body as a name. A
+prefix with nothing after it is invalid and keyed ('', ''). One containing a
 '/' or ending in a file extension is a path: cleaned as Go's path.Clean does ("./" stripped, "//" and "/./" collapsed,
 ".." resolved, a trailing '/' dropped; a leading "//" collapses to "/", unlike posixpath.normpath), and when cwd is given
 a leading "<cwd>/" is dropped. The case of a path is kept. Anything else is a name: lower-cased, runs of whitespace
@@ -12,9 +14,16 @@ edit_paths(paths, cwd) is what the package sends for the files an edit tool touc
 hooks and in the paths column of session rows: each path cleaned and made relative to cwd as key() does, once per key,
 and written so that Seeker's Key(p, cwd) keys it as a path even when the file name has no extension ("Makefile" is sent
 as "./Makefile", so an edit of it is keyed path:Makefile from both harnesses)."""
+import json
+import os
 import re
 
-PATH, NAME = 'path:', 'name:'
+PATH, NAME, SLOT, CONTRACT = 'path:', 'name:', 'slot:', 'contract:'
+
+# The kinds table: what each key prefix is (leasable, finishable, reopenable, checked_by_hook, default_lease_s).
+# lib/keys.json is Seeker's tests/fixtures/keys.json byte for byte.
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'keys.json'), encoding='utf-8') as _fh:
+    KINDS = json.load(_fh)['kinds']
 
 # Go's unicode.IsSpace: what strings.TrimSpace trims and strings.Fields splits on. Python's str.strip() also strips
 # U+001C to U+001F, which Go keeps.
@@ -81,13 +90,28 @@ def normalise_name(n):
     return ' '.join(x for x in _FIELDS.split(_lower(n)) if x)
 
 
+def kind_of(k):
+    """The kinds-table row of a key, by its prefix (a key with no known prefix is a name)."""
+    for row in KINDS:
+        if k.startswith(row['prefix']):
+            return row
+    return next(row for row in KINDS if row['kind'] == 'name')
+
+
+def lease_seconds_for(k, settings):
+    """The lease of a hold on key k under the workspace's leaseSeconds: the kind's own, or the setting."""
+    return kind_of(k)['default_lease_s'] or settings
+
+
 def key(resource, cwd=''):
-    """(key, kind) of a claimed resource, kind 'path' or 'name'."""
+    """(key, kind) of a claimed resource, kind one of the table's ('path', 'name', 'slot', 'contract'); ('', '') when
+    the resource is a prefix with nothing after it."""
     r = (resource or '').strip(GO_SPACE)
-    if r.startswith(PATH):
-        return PATH + normalise_path(r[len(PATH):].strip(GO_SPACE), cwd), 'path'
-    if r.startswith(NAME):
-        return NAME + normalise_name(r[len(NAME):]), 'name'
+    for row in KINDS:
+        if r.startswith(row['prefix']):
+            body = r[len(row['prefix']):]
+            body = normalise_path(body.strip(GO_SPACE), cwd) if row['kind'] == 'path' else normalise_name(body)
+            return (row['prefix'] + body, row['kind']) if body else ('', '')
     if is_path(r):
         return PATH + normalise_path(r, cwd), 'path'
     return NAME + normalise_name(r), 'name'

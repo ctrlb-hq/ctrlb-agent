@@ -16,11 +16,29 @@
       { "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" upload", "timeout": 120, "async": true } ] }
     ],
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" flush", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" session-end", "timeout": 10 } ] }
     ],
     "PreToolUse": [
       { "matcher": "Edit|Write|MultiEdit|NotebookEdit",
-        "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" pre-tool", "timeout": 5 } ] }
+        "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" pre-tool", "timeout": 5 } ] },
+      { "matcher": "mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done",
+        "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" pre-tool", "timeout": 5 } ] },
+      { "matcher": "Agent|Task",
+        "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" pre-agent", "timeout": 5 } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "mcp__ctrlb__claim|mcp__ctrlb__handoff|mcp__ctrlb__release",
+        "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" post-tool", "timeout": 5 } ] },
+      { "matcher": "Bash|mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done",
+        "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" post-tool", "timeout": 5 } ] },
+      { "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__ctrlb__post|mcp__plugin_ctrlb-agent_ctrlb__post",
+        "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" post-tool", "timeout": 5 } ] }
+    ],
+    "PostToolUseFailure": [
+      { "matcher": "Bash",
+        "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" post-tool-failure", "timeout": 5 } ] },
+      { "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" post-tool-failure", "timeout": 5 } ] }
     ]
   }
 }

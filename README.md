@@ -27,6 +27,8 @@ claude plugin install ctrlb-agent@ctrlb-agent
 
 Start Claude Code and run `/ctrlb-agent:setup`. It checks the connection and offers to upload past sessions.
 
+Claude Code can also do this setup for you: save the key in a file yourself, then give it the prompt in [docs/connect-claude-code.md](docs/connect-claude-code.md#set-up-with-a-prompt). The agent never reads the key.
+
 To keep the key out of your shell profile, clone this repo and run `python3 -I bin/configure.py` in a terminal. It asks for the key with hidden input and writes `~/.ctrlb/config.json` with mode 0600. The hooks read that file. The MCP server still needs `CTRLB_MCP_URL` and `CTRLB_KEY` in the environment, because Claude Code expands them in `plugin/.mcp.json`.
 
 ## Install in Codex
@@ -147,6 +149,7 @@ bin/                              configure.py, status.py, backfill.py
 tests/run_tests.py                python3 -I tests/run_tests.py
 docs/connect-*.md                 the docs-site pages: Claude Code, Codex, OTEL only, HTTP
 docs/relay-plan.md                the build plan
+research/relay/                   the research prototype of Relay and its parity runner (research code, not the plugin)
 ```
 
 ## Tests

@@ -13,6 +13,10 @@ Config comes from environment variables, falling back to ~/.ctrlb/config.json (w
   CTRLB_ENFORCE  "off" skips the edit check without calling Seeker; anything else lets Seeker's mode decide
                                                                  file key "enforce"
   CTRLB_MCP_URL  Seeker's /mcp URL, read by plugin/.mcp.json     file key "mcp_url" (shown by status only)
+  CTRLB_SCRATCH_DIR  the run's durable scratch directory; {run} is replaced by the run id
+                 (default <CTRLB_HOME>/relay/<run id>/scratch)          file key "scratchDir"
+  CTRLB_AUTO_SLOTS   files the hooks claim as slot:<path> around each edit (relative paths, comma-separated;
+                 empty turns it off; default REGISTRY.md)               file key "autoSlots" (a list)
   CTRLB_OFF=1    turns every hook off
   CTRLB_HOME     where config.json, hooks.log and upload state live (default ~/.ctrlb)
 
@@ -68,8 +72,48 @@ def config():
     # environment and an old config.json "user" written as a label can never put another name on the rows.
     c['user'] = key_user(c['key'])
     c['mcp_url'] = pick('CTRLB_MCP_URL', 'mcp_url', c['url'] + '/mcp' if c['url'] else '')
+    c['scratch_dir'] = pick('CTRLB_SCRATCH_DIR', 'scratchDir')
+    c['auto_slots'] = _auto_slots(env('CTRLB_AUTO_SLOTS'), f.get('autoSlots'))
     c['off'] = env('CTRLB_OFF') == '1' or not c['url'] or not c['key'] or not NAME_RE.match(c['dataset'])
     return c
+
+
+DEFAULT_AUTO_SLOTS = ('REGISTRY.md',)
+
+
+def _auto_slots(var, file_value):
+    """autoSlots: CTRLB_AUTO_SLOTS when set (comma-separated; empty is none), else the file's list, else REGISTRY.md."""
+    if var is not None:
+        items = var.split(',')
+    elif isinstance(file_value, list):
+        items = file_value
+    elif isinstance(file_value, str):
+        items = file_value.split(',')
+    else:
+        items = list(DEFAULT_AUTO_SLOTS)
+    out = []
+    for i in items:
+        i = str(i).strip().replace('\\', '/')
+        while i.startswith('./'):
+            i = i[2:]
+        if i and not i.startswith('/') and '..' not in i.split('/') and i not in out:
+            out.append(i)
+    return out
+
+
+def safe_segment(s):
+    """A run id as one file-name segment."""
+    s = re.sub(r'[^A-Za-z0-9._-]+', '_', str(s or ''))[:120].strip('.')
+    return s or '_'
+
+
+def scratch_dir(cfg, run):
+    """The run's durable scratch directory (decision D): scratchDir, with {run} replaced, or
+    <CTRLB_HOME>/relay/<run id>/scratch."""
+    d = cfg.get('scratch_dir') or ''
+    if d:
+        return os.path.abspath(os.path.expanduser(d.replace('{run}', safe_segment(run))))
+    return os.path.join(HOME, 'relay', safe_segment(run), 'scratch')
 
 
 def run_id(cfg, session_id, parent=''):
@@ -132,11 +176,14 @@ def ingest_records(cfg, rows, timeout=20):
     return request(cfg, 'POST', f"/ai/sessions/{_seg(cfg['dataset'])}/records", rows, timeout=timeout)
 
 
-def check(cfg, run, agent, paths, cwd='', timeout=2):
-    """POST /ai/relay/{dataset}/runs/{run}/check: {mode, allowed, conflicts: [{path, key, held_by, lease_until}]}."""
+def check(cfg, run, agent, paths, cwd='', timeout=2, tokens=None):
+    """POST /ai/relay/{dataset}/runs/{run}/check: {mode, allowed, conflicts: [{path, key, held_by, lease_until, reason,
+    lapsed_at?, message?}], renewed?}. tokens maps a path (as sent) to the token its claim answered."""
     body = dict(agent=agent, paths=list(paths))
     if cwd:
         body['cwd'] = cwd
+    if tokens:
+        body['tokens'] = dict(tokens)
     return request(cfg, 'POST', f"/ai/relay/{_seg(cfg['dataset'])}/runs/{_seg(run)}/check", body, timeout=timeout)
 
 
@@ -148,6 +195,190 @@ def runs(cfg, status='all', limit=5, timeout=15):
 
 def host():
     return socket.gethostname()
+
+
+class TokenState:
+    """The hold tokens of one agent of one run: {key: token}, from the claim and handoff answers the PostToolUse hook
+    sees, sent with the pre-tool check. A JSON file under the plugin's state directory, held exclusively (fcntl) while
+    it is read and written. Tokens are hold nonces, not secrets."""
+
+    def __init__(self, run, agent):
+        d = os.path.join(HOME, 'state')
+        os.makedirs(d, exist_ok=True)
+        name = hashlib.sha1(f'{run}\0{agent}'.encode()).hexdigest()
+        self.file = os.path.join(d, f'tokens-{name}.json')
+
+    def _locked(self, fn):
+        with open(self.file + '.mutex', 'w') as mx:
+            fcntl.flock(mx, fcntl.LOCK_EX)
+            try:
+                try:
+                    with open(self.file) as fh:
+                        data = json.load(fh)
+                except Exception:
+                    data = {}
+                if not isinstance(data, dict):
+                    data = {}
+                out, changed = fn(data)
+                if changed:
+                    tmp = self.file + '.tmp'
+                    with open(tmp, 'w') as fh:
+                        json.dump(data, fh)
+                    os.replace(tmp, self.file)
+                return out
+            finally:
+                fcntl.flock(mx, fcntl.LOCK_UN)
+
+    def put(self, keys, token):
+        def fn(d):
+            for k in keys:
+                d[k] = token
+            if len(d) > 2000:
+                for k in list(d)[:-1000]:
+                    del d[k]
+            return None, True
+        return self._locked(fn)
+
+    def drop(self, keys):
+        return self._locked(lambda d: (None, bool([d.pop(k) for k in keys if k in d])))
+
+    def get(self, keys):
+        return self._locked(lambda d: ({k: d[k] for k in keys if isinstance(d.get(k), str)}, False))
+
+
+class LastTest(TokenState):
+    """The last test-looking Bash command of one agent of one run, its exit code and last output line, from the
+    PostToolUse hook (Seeker decision 30): {command, exit_code, summary, ts}. Quoted back to the agent when done is
+    refused for evidence; never sent as evidence by the hook."""
+
+    def __init__(self, run, agent):
+        super().__init__(run, agent)
+        self.file = self.file.replace(os.sep + 'tokens-', os.sep + 'lasttest-')
+
+    def put(self, rec):
+        def fn(d):
+            d.clear()
+            d.update(rec)
+            return None, True
+        return self._locked(fn)
+
+    def get(self):
+        return self._locked(lambda d: (dict(d) if d.get('command') else None, False))
+
+
+class SessionRecord(TokenState):
+    """What the hooks saw one agent of one run do in its current session (Seeker decisions 36 and 38): {sid, bash:
+    [{command, exit_code, summary, ts}] (newest last, at most BASH_MAX), edited: [path], note: {text, ts}, relay: bool
+    (a ctrlb relay tool was called)}. A new session id starts a new record. Read by the session-end handoff (its text)
+    and by the done witness (was this command run, with this exit code, in this session)."""
+    BASH_MAX = 200
+    EDITED_MAX = 200
+
+    def __init__(self, run, agent):
+        super().__init__(run, agent)
+        self.file = self.file.replace(os.sep + 'tokens-', os.sep + 'session-')
+
+    def update(self, sid, fn):
+        """fn(record) changes the record in place; a record of another session is dropped first."""
+        def go(d):
+            if d.get('sid') != sid:
+                d.clear()
+                d.update(sid=sid, bash=[], edited=[], note=None, relay=False)
+            fn(d)
+            d['bash'] = d.get('bash', [])[-self.BASH_MAX:]
+            d['edited'] = d.get('edited', [])[-self.EDITED_MAX:]
+            return None, True
+        return self._locked(go)
+
+    def get(self, sid):
+        return self._locked(lambda d: (dict(d) if d.get('sid') == sid else
+                                       dict(sid=sid, bash=[], edited=[], note=None, relay=False), False))
+
+
+def handoff_all(cfg, run, agent, text, cwd='', timeout=0.8):
+    """POST /ai/relay/{dataset}/runs/{run}/handoffs with all=true and no receiver (Seeker decision 36): every hold the
+    agent has in the run is handed off openly (a task: RELEASE plus a NOTE with text) or released (a path, a slot), in
+    one write."""
+    body = dict(agent=agent, all=True, to='', text=text)
+    if cwd:
+        body['cwd'] = cwd
+    return request(cfg, 'POST', f"/ai/relay/{_seg(cfg['dataset'])}/runs/{_seg(run)}/handoffs", body, timeout=timeout)
+
+
+# ---------------------------------------------------------------- round 8 relay calls (decisions 43 to 47)
+
+def _run_path(cfg, run, tail):
+    return f"/ai/relay/{_seg(cfg['dataset'])}/runs/{_seg(run)}/{tail}"
+
+
+def post_brief(cfg, run, agent, resource, text, paths=None, cwd='', test='', timeout=2):
+    """POST .../briefs: a brief on a task name with paths registers the task; on contract:<name> with paths it is a
+    contract. Answers {ok, key, resource, paths?, test?}."""
+    body = dict(agent=agent, resource=resource, text=text)
+    if paths:
+        body['paths'] = list(paths)
+    if cwd:
+        body['cwd'] = cwd
+    if test:
+        body['test'] = test
+    return request(cfg, 'POST', _run_path(cfg, run, 'briefs'), body, timeout=timeout)
+
+
+def claim(cfg, run, agent, resource, paths=None, cwd='', timeout=2):
+    """POST .../claims: {held, resource, key, paths?, held_by?, token?, ...}."""
+    body = dict(agent=agent, resource=resource)
+    if paths:
+        body['paths'] = list(paths)
+    if cwd:
+        body['cwd'] = cwd
+    return request(cfg, 'POST', _run_path(cfg, run, 'claims'), body, timeout=timeout)
+
+
+def release(cfg, run, agent, resource, cwd='', timeout=2):
+    """DELETE .../claims: {released, finished, resource, key, paths?}. A slot or a path is always handed back."""
+    body = dict(agent=agent, resource=resource)
+    if cwd:
+        body['cwd'] = cwd
+    return request(cfg, 'DELETE', _run_path(cfg, run, 'claims'), body, timeout=timeout)
+
+
+def post_note(cfg, run, agent, text, key='', hash_='', timeout=10):
+    """POST .../posts: a NOTE. key (artifact:<path>) and hash are the round 8 artefact fields (decision 44)."""
+    body = dict(agent=agent, text=text)
+    if key:
+        body['key'] = key
+    if hash_:
+        body['hash'] = hash_
+    return request(cfg, 'POST', _run_path(cfg, run, 'posts'), body, timeout=timeout)
+
+
+def get_run_part(cfg, run, tail, query=None, timeout=2):
+    """GET .../tasks, .../contracts, .../peers or .../artifacts of one run."""
+    return request(cfg, 'GET', _run_path(cfg, run, tail), query=query, timeout=timeout)
+
+
+class RunState(TokenState):
+    """A small JSON document per (run, agent) under the state directory; name picks the
+    document: 'artifacts' (path -> hash of the last posted content), 'record' (the session-start cache), 'counter'.
+    Held exclusively while it is read and written, as TokenState is."""
+
+    def __init__(self, run, agent, name):
+        super().__init__(run, agent)
+        self.file = self.file.replace(os.sep + 'tokens-', os.sep + name + '-')
+
+    def read(self):
+        return self._locked(lambda d: (dict(d), False))
+
+    def write(self, data):
+        def fn(d):
+            d.clear()
+            d.update(data)
+            return None, True
+        return self._locked(fn)
+
+    def change(self, fn):
+        """fn(d) changes d in place and returns a value, which change returns."""
+        return self._locked(lambda d: (fn(d), True))
 
 
 class FileState:

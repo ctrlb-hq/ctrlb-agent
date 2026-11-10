@@ -3,7 +3,7 @@
 Seeker is a local fake that answers with the synthetic responses in tests/fixtures/seeker/ (relay-plan section 4).
 Nothing is sent anywhere else, Claude is never called, and no real config is read: every CTRLB_* variable from the
 calling environment is dropped and CTRLB_HOME points into tests/work/."""
-import base64, glob, http.server, json, os, re, shutil, socket, stat, subprocess, sys, threading, time
+import base64, glob, hashlib, http.server, json, os, re, shutil, socket, stat, subprocess, sys, threading, time
 sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -58,7 +58,11 @@ class Seeker:
 
     def __init__(self):
         self.records, self.check_fx, self.runs_fx = load('seeker/records.json'), load('seeker/check.json'), load('seeker/runs.json')
-        self.calls, self.rows, self.refused, self.state = [], [], [], dict(check='allow')
+        self.calls, self.rows, self.refused, self.state = [], [], [], dict(check='allow', handoff='ok')
+        # Round 8 routes: each answers 'ok', or 'slow' (sleeps SLOW_S, longer than any hook budget), 'error' (500),
+        # 'missing' (404, a Seeker without the route); claims also 'held' (another agent holds it).
+        self.state.update(briefs='ok', claims='ok', release='ok', posts='ok', tasks='ok', contracts='ok', peers='ok',
+                          artifacts='ok')
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -103,8 +107,28 @@ class Seeker:
                         time.sleep(5)
                         s = 'allow'
                     return self._answer(**outer.check_fx['responses'][s])
+                m = re.match(r'^/ai/relay/([A-Za-z0-9_]+)/runs/([^/]+)/handoffs$', self.path)
+                if m and method == 'POST':
+                    s = outer.state['handoff']
+                    if s == 'slow':
+                        time.sleep(5)
+                    if s == 'error':
+                        return self._answer(500, {'error': 'boom'})
+                    return self._answer(200, {'handed': True, 'open': True, 'released': ['name:task 07 latency', 'path:src/lat.py'],
+                                              'tasks': ['task 07 latency'], 'message': 'handed off 1 task, released 1 key'})
                 if self.path.startswith('/ai/relay/') and self.path.split('?')[0].endswith('/runs') and method == 'GET':
                     return self._answer(**outer.runs_fx['responses']['ok'])
+                m = re.match(r'^/ai/relay/([A-Za-z0-9_]+)/runs/([^/?]+)/(briefs|claims|posts|tasks|contracts|peers|artifacts)(?:\?(.*))?$', self.path)
+                if m:
+                    route = 'release' if m.group(3) == 'claims' and method == 'DELETE' else m.group(3)
+                    s = outer.state.get(route, 'ok')
+                    if s == 'slow':
+                        time.sleep(SLOW_S)
+                    if s == 'error':
+                        return self._answer(500, {'error': 'boom'})
+                    if s == 'missing':
+                        return self._answer(404, {'error': 'no route'})
+                    return self._answer(*r8_answer(route, method, body, m.group(4) or '', s))
                 return self._answer(404, {'error': 'no route'})
 
             def do_POST(self):
@@ -112,6 +136,9 @@ class Seeker:
 
             def do_GET(self):
                 self._handle('GET')
+
+            def do_DELETE(self):
+                self._handle('DELETE')
 
         self.httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H)
         self.httpd.daemon_threads = True
@@ -122,6 +149,55 @@ class Seeker:
         self.calls.clear()
         self.rows.clear()
         self.refused.clear()
+
+
+SLOW_S = 5
+R8_ARTIFACT = '# plan\nstep 1: parse\n'
+
+
+def r8_answer(route, method, body, query, state):
+    """(status, body) of the fake round 8 routes."""
+    body = body if isinstance(body, dict) else {}
+    if route == 'briefs' and method == 'POST':
+        res = body.get('resource') or ''
+        return 201, {'ok': True, 'key': res if res.startswith('contract:') else 'name:' + ' '.join(res.lower().split()),
+                     'resource': res, 'paths': ['path:' + p for p in body.get('paths') or []]}
+    if route == 'claims':
+        res = body.get('resource') or ''
+        k = 'slot:' + res[len('slot:'):].lower() if res.startswith('slot:') else res
+        if state == 'held':
+            return 200, {'held': False, 'resource': res, 'key': k, 'held_by': 'agent-b', 'message': f'{res} is already held by agent-b'}
+        return 200, {'held': True, 'resource': res, 'key': k, 'paths': ['path:' + p for p in body.get('paths') or []],
+                     'token': 'tok-slot', 'lease_until': 1793000120000000}
+    if route == 'release':
+        res = body.get('resource') or ''
+        return 200, {'released': 1, 'finished': False, 'resource': res, 'key': 'slot:' + res[len('slot:'):].lower(),
+                     'paths': ['path:REGISTRY.md']}
+    if route == 'posts':
+        return 201, {'ok': True, 'key': body.get('key', '')}
+    if route == 'tasks':
+        return 200, {'tasks': [
+            {'name': 'task 01 parse', 'key': 'name:task 01 parse', 'state': 'held', 'held_by': 'agent-b', 'stalled': True,
+             'test': 'python3 -m pytest tests/test_parse.py', 'paths': ['path:src/parse.py']},
+            {'name': 'task 02 emit', 'key': 'name:task 02 emit', 'state': 'open', 'handed_off': True,
+             'handoff_text': 'Session ended. Edited: src/emit.py. Last test: none run.', 'handoff_by': 'agent-c'},
+            {'name': 'task 00 setup', 'key': 'name:task 00 setup', 'state': 'finished', 'finished_by': 'agent-b'}],
+            'free_tasks': 1}
+    if route == 'contracts':
+        return 200, {'contracts': [{'name': 'parse api', 'key': 'contract:parse api', 'text': 'parse(s) -> Tree', 'paths': ['path:src/parse.py']}]}
+    if route == 'peers':
+        if 'kind=handoff' in query:
+            return 200, {'you': '', 'events': [{'agent': 'agent-c', 'kind': 'HANDOFF', 'resource': 'task 04 render', 'key': 'name:task 04 render',
+                                                'to': 'agent-1', 'text': 'render: tests pass, docs left'},
+                                               {'agent': 'agent-c', 'kind': 'HANDOFF', 'resource': 'task 09 other', 'to': 'agent-z', 'text': 'not yours'}]}
+        return 200, {'you': '', 'events': [{'agent': 'agent-1', 'kind': 'NOTE', 'text': 'parse: tokenizer done', 'key': ''},
+                                           {'agent': 'agent-b', 'kind': 'NOTE', 'text': 'someone else', 'key': ''},
+                                           {'agent': 'agent-1', 'kind': 'NOTE', 'text': 'artifact body', 'key': 'artifact:x.md'}]}
+    if route == 'artifacts':
+        return 200, {'artifacts': [{'key': 'artifact:plan.md', 'path': 'plan.md', 'agent': 'agent-1',
+                                    'hash': 'sha256:' + hashlib.sha256(R8_ARTIFACT.encode()).hexdigest(), 'text': R8_ARTIFACT, 'ts': 1},
+                                   {'key': 'artifact:../escape.md', 'path': '../escape.md', 'agent': 'agent-1', 'text': 'no', 'ts': 1}]}
+    return 404, {'error': 'no route'}
 
 
 def closed_port():
@@ -190,6 +266,24 @@ def planted():
 
 # ---------------------------------------------------------------- tests
 
+def task_claim_first(text, name_claim, file_claim):
+    """The rule text names the task-name claim before the file claim, and both exist."""
+    i, j = text.find(name_claim), text.find(file_claim)
+    return 0 <= i < j
+
+
+REGISTERED = 'Claim the task by the name your orchestrator registered'
+
+
+def registered_rule(text, md=False):
+    """Rule 3 after Seeker decision 18: claim the registered task, its files come with it, one claim held, release it
+    finished; a file of no task is claimed by its path; no separate claim of the task's file."""
+    f = '`finished=true`' if md else 'finished=true'
+    return (REGISTERED in text and 'Its files come with it' in text and 'Work only while you hold it.' in text
+            and f'release it with {f}' in text and 'A file that belongs to no task is claimed by its path' in text
+            and 'Then claim the file path the task names' not in text and 'Work only while you hold both' not in text)
+
+
 def test_layout():
     pj = load('../../plugin/.claude-plugin/plugin.json')
     check('plugin.json: name ctrlb-agent, version 0.2.0', pj.get('name') == 'ctrlb-agent' and pj.get('version') == '0.2.0')
@@ -198,10 +292,14 @@ def test_layout():
     check('marketplace.json: one entry, ctrlb-agent at ./plugin', len(ent) == 1 and ent[0]['name'] == 'ctrlb-agent'
           and ent[0]['source'] == './plugin')
     hk = load('../../plugin/hooks/hooks.json')['hooks']
-    events = {'SessionStart': 'session-start', 'SubagentStart': 'subagent-start', 'PreCompact': 'flush', 'SessionEnd': 'flush',
-              'Stop': 'upload', 'SubagentStop': 'upload', 'PreToolUse': 'pre-tool'}
+    events = {'SessionStart': 'session-start', 'SubagentStart': 'subagent-start', 'PreCompact': 'flush', 'SessionEnd': 'session-end',
+              'Stop': 'upload', 'SubagentStop': 'upload', 'PreToolUse': 'pre-tool', 'PostToolUse': 'post-tool',
+              'PostToolUseFailure': 'post-tool-failure'}
     ok = set(hk) == set(events) and all(hk[e][0]['hooks'][0]['command'].endswith('hook.py" ' + m) for e, m in events.items())
-    check('hooks.json: the six hooks plus PreToolUse, each with its mode', ok, ','.join(sorted(hk)))
+    check('hooks.json: the six hooks plus PreToolUse, PostToolUse and PostToolUseFailure, each with its mode (SessionEnd: session-end)',
+          ok, ','.join(sorted(hk)))
+    check('hooks.json: PostToolUse matcher is the ctrlb claim, handoff and release tools',
+          hk['PostToolUse'][0].get('matcher') == 'mcp__ctrlb__claim|mcp__ctrlb__handoff|mcp__ctrlb__release')
     check('hooks.json: PreToolUse matcher Edit|Write|MultiEdit|NotebookEdit',
           hk['PreToolUse'][0].get('matcher') == 'Edit|Write|MultiEdit|NotebookEdit')
     check('hooks.json: every command runs python3 -I', all(h['command'].startswith('python3 -I ') for e in hk.values() for g in e for h in g['hooks']))
@@ -215,8 +313,12 @@ def test_layout():
     check('skills setup, recall, relay have front matter with their names',
           all(s.startswith('---\n') and f'\nname: {n}\n' in s for n, s in skills.items()))
     relay = skills['relay']
-    check('relay skill: run id argument and the three rules', '$ARGUMENTS' in relay and all(f'\n{i}. ' in relay for i in (1, 2, 3))
-          and 'call `claim` with the file path' in relay and 'finished=true' in relay)
+    check('relay skill: run id argument and the three rules', '$ARGUMENTS' in relay and all(f'\n{i}. ' in relay for i in (1, 2, 3)))
+    check('relay skill: rule 3 claims the registered task, its files come with it', registered_rule(relay, md=True))
+    check('relay skill: files handed back with the task; unknown_task; reopen a finished task',
+          'its files are handed back with it' in relay and 'Finish tasks, just release files' in relay
+          and 'A file is never finished' in relay and '`reopen=true`' in relay and 'call `release` with `finished=true`' not in relay
+          and '`reason: unknown_task`' in relay and '`suggestion`' in relay and '`paths`' in relay)
     check('no stdio recall server shipped', not glob.glob(os.path.join(ROOT, '**', 'recall_mcp.py'), recursive=True))
     check('plugin/lib and plugin/bin point at the shared lib and bin',
           os.path.realpath(os.path.join(ROOT, 'plugin', 'lib')) == os.path.join(ROOT, 'lib')
@@ -240,8 +342,10 @@ def test_no_secrets_in_repo():
     check('no real URL in the repo (placeholders only)', not urls, ', '.join(urls))
     words = ['black' + 'bo' + 'ard', 'bo' + 'ard', 'sw' + 'arm', 'lo' + 'ck', 'lo' + 'cks', 'lo' + 'cked']   # split: this file is scanned too
     banned = re.compile(r'(?i)\b(' + '|'.join(words) + r')\b')
+    # research/ is the research code under its own names (research/relay/README.md); it is scanned for secrets and URLs above
     named = sorted({os.path.relpath(f, ROOT) for f in files + [os.path.abspath(__file__)]
-                    if not f.endswith('relay-plan.md') and banned.search(open(f, errors='replace').read())})
+                    if not f.endswith('relay-plan.md') and not os.path.relpath(f, ROOT).startswith('research' + os.sep)
+                    and banned.search(open(f, errors='replace').read())})
     check('product names only: none of the retired research names outside the plan copy', not named, ', '.join(named))
 
 
@@ -257,7 +361,25 @@ def test_hooks(seeker):
     ctx = o.get('additionalContext', '')
     check('session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {SID}' in ctx and f'run id is {SID}' in ctx and f'agent id is {SID}' in ctx and p.returncode == 0)
-    check('session-start: tells the agent to claim the file path a task names', 'claim with the file path the task names' in ctx)
+    check('session-start: claims the registered task, its files come with it, holds one claim', registered_rule(ctx))
+    check('session-start: refusals, unknown_task, reopen a finished task',
+          'held is false with finished_by, the task is done' in ctx and 'held is false with held_by, another agent has it' in ctx
+          and 'If reason is unknown_task, claim again with the suggestion' in ctx and 'claim its name with reopen=true' in ctx)
+    check('session-start: slots for things that are not files', 'is claimed as slot:<name> and released when you are done with it' in ctx
+          and ctx.index('slot:<name>') < ctx.index('reopen=true'))
+    check('relay skill and tools: slots, two-minute lease, never finished',
+          'claimed as `slot:<name>` and released when you are done with it' in open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+          and all(n in open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read() for n in
+                  ('## Slots', '`slot:devserver`', '`slot:port-3000`', '`slot:db-migrate`', '`slot:screenshots`', '`slot:commit`', 'lasts two minutes')))
+    check('session-start: names the relay tools, contract and contracts among them',
+          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts)' in ctx)
+    check('session-start: the coordination tools before a prose note, one sentence each',
+          'Use the coordination tools before a prose note: handoff when you must leave a task you hold, so it moves to the agent '
+          'you name in one step; ask when you are blocked on something only another agent or the orchestrator can decide; '
+          "answer, with the question's id, when you can settle an open question; contract when you finish an interface others "
+          'will build on (a type, a route, a config shape), with its name, the shape in a few lines and the files that define '
+          "it. Before you build on a contract, read it with `contracts`. If it is stale, read the file it names and check your "
+          "assumptions against it. Post a note only for what none of them covers." in ctx)
     check('session-start under 1 s', dt < 1.0, f'{dt:.2f}s')
     p, _ = hook('session-start', I['session_start_compact'], dict(env, CTRLB_RUN='relay-run-7', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
@@ -338,6 +460,11 @@ def test_hooks(seeker):
     check('no planted secret reaches Seeker (body and command)', not leaked and len(seeker.rows) == 3,
           f'leaked {leaked}' if leaked else f"{sent.count('[REDACTED]')} redactions")
     check('non-secret token counts kept', '\\"input_tokens\\": 1234' in sent)
+    import redact as _redact
+    pre = [_redact.redact(t)[1] for t in ('aws_secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"',
+                                          'db_password: hunter2hunter', 'password=$PW', 'api_key=<your key>',
+                                          'the access key rotation doc')]
+    check('prefixed lower-case secret assignments are redacted (round 8: aws_secret_access_key = "...")', pre == [1, 1, 0, 0, 0], str(pre))
 
     # user_name comes only from the key's own user (its email claim); CTRLB_USER is the agent label
     seeker.reset()
@@ -456,6 +583,29 @@ def test_pre_tool(seeker):
         p, _ = run('enforce', name)
         check(f'pre-tool {name[9:]}: path checked and denied', seeker.calls and seeker.calls[0]['body']['paths'] == [want]
               and out_of(p).get('permissionDecision') == 'deny')
+    # Fencing (decision 21): lapsed, unheld and stale_round name the reason and the claim call.
+    for state, said in (('enforce_lapsed', 'your lease on src/panels/Latency.tsx ran out at'),
+                        ('enforce_unheld', 'src/panels/Latency.tsx is not held; claim it before editing (unheld)'),
+                        ('enforce_stale_round', 'you held task 07 latency in round 1; round 2 belongs to agent-b (stale_round)')):
+        p, _ = run(state)
+        reason = out_of(p).get('permissionDecisionReason', '')
+        check(f'pre-tool {state[8:]}: deny naming the reason and the claim call', out_of(p).get('permissionDecision') == 'deny'
+              and said in reason and f'Call claim(resource="src/panels/Latency.tsx", run_id="{SID}", agent="{SID}")' in reason, reason[:200])
+    p, _ = run('advisory_unheld')
+    o = out_of(p)
+    check('pre-tool advisory unheld: context, not a deny', 'permissionDecision' not in o and '(unheld)' in o.get('additionalContext', ''))
+    # Tokens: a claim's answer seen after the tool is kept, sent with the check, dropped by the release.
+    seeker.reset()
+    p, _ = hook('post-tool', I['post_tool_claim'], env)
+    check('post-tool claim: no output, no Seeker call', p.returncode == 0 and not p.stdout.strip() and not seeker.calls)
+    run('allow')
+    body = seeker.calls[0]['body'] if seeker.calls else {}
+    check('pre-tool sends the token of the held task for its file', body.get('tokens') == {'src/panels/Latency.tsx': 'tok-round-1'},
+          json.dumps(body))
+    hook('post-tool', I['post_tool_release'], env)
+    run('allow')
+    body = seeker.calls[0]['body'] if seeker.calls else {}
+    check('post-tool release drops the tokens', 'tokens' not in body, json.dumps(body))
     p, _ = run('enforce', 'pre_tool_subagent_edit', dict(env, CTRLB_RUN='relay-run-7'))
     c = seeker.calls[0] if seeker.calls else {}
     check('pre-tool in a subagent: CTRLB_RUN in the route, agent-<id> as agent', c.get('path') == '/ai/relay/agent_sessions/runs/relay-run-7/check'
@@ -504,6 +654,75 @@ def test_docs():
           str(sorted(set(rows[0]) ^ COLS)) if rows else 'no body')
 
 
+def test_release_wording():
+    """Seeker never finishes a file path (relay-plan decision 15): no agent-facing text may tell agents to release
+    with finished=true as the rule for every claim, and the tool docs carry reopen."""
+    old = re.compile(r'(call|then) `?release`? with `?finished=true`?', re.I)
+    # research/: the harness keeps the rules its earlier arms were measured with, word for word
+    files = [f for f in glob.glob(os.path.join(ROOT, '**', '*'), recursive=True)
+             if os.path.isfile(f) and f.endswith(('.md', '.py', '.json')) and '/tests/' not in f and '/.git/' not in f
+             and not f.endswith('relay-plan.md') and not os.path.relpath(f, ROOT).startswith('research' + os.sep)]
+    bad = [os.path.relpath(f, ROOT) for f in files if old.search(open(f, errors='replace').read())]
+    check('no agent-facing text says to release with finished=true for every claim', not bad, ', '.join(bad))
+    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
+    check('relay-tools: claim documents reopen and release says files are always handed back',
+          '| `reopen` |' in tools and '"reopened": true' in tools and 'A file path is always handed back' in tools)
+    lim = open(os.path.join(ROOT, 'docs', 'limits.md')).read()
+    check('limits: a file path is never done; reopen starts a new round; no "use a new run id"',
+          'A file path is never done' in lim and 'reopen=true' in lim and 'use a new run id' not in lim)
+
+
+def test_briefs_wording():
+    """Briefs (Seeker relay-plan decision 16): the skill and the tool docs tell the agent to read the brief of a
+    shared file before reading the file, and to leave one after reading a file it edits or others need."""
+    skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+    check('relay skill: lists the relay tools, ask and answer among them; ask rather than a QUESTION note',
+          '`peers`, `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `briefs`, `tasks`, `contract`, `contracts`' in skill
+          and 'Use the coordination tools before a prose note (`post`)' in skill
+          and '- `handoff` when you must leave a task you hold' in skill
+          and '- `ask` when you are blocked on something only another agent or the orchestrator can decide. Do not post a QUESTION note.' in skill
+          and "- `answer`, with the question's id, when you can settle an open question" in skill
+          and '- `contract` when you finish an interface others will build on' in skill
+          and "- `contracts` before you build on another agent's interface" in skill
+          and 'Post a note only for what none of them covers.' in skill)
+    check('relay-tools: the coordination tools come before a prose note',
+          'The coordination tools come before a prose note (`post`)' in open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read())
+    check('relay skill: call briefs before reading a shared file, post a brief after reading one',
+          'call `briefs` with it' in skill and 'post a `brief` for it' in skill and 'up to a few hundred words' in skill
+          and 'what it exports or decides, and what not to touch' in skill and 'not a claim and reserves nothing' in skill)
+    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
+    sections = re.findall(r'^### (\w+)$', tools, re.M)
+    relay = sections[sections.index('peers'):] if 'peers' in sections else []
+    check('relay-tools: fourteen relay tools, handoff, ask and answer after release, then brief, briefs, task, tasks, history, contract, contracts',
+          relay == ['peers', 'post', 'claim', 'release', 'handoff', 'ask', 'answer', 'brief', 'briefs', 'task', 'tasks', 'history', 'contract', 'contracts'],
+          ','.join(relay))
+    check('relay-tools: contract and contracts documented, instead of a CONTRACT note',
+          '{contracts: [{name, key, agent, ts, age_s, text, paths, changed_since, text_since, text_changed_at?, changed_since_read?}], last_read?, read_at?}' in tools
+          and 'instead of a `CONTRACT:` note' in tools
+          and 'changed_since?}]}' in tools)
+    check('relay-tools: peers kind and open, ask and answer documented',
+          '| `open` |' in tools and 'peers(kind="question", open=true)' in tools and 'answered: {agent, ts, text}' in tools
+          and 'Answer: `{id, run_id, agent}`' in tools and 'Do not post a QUESTION note' in tools)
+    check('relay-tools: hold required, its four reasons and the claim token',
+          '## Edits need a claim (hold required)' in tools and all(f'| `{r}` |' in tools for r in ('held', 'lapsed', 'unheld', 'stale_round'))
+          and 'A held claim answers `token`' in tools)
+    check('relay-tools: handoff documents to, handed and held_by',
+          '| `to` |' in tools and '{handed: true, resource, key, to, lease_until, token, paths?}' in tools
+          and '{handed: false, resource, key, to, held_by?, message}' in tools)
+    check('relay-tools: eighteen tools, the writes listed, briefs answers the newest brief per key',
+          'gives an agent eighteen tools' in tools and '`post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `task` and `contract` write' in tools
+          and '{briefs: [{key, resource, agent, text, ts, age_s, paths?, changed_since?}]}' in tools and '`BRIEF` for a brief' in tools)
+    check('relay-tools: the briefs paragraph for the rules', 'call briefs for it and read the brief first' in tools)
+    check('relay-tools: rule 3 claims the registered task with its files, and finishes it', registered_rule(tools))
+    check('relay-tools: claim documents paths, conflict_key and unknown_task; task and tasks documented',
+          '| `paths` |' in tools and '"conflict_key"' in tools and '"reason": "unknown_task"' in tools and '"suggestion"' in tools
+          and '{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round, ask_about?}]}' in tools)
+    http = open(os.path.join(ROOT, 'docs', 'connect-http.md')).read()
+    check('connect-http: both briefs routes as curl',
+          '-X POST "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/briefs"' in http
+          and '/runs/demo-run-1/briefs?resources=' in http and '`brief` and `briefs`' in http)
+
+
 def test_keys():
     """lib/paths.py against Seeker's shared table (tests/fixtures/keys.json, Task 2), and the edit paths the hooks and
     parsers send against the same keys."""
@@ -512,8 +731,24 @@ def test_keys():
     bad = [c for c in cases if paths.key(c['resource'], c['cwd'])[0] != c['key']]
     check(f'paths.key passes Seeker keys.json ({len(cases)} cases)', len(cases) >= 40 and not bad,
           '; '.join(f"{c['resource']!r},{c['cwd']!r} -> {paths.key(c['resource'], c['cwd'])[0]!r} want {c['key']!r}" for c in bad[:5]))
-    check('paths.key: kind is path or name as the key says', all(paths.key(c['resource'], c['cwd'])[1] == c['key'].split(':', 1)[0] for c in cases))
-    check('paths.key is idempotent on its own keys', all(paths.key(paths.key(c['resource'], c['cwd'])[0], c['cwd'])[0] == c['key'] for c in cases))
+    check('paths.key: kind is the table row of the key\'s prefix ("" for an invalid resource)',
+          all(paths.key(c['resource'], c['cwd'])[1] == (paths.kind_of(c['key'])['kind'] if c['key'] else '') for c in cases))
+    check('paths.key is idempotent on its own keys', all(paths.key(paths.key(c['resource'], c['cwd'])[0], c['cwd'])[0] == c['key']
+                                                         for c in cases if c['key']))
+    check('keys.json: lib/keys.json (read at run time) is tests/fixtures/keys.json byte for byte',
+          open(os.path.join(ROOT, 'lib', 'keys.json'), 'rb').read() == open(os.path.join(FIX, 'keys.json'), 'rb').read())
+    kinds = {k['prefix']: k for k in paths.KINDS}
+    check('kinds table: path, name, slot, contract with the decided columns',
+          sorted(kinds) == ['contract:', 'name:', 'path:', 'slot:']
+          and kinds['path:']['checked_by_hook'] and not kinds['path:']['finishable']
+          and kinds['name:']['finishable'] and kinds['name:']['reopenable']
+          and kinds['slot:']['leasable'] and kinds['slot:']['default_lease_s'] == 120 and not kinds['slot:']['finishable']
+          and not kinds['contract:']['leasable'])
+    check('kinds: slot lease 120 s, path and name the setting', paths.lease_seconds_for('slot:devserver', 600) == 120
+          and paths.lease_seconds_for('path:a.go', 600) == 600 and paths.lease_seconds_for('name:t', 600) == 600)
+    check('keys: slot:devserver, contract:..., Slot:X is a name, slot: is invalid',
+          paths.key('slot:devserver') == ('slot:devserver', 'slot') and paths.key('contract:seeker-4 routes') == ('contract:seeker-4 routes', 'contract')
+          and paths.key('Slot:X') == ('name:slot:x', 'name') and paths.key('slot:') == ('', ''))
     file_cases = [c for c in cases if c['key'].startswith('path:') and c['key'] != 'path:'
                   and not c['resource'].strip().startswith(('path:', 'name:'))]
     check('edit_path: Seeker keys what the package sends as the key of the path itself',
@@ -800,7 +1035,13 @@ def test_codex_hooks(seeker):
     ctx = o.get('additionalContext', '')
     check('codex session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {CSID}' in ctx and f'run id is {CSID}' in ctx and f'agent id is {CSID}' in ctx and p.returncode == 0, f'{dt:.2f}s')
-    check('codex session-start: tells the agent to claim the file path a task names', 'claim with the file path the task names' in ctx)
+    check('codex session-start: claims the registered task, its files come with it', registered_rule(ctx))
+    check('codex session-start: names the relay tools, ask and answer among them',
+          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts)' in ctx
+          and 'Use the coordination tools before a prose note: handoff when' in ctx and '; ask when you are blocked' in ctx)
+    check('codex session-start: slots', 'slot:<name>' in ctx)
+    check('codex session-start: release it finished; reopen a finished task',
+          'release it with finished=true' in ctx and 'claim its name with reopen=true' in ctx)
     p, _ = chook('session-start', I['session_start'], dict(env, CTRLB_RUN='relay-run-8', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
     check('codex session-start: CTRLB_RUN and CTRLB_AGENT win', 'run id is relay-run-8' in ctx and 'agent id is builder-1' in ctx)
@@ -843,6 +1084,10 @@ def test_codex_hooks(seeker):
           o.get('permissionDecision') == 'deny' and 'agent-b' in reason and p.returncode == 0
           and f'claim(resource="src/panels/Latency.tsx", run_id="{CSID}", agent="{CSID}")' in reason, reason[:160])
     check('codex pre-tool never answers ask', '"ask"' not in p.stdout)
+    p, _ = run('enforce_lapsed')
+    reason = out_of(p).get('permissionDecisionReason', '')
+    check('codex pre-tool lapsed: deny naming the reason and the claim call', out_of(p).get('permissionDecision') == 'deny'
+          and '(lapsed)' in reason and f'Call claim(resource="src/panels/Latency.tsx", run_id="{CSID}", agent="{CSID}")' in reason, reason[:160])
     p, _ = run('enforce_allow')
     check('codex pre-tool enforce with no conflict: no output', not p.stdout.strip())
     p, _ = run('self', e=dict(env, CTRLB_AGENT=SID))      # the 'self' answer names SID as the holder
@@ -946,7 +1191,7 @@ def test_codex_install():
     check('install: the key is never written; bearer_token_env_var names CTRLB_KEY', KEY not in first
           and 'bearer_token_env_var = "CTRLB_KEY"' in first and 'env_http_headers = { "X-CtrlB-Run" = "CTRLB_RUN", "X-CtrlB-Agent" = "CTRLB_AGENT" }' in first)
     hook_cmd = f'python3 -I \\"{os.path.realpath(CODEX_HOOK)}\\"'
-    want = {'SessionStart': 'session-start', 'SubagentStart': 'subagent-start', 'PreCompact': 'flush', 'SessionEnd': 'flush',
+    want = {'SessionStart': 'session-start', 'SubagentStart': 'subagent-start', 'PreCompact': 'flush', 'SessionEnd': 'session-end',
             'Stop': 'upload', 'SubagentStop': 'upload', 'PreToolUse': 'pre-tool'}
     check('install: [[hooks.<Event>]] for the seven events, each calling codex/hook.py with its mode',
           all(f'[[hooks.{e}]]\n' in first and f'[[hooks.{e}.hooks]]\ntype = "command"\ncommand = "{hook_cmd} {m}"' in first
@@ -1031,6 +1276,657 @@ def test_validate():
               (v.stdout + v.stderr).strip().splitlines()[-1][:200] if (v.stdout + v.stderr).strip() else '')
 
 
+def test_wait_wording():
+    """Round 3 (Seeker relay-plan decisions 25, 27, 28, 29), as round 6 (decisions 35 and 37) left it: claim no longer
+    waits (wait_s is gone from claim; a refused task claim lists free_tasks), so the session rule, the relay skill and
+    the tool docs never offer claim(wait_s), timed_out or a place in line; peers keeps wait_s. They keep what
+    belongs_to_task means, ask_about, and contracts (now: read it before building on it, and check a stale one)."""
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import hooks_shared as H
+    rule = H.RELAY
+    check('relay rule v9: no wait_s, no waiting in line on a claim', 'wait_s' not in rule and 'wait in line' not in rule.replace('Never wait in line', ''))
+    check('relay rule: belongs_to_task means claim the task it names', 'If reason is belongs_to_task' in rule and 'claim that task (task in the answer)' in rule)
+    check('relay rule v9: read a contract before building on it; a stale one means read its file',
+          'Before you build on a contract, read it with `contracts`. If it is stale, read the file it names and check your '
+          'assumptions against it.' in rule)
+    check('relay rule: ask about a task\'s ask_about', 'If the claim answers ask_about' in rule)
+    skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+    check('relay skill: no claim wait_s, timed_out or position; free_tasks explained',
+          'Claim with `wait_s=30`' not in skill and 'timed_out' not in skill and '`position`' not in skill
+          and not [ln for ln in skill.splitlines() if 'wait_s' in ln and 'claim(' in ln] and '`free_tasks`' in skill
+          and '(`free_tasks: []`), post a note saying you have no task and stop' in skill)
+    check('relay skill: belongs_to_task, ask_about, changed_since_read, stale, peers wait_s',
+          '`reason: belongs_to_task`' in skill and '`ask_about`' in skill and '`changed_since_read`' in skill
+          and 'If it is `stale`' in skill and 'peers(kind="answer", since=<ts>, wait_s=30)' in skill)
+    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
+    claim_doc = tools[tools.index('### claim'):tools.index('### release')]
+    check('relay-tools: claim has no wait_s argument and no timed_out answer; a claim sending wait_s gets 400 naming peers',
+          '| `wait_s` |' not in claim_doc and '"reason": "timed_out"' not in tools and '"position"' not in tools
+          and 'A claim that sends `wait_s` is refused (HTTP 400)' in claim_doc and 'use peers with wait_s' in claim_doc)
+    check('relay-tools: the refused task claim lists free_tasks with since; the empty list means stop',
+          '"free_tasks": [{"name": "task 05 mode"' in claim_doc and '"since": 1793000100000000' in claim_doc
+          and '`there is no free task in this run`' in claim_doc and '`idle_agents`' in claim_doc)
+    check('relay-tools: belongs_to_task answer and ask_about',
+          '"reason": "belongs_to_task"' in tools and '"task": "task 03 median"' in tools and '"ask_about"' in tools)
+    check('relay-tools: peers since and wait_s, task ask_about, contracts since',
+          '| `since` | Only events after this' in tools and '| `wait_s` | When no event matches yet' in tools
+          and '| `ask_about` |' in tools and '| `since` | When you last read the contracts' in tools)
+
+
+def test_takeover_wording():
+    """Round 5 (Seeker decisions 33 and 34): the v8 rule text and the relay skill tell the agent to take over a stalled
+    task (or a file held by an agent that stopped) with takeover=true instead of waiting in line; the tool docs give
+    takeover, not_stalled, other_user, taken_over_from and stall; a held refusal of an edit carries the takeover hint;
+    a held takeover's token is kept like a claim's."""
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import hooks_shared as H
+    rule = H.RELAY
+    v8 = ("If tasks shows a task you need as stalled, claim it with takeover=true, read its evidence and notes, and "
+          "continue it. Never wait in line on a stalled task. If a file you need is held by an agent that has stopped, "
+          "the hold shows as stalled; take it over the same way.")
+    check('relay rule v8: take over a stalled task or file, never wait in line on it', v8 in rule)
+    check('relay rule v8: the claim(wait_s=30) sentence is gone, every other sentence kept',
+          'wait_s' not in rule and registered_rule(rule) and 'If reason is belongs_to_task' in rule
+          and "Before you build on a contract, read it with `contracts`. If it is stale, read the file it names" in rule and 'If the claim answers ask_about' in rule
+          and "Run the task's test command" in rule and rule.index('another agent has it: pick another') < rule.index(v8))
+    skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+    check('relay skill: takeover=true on a stalled task or file, not_stalled, other_user, taken_over_from',
+          'claim it with `takeover=true`' in skill and 'Never wait in line on a stalled task' in skill
+          and '`reason: not_stalled`' in skill and '`reason: other_user`' in skill and '`taken_over_from`' in skill)
+    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
+    check('relay-tools: takeover argument and its answers',
+          '| `takeover` |' in tools and '"taken_over_from": "agent-b"' in tools and '"reason": "not_stalled"' in tools
+          and '`reason: other_user`' in tools and '"stall_after_s": 300' in tools and '`stalled_holds`' in tools)
+    check('pre-tool hint: a held refusal suggests takeover=true when the holder has stopped',
+          'takeover=true' in H.STALLED_HINT and 'stalled' in H.STALLED_HINT)
+    got = H.record_tokens('run-takeover', 'agent-a', 'mcp__ctrlb__claim',
+                          {'held': True, 'key': 'name:task 03 median', 'paths': ['path:src/median.py'],
+                           'token': 'tok-1', 'taken_over_from': 'agent-b'})
+    check('post-tool: a held takeover keeps its token for the task and its files like a claim',
+          sorted(got) == ['name:task 03 median', 'path:src/median.py']
+          and common.TokenState('run-takeover', 'agent-a').get(['name:task 03 median']) == {'name:task 03 median': 'tok-1'})
+
+
+def test_done_evidence(seeker):
+    """Seeker decisions 30 to 32: the v7 rule text tells the agent to run the task's test command and give it, its
+    exit code and its last output line as the done evidence (the check it ran when the task has none); the
+    PostToolUse hook remembers the agent's last test-looking Bash command, its exit code and last output line, and when
+    done (or a finished release) is refused for evidence it quotes that command, without calling Seeker or filling the
+    evidence in, and prefers the task's test command when the refusal quotes it; a done drops the agent's tokens
+    like a release."""
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import hooks_shared as H
+    rule = H.RELAY
+    v7 = ("Run the task's test command (tasks and claim show it as test); when it passes, call done on the task name "
+          "with that command, its exit code and its last output line as the evidence. When the task has no test "
+          "command, give the check you ran. A task is finished only when the record shows what was checked.")
+    check('relay rule v7: run the task\'s test command and give it as the done evidence; the check you ran when there is none',
+          v7 in rule)
+    check('relay rule v7: the v6 sentence is replaced', "call done on the task name with the command you ran and its result" not in rule)
+    check('relay rule v7: every earlier sentence kept (v8 drops the wait_s one)', registered_rule(rule)
+          and 'If reason is belongs_to_task' in rule and "Before you build on a contract, read it with `contracts`. If it is stale, read the file it names" in rule and 'If the claim answers ask_about' in rule
+          and rule.index('release it with finished=true') < rule.index(v7))
+    tests = ['pytest -q tests/test_x.py', 'python -m pytest', 'python3 -m unittest discover', 'cd app && go test ./...',
+             'npm test', 'npm run test -- --watch=false', 'cargo test --quiet', 'make test', 'make -C sub test', 'python -m unittest -v']
+    not_tests = ['ls -la', 'pip install pytest', 'npm install', 'cat pytest.ini', 'go build ./...', 'make build', 'git status']
+    check('test commands: pytest, unittest, go test, npm test, cargo test, make test are tests',
+          all(H.is_test_command(c) for c in tests), ', '.join(c for c in tests if not H.is_test_command(c)))
+    check('test commands: installs, reads and builds are not', not any(H.is_test_command(c) for c in not_tests),
+          ', '.join(c for c in not_tests if H.is_test_command(c)))
+    check('bash result: stdout object is exit 0 with the last line; an error text carries its exit code',
+          H.bash_result({'stdout': 'a\n3 passed in 0.01s\n\n', 'stderr': ''}) == (0, '3 passed in 0.01s')
+          and H.bash_result('Error: Exit code 2\nE   assert 1 == 2\nFAILED t.py') == (2, 'FAILED t.py')
+          and H.bash_result('Exit code 1\nboom') == (1, 'boom'))
+
+    home = os.path.join(WORK, 'home-done')
+    shutil.rmtree(home, ignore_errors=True)
+    env = base_env(seeker.url, home)
+    base = {'session_id': SID, 'transcript_path': '', 'cwd': '/work/dash', 'hook_event_name': 'PostToolUse'}
+    seeker.reset()
+    p, _ = hook('post-tool', dict(base, tool_name='Bash', tool_use_id='b1', tool_input={'command': 'pytest -q tests/test_lat.py'},
+                                  tool_response={'stdout': '...\n4 passed in 0.03s\n', 'stderr': '', 'interrupted': False}), env)
+    check('post-tool Bash test: no output, no Seeker call', p.returncode == 0 and not p.stdout.strip() and not seeker.calls, p.stdout + p.stderr)
+    hook('post-tool', dict(base, tool_name='Bash', tool_use_id='b2', tool_input={'command': 'ls src'}, tool_response={'stdout': 'a.py'}), env)
+    refusal = {'done': False, 'resource': 'task 07 latency', 'key': 'name:task 07 latency', 'reason': 'evidence_required',
+               'message': 'say which command you ran and its exit code'}
+    done_in = dict(base, tool_name='mcp__ctrlb__done', tool_use_id='d1', tool_input={'resource': 'task 07 latency'},
+                   tool_response=[{'type': 'text', 'text': json.dumps(refusal)}])
+    p, _ = hook('post-tool', done_in, env)
+    ctx = out_of(p).get('additionalContext', '')
+    check('post-tool done refused for evidence: quotes the last test command, its exit code and the call to make',
+          out_of(p).get('hookEventName') == 'PostToolUse' and '`pytest -q tests/test_lat.py` (exit code 0)' in ctx
+          and 'done(resource="task 07 latency"' in ctx and '"summary": "4 passed in 0.03s"' in ctx and 'ls src' not in ctx, ctx[:300])
+    check('post-tool done refused: Seeker is not called and nothing is filled in for the agent', not seeker.calls)
+    # A failing run that only the transcript shows (no PostToolUse for it) is newer: it is the one quoted.
+    tr = os.path.join(WORK, 'done-transcript.jsonl')
+    with open(tr, 'w') as fh:
+        fh.write(json.dumps({'type': 'assistant', 'timestamp': '2099-01-01T00:00:00.000Z', 'message': {'role': 'assistant', 'content': [
+            {'type': 'tool_use', 'id': 'x1', 'name': 'Bash', 'input': {'command': 'go test ./...'}}]}}) + '\n')
+        fh.write(json.dumps({'type': 'user', 'timestamp': '2099-01-01T00:00:01.000Z', 'message': {'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'x1', 'is_error': True, 'content': 'Exit code 1\n--- FAIL: TestLat\nFAIL\tdash/lat'}]}}) + '\n')
+    p, _ = hook('post-tool', dict(done_in, transcript_path=tr), env)
+    ctx = out_of(p).get('additionalContext', '')
+    check('post-tool done refused: a newer failing run in the transcript is quoted with its exit code',
+          '`go test ./...` (exit code 1)' in ctx and 'otherwise run the task\'s test first' in ctx, ctx[:300])
+    rel_in = dict(base, tool_name='mcp__ctrlb__release', tool_use_id='r1', tool_input={'resource': 'task 07 latency'},
+                  tool_response=[{'type': 'text', 'text': json.dumps({'released': 0, 'finished': False, 'resource': 'task 07 latency',
+                                                                      'key': 'name:task 07 latency', 'reason': 'evidence_required',
+                                                                      'deprecated': 'finished is replaced by done(resource)'})}])
+    p, _ = hook('post-tool', rel_in, env)
+    check('post-tool release refused for evidence: the same hint', '`pytest -q tests/test_lat.py` (exit code 0)' in out_of(p).get('additionalContext', ''))
+    fresh = base_env(seeker.url, os.path.join(WORK, 'home-done-empty'))
+    p, _ = hook('post-tool', done_in, fresh)
+    check('post-tool done refused with no test run seen: tells the agent to run the test first',
+          "Run the task's test, then call done(" in out_of(p).get('additionalContext', ''))
+    # Seeker decision 32: the refusal quotes the task's test command. It wins over a last test command that is not it.
+    task_test = 'python3 -m pytest tests/test_lat.py'
+    quoted = dict(refusal, test=task_test, message=refusal['message'] + "; the task's test command is: " + task_test)
+    p, _ = hook('post-tool', dict(done_in, transcript_path=tr, tool_response=[{'type': 'text', 'text': json.dumps(quoted)}]), env)
+    ctx = out_of(p).get('additionalContext', '')
+    check('post-tool done refused quoting the task\'s test: shows that test, not the last other test command',
+          f"The task's test command is `{task_test}`." in ctx and 'The last test command you ran, `go test ./...`, is not it.' in ctx
+          and f'"command": "{task_test}"' in ctx and '<its exit code>' in ctx, ctx[:400])
+    only_msg = dict(quoted)
+    del only_msg['test']
+    p, _ = hook('post-tool', dict(done_in, tool_response=[{'type': 'text', 'text': json.dumps(only_msg)}]), fresh)
+    ctx = out_of(p).get('additionalContext', '')
+    check('post-tool done refused: the test is read from the message when the answer has no test field',
+          f"The task's test command is `{task_test}`. Run it;" in ctx, ctx[:300])
+    hook('post-tool', dict(base, tool_name='Bash', tool_use_id='b3', tool_input={'command': 'cd /work/dash && ' + task_test + ' -q'},
+                           tool_response={'stdout': '...\n2 passed in 0.01s\n', 'stderr': ''}), fresh)
+    p, _ = hook('post-tool', dict(done_in, tool_response=[{'type': 'text', 'text': json.dumps(quoted)}]), fresh)
+    ctx = out_of(p).get('additionalContext', '')
+    check('post-tool done refused: a last test command that runs the task\'s test is quoted with its result',
+          f'`cd /work/dash && {task_test} -q` (exit code 0), the task\'s test' in ctx and '"summary": "2 passed in 0.01s"' in ctx, ctx[:400])
+    check('names_test: white space collapsed, a cd before and a flag after still match',
+          H.names_test('cd x &&  python3 -m pytest   tests/test_lat.py -q', task_test) and not H.names_test('python3 -I -c "x"', task_test)
+          and not H.names_test('pytest', ''))
+    # A done that finished the task: no output, and the task's tokens are dropped like a release's.
+    hook('post-tool', dict(base, tool_name='mcp__ctrlb__claim', tool_use_id='c1', tool_input={'resource': 'task 07 latency'},
+                           tool_response=[{'type': 'text', 'text': json.dumps({'held': True, 'key': 'name:task 07 latency',
+                                                                               'paths': ['path:src/panels/Latency.tsx'], 'token': 'tok-9'})}]), env)
+    tok_file = os.path.join(home, 'state', 'tokens-' + hashlib.sha1(f'{SID}\0{SID}'.encode()).hexdigest() + '.json')
+
+    def tokens():
+        try:
+            return json.load(open(tok_file))
+        except (OSError, ValueError):
+            return {}
+    had = tokens().get('path:src/panels/Latency.tsx')
+    p, _ = hook('post-tool', dict(done_in, tool_response=[{'type': 'text', 'text': json.dumps(
+        {'done': True, 'resource': 'task 07 latency', 'key': 'name:task 07 latency', 'paths': ['path:src/panels/Latency.tsx']})}]), env)
+    gone = tokens().get('path:src/panels/Latency.tsx')
+    check('post-tool done: no output, the task\'s tokens dropped', not p.stdout.strip() and had and not gone, f'{had} {gone}')
+    hk = load('../../plugin/hooks/hooks.json')['hooks']['PostToolUse']
+    check('hooks.json: a second PostToolUse group for Bash and the done tool', len(hk) == 3
+          and hk[1].get('matcher') == 'Bash|mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'
+          and hk[1]['hooks'][0]['command'].endswith('hook.py" post-tool'))
+    skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+    check('relay skill: done with evidence, evidence_required', 'call `done`' in skill and '`evidence`' in skill
+          and '`reason: evidence_required`' in skill)
+    check('relay skill: the task\'s test command shown by tasks and claim is the done evidence',
+          "Run the task's test command (`tasks` and `claim` show it as `test`)" in skill and 'give the check you ran' in skill
+          and 'When the refusal carries `test`' in skill)
+    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
+    check('relay-tools: done, its evidence and refusal, stalled tasks', '#### done (finish a task)' in tools and '| `evidence` |' in tools
+          and '"reason": "evidence_required"' in tools and '`stalled`' in tools)
+    check('relay-tools: task test, the claim and tasks answers, the refusal\'s test, evidence_matches_test',
+          '| `test` | Optional. The command that tests the task' in tools and '"test": "python3 -m pytest tests/test_median.py"' in tools
+          and "`test` when the task's registration names one" in tools and '`evidence_matches_test`' in tools and '`done_with_task_test`' in tools)
+
+
+def test_round6_hooks(seeker):
+    """Round 6 (Seeker decisions 36 and 38). The session-end hook hands off every hold of the agent in one call
+    (handoff all=true, no receiver) with a text from the session's own record (edited files, last test and exit code,
+    last note), then flushes; Seeker down or slow means nothing is written and the hook ends inside the SessionEnd
+    budget. Every Bash command is recorded with its exit code (PostToolUse and PostToolUseFailure). PreToolUse on done
+    witnesses the evidence: a matching command and exit code of this session adds witnessed=true (and a missing exit
+    code), a mismatch is denied naming what the hook saw, no evidence command gives no output, and a witnessed the
+    agent set itself is dropped."""
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import hooks_shared as H
+    rule = H.RELAY
+    check('relay rule v9: redirect to a free task; an empty list means note and stop',
+          'If a claim is refused and the answer lists free tasks, claim one of them next. If the list is empty, post a note '
+          'saying you have no task and stop.' in rule and 'wait_s' not in rule)
+    # Rule v10 (round 8) drops the v9 REGISTRY.md sentence: the hooks claim autoSlots files (test_round8_hooks).
+    check('relay rule v10: the v9 REGISTRY.md slot sentence is gone (the hooks handle it)',
+          'Edit REGISTRY.md only between' not in rule and 'REGISTRY.md' not in rule)
+    home = os.path.join(WORK, 'home-r6')
+    shutil.rmtree(home, ignore_errors=True)
+    run = 'run-r6'
+    env = base_env(seeker.url, home, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    base = {'session_id': SID, 'transcript_path': '', 'cwd': '/work/dash'}
+    post = dict(base, hook_event_name='PostToolUse')
+    seeker.reset()
+    hook('post-tool', dict(post, tool_name='Edit', tool_input={'file_path': '/work/dash/src/lat.py', 'old_string': 'a', 'new_string': 'b'},
+                           tool_response={'filePath': '/work/dash/src/lat.py'}), env)
+    hook('post-tool', dict(post, tool_name='Write', tool_input={'file_path': '/work/dash/tests/test_lat.py', 'content': 'x'},
+                           tool_response={'filePath': '/work/dash/tests/test_lat.py', 'type': 'create'}), env)
+    hook('post-tool', dict(post, tool_name='Bash', tool_input={'command': 'ls src'}, tool_response={'stdout': 'lat.py\n', 'stderr': ''}), env)
+    p, _ = hook('post-tool-failure', dict(base, hook_event_name='PostToolUseFailure', tool_name='Bash',
+                                          tool_input={'command': 'python3 -m pytest tests/test_lat.py'},
+                                          error='Exit code 1\nE   assert 2 == 3\n1 failed in 0.02s', is_interrupt=False), env)
+    check('post-tool-failure Bash: no output, exits 0, no Seeker call', p.returncode == 0 and not p.stdout.strip() and not seeker.calls)
+    hook('post-tool', dict(post, tool_name='mcp__ctrlb__post', tool_input={'text': 'lat: half done, p99 left', 'run_id': run},
+                           tool_response=[{'type': 'text', 'text': '{"ok": true}'}]), env)
+    saved, common.HOME = common.HOME, home        # read the record the hooks wrote under their CTRLB_HOME
+    try:
+        rec = common.SessionRecord(run, 'agent-1').get(SID)
+    finally:
+        common.HOME = saved
+    check('session record: every Bash command with its exit code (a failure from PostToolUseFailure), edits relative, the note',
+          [(b['command'], b['exit_code']) for b in rec['bash']] == [('ls src', 0), ('python3 -m pytest tests/test_lat.py', 1)]
+          and rec['bash'][1]['summary'] == '1 failed in 0.02s' and rec['edited'] == ['src/lat.py', 'tests/test_lat.py']
+          and rec['note']['text'] == 'lat: half done, p99 left', json.dumps(rec)[:300])
+    p, dt = hook('session-end', dict(base, hook_event_name='SessionEnd', reason='other'), env)
+    calls = [c for c in seeker.calls if c['path'].endswith('/handoffs')]
+    body = calls[0]['body'] if calls else {}
+    check('session-end: one handoff call, all=true, no receiver, the agent; the path names the run',
+          len(calls) == 1 and body.get('all') is True and body.get('to') == '' and body.get('agent') == 'agent-1'
+          and calls[0]['path'] == f'/ai/relay/{common.DEFAULT_DATASET}/runs/{run}/handoffs', json.dumps(calls)[:300])
+    text = body.get('text') or ''
+    check('session-end: the text names the edited files, the last test and its exit code, and the last note',
+          'Edited: src/lat.py, tests/test_lat.py.' in text and '`python3 -m pytest tests/test_lat.py` exit 1' in text
+          and '1 failed in 0.02s' in text and 'Last note: lat: half done, p99 left' in text and len(text) <= 1500, text)
+    check('session-end: exits 0 with no output', p.returncode == 0 and not p.stdout.strip())
+    order = [c['path'].rsplit('/', 1)[-1] for c in seeker.calls]
+    check('session-end: the handoff goes before the transcript flush', order and order[0] == 'handoffs', ','.join(order))
+    seeker.reset()
+    seeker.state['handoff'] = 'slow'
+    p, dt = hook('session-end', dict(base, hook_event_name='SessionEnd', reason='other'), env)
+    seeker.state['handoff'] = 'ok'
+    check('session-end, Seeker slow: gives up inside the 1.5 s SessionEnd budget, exits 0 quietly',
+          p.returncode == 0 and not p.stdout.strip() and not p.stderr.strip() and dt < 1.5, f'{dt:.2f}s')
+    down = base_env(f'http://127.0.0.1:{closed_port()}', home, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    p, dt = hook('session-end', dict(base, hook_event_name='SessionEnd', reason='other'), down)
+    check('session-end, Seeker down: nothing written, exits 0 quietly, fast', p.returncode == 0 and not p.stdout.strip()
+          and not p.stderr.strip() and dt < 1.5, f'{dt:.2f}s')
+    seeker.reset()
+    plain = base_env(seeker.url, os.path.join(WORK, 'home-r6-plain'))
+    hook('session-end', dict(base, hook_event_name='SessionEnd', reason='other'), plain)
+    check('session-end outside a relay run (no CTRLB_RUN, no relay tool called): no handoff call',
+          not [c for c in seeker.calls if c['path'].endswith('/handoffs')])
+    fresh = dict(rec, bash=[], edited=[], note=None)
+    check('handoff text with nothing recorded', H.handoff_text(fresh) == 'Session ended. Edited: nothing. Last test: none run.')
+
+    # The witness.
+    pre = dict(base, hook_event_name='PreToolUse', tool_name='mcp__ctrlb__done')
+    hook('post-tool', dict(post, tool_name='Bash', tool_input={'command': 'cd /work/dash && python3 -m pytest tests/test_lat.py -q'},
+                           tool_response={'stdout': '..\n2 passed in 0.01s\n', 'stderr': ''}), env)
+    ev_in = {'resource': 'task 07 latency', 'run_id': run, 'agent': 'agent-1',
+             'evidence': {'command': 'python3 -m pytest tests/test_lat.py', 'exit_code': 0, 'summary': '2 passed in 0.01s'}}
+    p, _ = hook('pre-tool', dict(pre, tool_input=ev_in), env)
+    o = out_of(p)
+    check('witness: a command of this session containing the evidence, same exit code: allow with witnessed=true, the rest kept',
+          o.get('permissionDecision') == 'allow' and o.get('updatedInput', {}).get('witnessed') is True
+          and o['updatedInput'].get('resource') == 'task 07 latency' and o['updatedInput']['evidence']['summary'] == '2 passed in 0.01s', json.dumps(o)[:300])
+    no_code = dict(ev_in, evidence={'command': 'python3 -m pytest tests/test_lat.py'})
+    o = out_of(hook('pre-tool', dict(pre, tool_input=no_code), env)[0])
+    check('witness: no exit code given: filled from the record (the newest run, exit 0)',
+          o.get('permissionDecision') == 'allow' and o['updatedInput']['evidence'].get('exit_code') == 0 and o['updatedInput']['witnessed'] is True,
+          json.dumps(o)[:300])
+    lie = dict(ev_in, witnessed=True, evidence={'command': 'python3 -m pytest tests/test_other.py', 'exit_code': 0})
+    o = out_of(hook('pre-tool', dict(pre, tool_input=lie), env)[0])
+    reason = o.get('permissionDecisionReason', '')
+    check('witness: a command this session never ran is denied, naming the last test it did run, even with witnessed set',
+          o.get('permissionDecision') == 'deny' and 'never ran it' in reason
+          and '`cd /work/dash && python3 -m pytest tests/test_lat.py -q` (exit code 0)' in reason and 'updatedInput' not in o, reason)
+    wrong = dict(ev_in, evidence={'command': 'python3 -m pytest tests/test_lat.py', 'exit_code': 3})
+    hook('post-tool-failure', dict(base, hook_event_name='PostToolUseFailure', tool_name='Bash',
+                                   tool_input={'command': 'python3 -m pytest tests/test_lat.py'}, error='Exit code 1\n1 failed'), env)
+    o = out_of(hook('pre-tool', dict(pre, tool_input=wrong), env)[0])
+    reason = o.get('permissionDecisionReason', '')
+    check('witness: the command ran but with another exit code: denied, naming the exit code it saw',
+          o.get('permissionDecision') == 'deny' and 'with exit code 3' in reason and 'this session ran it with exit code 1' in reason, reason)
+    p, _ = hook('pre-tool', dict(pre, tool_input={'resource': 'task 07 latency', 'run_id': run}), env)
+    check('witness: a done with no evidence command: no output (Seeker answers evidence_required)', p.returncode == 0 and not p.stdout.strip())
+    o = out_of(hook('pre-tool', dict(pre, tool_input={'resource': 'task 07 latency', 'witnessed': True, 'evidence': 'it works'}), env)[0])
+    check('witness: a witnessed the agent set itself with no evidence command is dropped',
+          o.get('permissionDecision') == 'allow' and 'witnessed' not in o.get('updatedInput', {'witnessed': 1}), json.dumps(o)[:200])
+    other = base_env(seeker.url, home, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    o = out_of(hook('pre-tool', dict(pre, session_id='5f0c7a52-0000-4000-8000-0000000000ff', tool_input=ev_in), other)[0])
+    check('witness: only this session counts (another session of the same agent saw nothing)',
+          o.get('permissionDecision') == 'deny' and 'no Bash command in this session' in o.get('permissionDecisionReason', ''),
+          json.dumps(o)[:200])
+    hk = load('../../plugin/hooks/hooks.json')['hooks']
+    check('hooks.json: PreToolUse on the done tool, PostToolUse on edits and post, PostToolUseFailure on Bash',
+          len(hk['PreToolUse']) == 3 and hk['PreToolUse'][1]['matcher'] == 'mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'
+          and hk['PostToolUse'][2]['matcher'].startswith('Edit|Write|MultiEdit|NotebookEdit|mcp__ctrlb__post')
+          and hk['PostToolUseFailure'][0]['matcher'] == 'Bash' and hk['SessionEnd'][0]['hooks'][0]['command'].endswith('session-end'))
+    # Codex: the same session-end handoff in a relay run, with what it can say.
+    seeker.reset()
+    shutil.rmtree(os.path.join(WORK, 'home-r6-codex'), ignore_errors=True)
+    cenv = base_env(seeker.url, os.path.join(WORK, 'home-r6-codex'), CTRLB_RUN=run, CTRLB_AGENT='codex-1')
+    p, dt = chook('session-end', {'session_id': CSID, 'transcript_path': '', 'cwd': '/work/dash', 'hook_event_name': 'SessionEnd'}, cenv)
+    calls = [c for c in seeker.calls if c['path'].endswith('/handoffs')]
+    check('codex session-end: one open handoff of all holds in a relay run, exits 0',
+          p.returncode == 0 and len(calls) == 1 and calls[0]['body'].get('all') is True and calls[0]['body'].get('to') == ''
+          and 'Codex' in calls[0]['body'].get('text', ''), json.dumps(calls)[:300])
+
+
+def _wait_for(pred, timeout=6.0):
+    t = time.time()
+    while time.time() - t < timeout:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return pred()
+
+
+def _log(home):
+    try:
+        with open(os.path.join(home, 'hooks.log')) as fh:
+            return fh.read()
+    except OSError:
+        return ''
+
+
+def test_round8_hooks(seeker):
+    """Round 8 (Seeker decisions 43 to 47, docs/relay-hooks.md). A: PreToolUse on the Agent tool registers a task named
+    from the description, with the prompt as its text and the workspace paths it names, and posts an interface block
+    as a contract; it prints nothing and returns inside its budget. B: PostToolUse on Write/Edit under the scratchpad
+    or the scratch directory posts a small text file as an artifact note (detached), once per content; binaries, big
+    files and secrets are skipped and logged. C: SessionStart in a relay run adds the record block and writes the
+    artefacts back. D: the scratch directory. E: autoSlots claim before the edit, deny when held, release after."""
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import hooks_shared as H
+    import relay_hooks as RH
+    rule = H.RELAY
+    check('relay rule v10: claim(next=true) first, done with next=true, peers only to wait',
+          'Start with `claim(next=true)`. When your test passes, call `done` with the evidence and `next=true`. Call `peers` '
+          'only when you are waiting for an answer or a handoff.' in rule)
+    check('relay rule v10: helper scripts and binaries go to the named scratch directory, not /tmp',
+          'Put helper scripts and binaries in the scratch directory {scratch}, not in /tmp.' in rule)
+    ws = os.path.join(WORK, 'ws-r8')
+    shutil.rmtree(ws, ignore_errors=True)
+    for f in ('src/parse.py', 'src/emit.py', 'docs/notes.md', 'REGISTRY.md'):
+        os.makedirs(os.path.dirname(os.path.join(ws, f)), exist_ok=True)
+        with open(os.path.join(ws, f), 'w') as fh:
+            fh.write('x\n')
+    run = 'run-r8'
+    home = os.path.join(WORK, 'home-r8')
+    shutil.rmtree(home, ignore_errors=True)
+    env = base_env(seeker.url, home, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    base = {'session_id': SID, 'transcript_path': '', 'cwd': ws}
+
+    # A: a spawn registers a task (and a contract).
+    prompt = ('Fix the tokenizer in src/parse.py (see `src/parse.py:12`) and src/emit.py; notes in docs/. Not src/gone.py, '
+              'not /etc/hostname, not https://example.test/a/b.py. Test: `python3 -m pytest tests/test_parse.py`.\n\n'
+              '## API\n\n```json\n{"tokens": ["str"], "pos": "int"}\n```\n')
+    agent_in = dict(base, hook_event_name='PreToolUse', tool_name='Agent',
+                    tool_input={'prompt': prompt, 'description': 'Fix the tokenizer', 'subagent_type': 'general-purpose'})
+    seeker.reset()
+    p, dt = hook('pre-agent', agent_in, env)
+    briefs = [c for c in seeker.calls if c['path'].endswith('/briefs')]
+    b0 = briefs[0]['body'] if briefs else {}
+    check('pre-agent: registers task 01 named from the description, the prompt as its text, workspace paths it names',
+          len(briefs) == 2 and b0.get('resource') == 'task 01 Fix the tokenizer' and b0.get('text') == prompt
+          and b0.get('paths') == ['src/parse.py', 'src/emit.py', 'docs'] and b0.get('agent') == 'agent-1' and b0.get('cwd') == ws
+          and briefs[0]['path'] == f'/ai/relay/agent_sessions/runs/{run}/briefs', json.dumps(b0)[:400])
+    check('pre-agent: the test command the prompt quotes is the task\'s test', b0.get('test') == 'python3 -m pytest tests/test_parse.py')
+    b1 = briefs[1]['body'] if len(briefs) > 1 else {}
+    check('pre-agent: the interface block is posted as a contract on the same paths',
+          b1.get('resource') == 'contract:task 01 Fix the tokenizer API' and b1.get('paths') == b0.get('paths')
+          and '"tokens": ["str"]' in b1.get('text', '') and b1['text'].startswith('```json'), json.dumps(b1)[:300])
+    check('pre-agent: prints nothing (the spawn goes ahead unchanged), exits 0', p.returncode == 0 and not p.stdout.strip() and not p.stderr.strip())
+    seeker.reset()
+    secret = 'sk-' + 'ant-api03-abcdefghijklmnopqrstuvwx'
+    hook('pre-agent', dict(agent_in, tool_input={'prompt': f'Update src/emit.py; the key is {secret}', 'description': 'emit/fix'}), env)
+    b = seeker.calls[0]['body'] if seeker.calls else {}
+    check('pre-agent: the second spawn is task 02; a "/" in the description is not a path; secrets are redacted; no contract',
+          len(seeker.calls) == 1 and b.get('resource') == 'task 02 emit fix' and secret not in json.dumps(b) and '[REDACTED]' in b.get('text', ''),
+          json.dumps(b)[:300])
+    seeker.reset()
+    hook('pre-agent', dict(agent_in, tool_input={'prompt': 'Look around and report.', 'description': 'explore'}), env)
+    check('pre-agent: a prompt naming no workspace path registers nothing', not seeker.calls)
+    plain = base_env(seeker.url, os.path.join(WORK, 'home-r8-plain'))
+    hook('pre-agent', agent_in, plain)
+    check('pre-agent outside a relay run (no CTRLB_RUN, no relay tool called): nothing written', not seeker.calls)
+    seeker.state['briefs'] = 'slow'
+    p, dt = hook('pre-agent', agent_in, env)
+    seeker.state['briefs'] = 'ok'
+    check(f'pre-agent budget: Seeker slower ({SLOW_S}s) than the {RH.REGISTER_S}s registration: returns inside the 5 s hook timeout, '
+          'no output, the spawn proceeds', p.returncode == 0 and not p.stdout.strip() and dt < RH.REGISTER_S + 1.0, f'{dt:.2f}s')
+    down = base_env(f'http://127.0.0.1:{closed_port()}', home, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    p, dt = hook('pre-agent', agent_in, down)
+    check('pre-agent, Seeker down: no output, fast', p.returncode == 0 and not p.stdout.strip() and dt < 2, f'{dt:.2f}s')
+    check('prompt_contract: a section under an "Interface:" label; none in plain prose',
+          RH.prompt_contract('Do it.\n\nInterface:\nparse(s: str) -> list[str]\n\nNotes:\nnone') == ('Interface', 'parse(s: str) -> list[str]')
+          and RH.prompt_contract('Fix the bug.\n```sh\nmake\n```\n') is None)
+
+    # D: the scratch directory, created by session-start and named in the rule.
+    seeker.reset()
+    shutil.rmtree(os.path.join(WORK, 'scratch-r8'), ignore_errors=True)
+    senv = dict(env, CTRLB_SCRATCH_DIR=os.path.join(WORK, 'scratch-r8', '{run}'))
+    p, dt = hook('session-start', dict(base, hook_event_name='SessionStart', source='startup'), senv)
+    ctx = out_of(p).get('additionalContext', '')
+    scratch = os.path.join(WORK, 'scratch-r8', run)
+    check('session-start: creates scratchDir ({run} replaced) and the rule names it',
+          os.path.isdir(scratch) and f'Put helper scripts and binaries in the scratch directory {scratch}, not in /tmp.' in ctx, ctx[-300:])
+    default = os.path.join(home, 'relay', run, 'scratch')
+    seeker.reset()
+    p, _ = hook('session-start', dict(base, hook_event_name='SessionStart', source='startup'), env)
+    ctx = out_of(p).get('additionalContext', '')
+    check('session-start: the default scratchDir is <CTRLB_HOME>/relay/<run id>/scratch', os.path.isdir(default) and default in ctx)
+
+    # C: the record block.
+    block = ctx[ctx.find('CtrlB Relay record of run'):] if 'CtrlB Relay record of run' in ctx else ''
+    gets = sorted(c['path'].split('?')[0].rsplit('/', 1)[-1] for c in seeker.calls if c['method'] == 'GET')
+    check('session-start (relay run): reads tasks, contracts, peers (notes, handoffs) and artifacts of this agent',
+          gets == ['artifacts', 'contracts', 'peers', 'peers', 'tasks'] and any('agent=agent-1' in c['path'] for c in seeker.calls
+                                                                                   if '/artifacts' in c['path']), ','.join(gets))
+    check('session-start block: open tasks with holder, stalled flag and test; a finished task left out',
+          'task 01 parse (held by agent-b, stalled; test: python3 -m pytest tests/test_parse.py)' in block
+          and 'task 02 emit (free, handed off)' in block and 'task 00 setup' not in block, block)
+    check('session-start block: contract names, the open handoff and the one addressed to this agent, not others',
+          'Contracts: parse api.' in block and 'task 02 emit handed off openly by agent-c' in block
+          and 'task 04 render handed to you by agent-c' in block and 'task 09 other' not in block, block)
+    check('session-start block: this agent\'s last notes only (no artifact notes)',
+          'Your last notes: parse: tokenizer done.' in block and 'someone else' not in block and 'artifact body' not in block, block)
+    restored = os.path.join(default, 'plan.md')
+    check('session-start: artefacts written back to scratchDir (a path escaping it is not), and the block says where',
+          os.path.isfile(restored) and open(restored).read() == R8_ARTIFACT and not os.path.exists(os.path.join(home, 'relay', run, 'escape.md'))
+          and f'Your artefacts from the previous session are in {default}.' in block, block)
+    check('session-start block: under 2 KB, after the rule', 0 < len(block.encode()) < 2048 and ctx.index('CtrlB Relay: your run id') < ctx.index(block))
+    seeker.reset()
+    for r in ('tasks', 'contracts', 'peers', 'artifacts'):
+        seeker.state[r] = 'slow'
+    p, dt = hook('session-start', dict(base, hook_event_name='SessionStart', source='resume'), env)
+    for r in ('tasks', 'contracts', 'peers', 'artifacts'):
+        seeker.state[r] = 'ok'
+    ctx = out_of(p).get('additionalContext', '')
+    check(f'session-start budget: Seeker slower ({SLOW_S}s) than the {RH.RECORD_S}s read: returns inside it with the rule and '
+          'the block from the local cache, saying so', p.returncode == 0 and dt < RH.RECORD_S + 1.0 and 'your run id is run-r8' in ctx
+          and 'from the local cache of' in ctx and 'task 01 parse (held by agent-b' in ctx, f'{dt:.2f}s')
+    fresh = base_env(f'http://127.0.0.1:{closed_port()}', os.path.join(WORK, 'home-r8-fresh'), CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    p, dt = hook('session-start', dict(base, hook_event_name='SessionStart', source='startup'), fresh)
+    ctx = out_of(p).get('additionalContext', '')
+    check('session-start, Seeker down and no cache: the rule alone, fast', 'your run id is run-r8' in ctx and 'CtrlB Relay record' not in ctx
+          and dt < 2, f'{dt:.2f}s')
+    seeker.reset()
+    hook('session-start', dict(base, hook_event_name='SessionStart', source='startup'), base_env(seeker.url, os.path.join(WORK, 'home-r8-plain')))
+    check('session-start without CTRLB_RUN: no record read', not seeker.calls)
+
+    # B: artefacts.
+    pad = os.path.join(WORK, 'pad-r8')
+    shutil.rmtree(pad, ignore_errors=True)
+    os.makedirs(os.path.join(pad, 'notes'))
+    bhome = os.path.join(WORK, 'home-r8b')
+    shutil.rmtree(bhome, ignore_errors=True)
+    benv = base_env(seeker.url, bhome, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    post = dict(base, hook_event_name='PostToolUse', scratchpad_dir=pad)
+
+    def write(rel, data, root=pad, tool='Write'):
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'wb' if isinstance(data, bytes) else 'w') as fh:
+            fh.write(data)
+        return hook('post-tool', dict(post, tool_name=tool, tool_input={'file_path': path, 'content': 'x'},
+                                      tool_response={'filePath': path}), benv)
+
+    def posts():
+        return [c for c in seeker.calls if c['path'].endswith('/posts')]
+
+    seeker.reset()
+    text = 'step 1: parse\nstep 2: emit\n'
+    p, dt = write('notes/plan.md', text)
+    _wait_for(lambda: posts())
+    ps = posts()
+    body = ps[0]['body'] if ps else {}
+    check('post-tool Write under the scratchpad: one artifact NOTE keyed artifact:<relative path>, the text and its hash',
+          len(ps) == 1 and body.get('key') == 'artifact:notes/plan.md' and body.get('text') == text and body.get('agent') == 'agent-1'
+          and body.get('hash') == 'sha256:' + hashlib.sha256(text.encode()).hexdigest()
+          and ps[0]['path'] == f'/ai/relay/agent_sessions/runs/{run}/posts', json.dumps(body)[:300])
+    check('post-tool artifact: no output, exits 0', p.returncode == 0 and not p.stdout.strip())
+    seeker.reset()
+    write('notes/plan.md', text, tool='Edit')
+    time.sleep(1.0)
+    check('post-tool artifact: the same content again posts nothing', not posts())
+    write('notes/plan.md', text + 'step 3: ship\n', tool='Edit')
+    _wait_for(lambda: posts())
+    check('post-tool artifact: changed content is posted again', len(posts()) == 1)
+    seeker.reset()
+    write('tool.bin', b'\x7fELF\x00\x01\x02')
+    write('big.txt', 'y' * (40 * 1024))
+    pw = 'hunter2' + 'pass'
+    write('creds.txt', f'password = {pw}\n')
+    write('.env', 'X=1\n')
+    outside = os.path.join(WORK, 'ws-r8', 'src', 'parse.py')
+    hook('post-tool', dict(post, tool_name='Write', tool_input={'file_path': outside, 'content': 'x'}), benv)
+    time.sleep(1.0)
+    log = _log(bhome)
+    check('post-tool artifact: binary, over 32 KB, secret content and a .env file are skipped and logged; a file outside the '
+          'scratch directories is not an artefact', not posts() and 'artifact skipped: tool.bin: binary' in log
+          and 'artifact skipped: big.txt: 40960 bytes' in log and 'artifact skipped: creds.txt: matches a secret pattern' in log
+          and 'artifact skipped: .env: secret-looking file name' in log and 'parse.py' not in log, log[-600:])
+    check('post-tool artifact: the hook log never holds the secret', pw not in log)
+    sdir = os.path.join(bhome, 'relay', run, 'scratch')
+    seeker.reset()
+    write('helpers/run.sh', '#!/bin/sh\necho hi\n', root=sdir)
+    _wait_for(lambda: posts())
+    check('post-tool artifact: a file under scratchDir is an artefact too', [c['body'].get('key') for c in posts()] == ['artifact:helpers/run.sh'])
+    seeker.reset()
+    seeker.state['posts'] = 'slow'
+    p, dt = write('notes/slow.md', 'slow post\n')
+    check(f'post-tool artifact budget: Seeker slower ({SLOW_S}s) than the hook: returns at once (the post is detached)',
+          p.returncode == 0 and not p.stdout.strip() and dt < 1.5, f'{dt:.2f}s')
+    _wait_for(lambda: 'artifact posted: run-r8/agent-1 notes/slow.md' in _log(bhome), SLOW_S + 3)
+    seeker.state['posts'] = 'error'
+    write('notes/err.md', 'failed post\n')
+    _wait_for(lambda: 'artifact post run-r8/agent-1 notes/err.md: SeekerError' in _log(bhome))
+    seeker.state['posts'] = 'ok'
+    seeker.reset()
+    write('notes/err.md', 'failed post\n', tool='Edit')
+    _wait_for(lambda: posts())
+    check('post-tool artifact: a post that failed is tried again on the next write of the same content', len(posts()) == 1)
+    seeker.reset()
+    seeker.state['artifacts'] = 'missing'
+    p, _ = hook('session-start', dict(base, hook_event_name='SessionStart', source='startup', scratchpad_dir=pad), benv)
+    seeker.state['artifacts'] = 'ok'
+    ctx = out_of(p).get('additionalContext', '')
+    check('session-start, a Seeker without the artifacts read: artefacts restored from the local copies of what this machine posted',
+          os.path.isfile(os.path.join(sdir, 'notes', 'plan.md')) and open(os.path.join(sdir, 'notes', 'plan.md')).read() == text + 'step 3: ship\n'
+          and f'Your artefacts from the previous session are in {sdir}.' in ctx, ctx[-300:])
+
+    # E: autoSlots.
+    ehome = os.path.join(WORK, 'home-r8e')
+    shutil.rmtree(ehome, ignore_errors=True)
+    eenv = base_env(seeker.url, ehome, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    reg = os.path.join(ws, 'REGISTRY.md')
+    pre = dict(base, hook_event_name='PreToolUse', tool_name='Edit', tool_input={'file_path': reg, 'old_string': 'x', 'new_string': 'y'})
+    epost = dict(pre, hook_event_name='PostToolUse', tool_response={'filePath': reg})
+    seeker.reset()
+    p, dt = hook('pre-tool', pre, eenv)
+    claims = [c for c in seeker.calls if c['path'].endswith('/claims')]
+    check('autoSlots pre-tool: claims slot:REGISTRY.md with the file, no edit check, edit allowed (no output)',
+          len(claims) == 1 and claims[0]['method'] == 'POST' and claims[0]['body'].get('resource') == 'slot:REGISTRY.md'
+          and claims[0]['body'].get('paths') == ['REGISTRY.md'] and not [c for c in seeker.calls if c['path'].endswith('/check')]
+          and p.returncode == 0 and not p.stdout.strip(), json.dumps(claims)[:300])
+    saved, common.HOME = common.HOME, ehome
+    try:
+        tok = common.TokenState(run, 'agent-1').get(['slot:registry.md', 'path:REGISTRY.md'])
+    finally:
+        common.HOME = saved
+    check('autoSlots pre-tool: the slot\'s token is kept for the slot and the file', tok == {'slot:registry.md': 'tok-slot', 'path:REGISTRY.md': 'tok-slot'}, str(tok))
+    seeker.reset()
+    p, dt = hook('post-tool', epost, eenv)
+    rel = [c for c in seeker.calls if c['path'].endswith('/claims')]
+    check('autoSlots post-tool: releases slot:REGISTRY.md (the agent spends no turn on it)',
+          len(rel) == 1 and rel[0]['method'] == 'DELETE' and rel[0]['body'].get('resource') == 'slot:REGISTRY.md' and not p.stdout.strip())
+    seeker.reset()
+    hook('post-tool', epost, eenv)
+    check('autoSlots post-tool: nothing to release when the hook holds no slot', not seeker.calls)
+    seeker.state['claims'] = 'held'
+    p, _ = hook('pre-tool', pre, eenv)
+    seeker.state['claims'] = 'ok'
+    o = out_of(p)
+    check('autoSlots pre-tool: held by another agent: the edit is denied with "held by <agent>, try again in a moment"',
+          o.get('permissionDecision') == 'deny' and o.get('permissionDecisionReason') == 'CtrlB Relay: REGISTRY.md is held by agent-b, try again in a moment.',
+          json.dumps(o))
+    seeker.state['claims'] = 'slow'
+    p, dt = hook('pre-tool', pre, eenv)
+    seeker.state['claims'] = 'ok'
+    check(f'autoSlots budget: Seeker slower ({SLOW_S}s) than the {RH.SLOT_S}s claim: fails open inside the pre-tool budget (edit allowed)',
+          p.returncode == 0 and not p.stdout.strip() and dt < H.CHECK_S + 1.0 and 'auto slot fail open' in _log(ehome), f'{dt:.2f}s')
+    seeker.state['claims'] = 'error'
+    p, _ = hook('pre-tool', pre, eenv)
+    seeker.state['claims'] = 'ok'
+    check('autoSlots: Seeker error: fails open (edit allowed)', p.returncode == 0 and not p.stdout.strip())
+    seeker.reset()
+    hook('pre-tool', pre, eenv)
+    seeker.state['release'] = 'slow'
+    p, dt = hook('post-tool', epost, eenv)
+    seeker.state['release'] = 'ok'
+    check(f'autoSlots release budget: Seeker slower ({SLOW_S}s) than the {RH.RELEASE_S}s release: returns inside it (the slot lapses)',
+          p.returncode == 0 and not p.stdout.strip() and dt < RH.RELEASE_S + 1.0, f'{dt:.2f}s')
+    seeker.reset()
+    hook('pre-tool', pre, eenv)
+    p, _ = hook('post-tool-failure', dict(pre, hook_event_name='PostToolUseFailure', error='old_string not found'), eenv)
+    check('autoSlots post-tool-failure: a failed edit releases the slot too',
+          [c['method'] for c in seeker.calls if c['path'].endswith('/claims')] == ['POST', 'DELETE'] and not p.stdout.strip())
+    seeker.reset()
+    hook('pre-tool', dict(pre, tool_input={'file_path': os.path.join(ws, 'src', 'parse.py'), 'old_string': 'x', 'new_string': 'y'}), eenv)
+    check('autoSlots: a file not in the list is not claimed (the edit check runs as before)',
+          not [c for c in seeker.calls if c['path'].endswith('/claims')] and [c for c in seeker.calls if c['path'].endswith('/check')])
+    seeker.reset()
+    hook('pre-tool', pre, dict(eenv, CTRLB_AUTO_SLOTS=''))
+    check('autoSlots off (CTRLB_AUTO_SLOTS empty): no claim', not [c for c in seeker.calls if c['path'].endswith('/claims')])
+    seeker.reset()
+    hook('pre-tool', pre, base_env(seeker.url, os.path.join(WORK, 'home-r8-plain')))
+    check('autoSlots outside a relay run: no claim', not [c for c in seeker.calls if c['path'].endswith('/claims')])
+
+    # hooks.json, Codex and the docs.
+    hk = load('../../plugin/hooks/hooks.json')['hooks']
+    agent_hook = [g for g in hk['PreToolUse'] if g.get('matcher') == 'Agent|Task']
+    fail_edit = [g for g in hk['PostToolUseFailure'] if g.get('matcher') == 'Edit|Write|MultiEdit|NotebookEdit']
+    check('hooks.json: PreToolUse Agent|Task runs pre-agent (timeout 5); PostToolUseFailure on edit tools; SessionStart timeout 10',
+          len(agent_hook) == 1 and agent_hook[0]['hooks'][0]['command'].endswith('hook.py" pre-agent') and agent_hook[0]['hooks'][0]['timeout'] == 5
+          and 'async' not in agent_hook[0]['hooks'][0] and len(fail_edit) == 1 and fail_edit[0]['hooks'][0]['command'].endswith('post-tool-failure')
+          and hk['SessionStart'][0]['hooks'][0]['timeout'] == 10)
+    seeker.reset()
+    cenv = base_env(seeker.url, os.path.join(WORK, 'home-r8-codex'), CTRLB_RUN=run, CTRLB_AGENT='agent-1')
+    p, dt = chook('session-start', {'session_id': CSID, 'transcript_path': '', 'cwd': ws, 'hook_event_name': 'SessionStart',
+                                    'source': 'startup'}, cenv)
+    ctx = out_of(p).get('additionalContext', '')
+    check('codex session-start (relay run): the same record block and scratch directory',
+          'CtrlB Relay record of run run-r8' in ctx and 'task 01 parse (held by agent-b' in ctx
+          and os.path.join(WORK, 'home-r8-codex', 'relay', run, 'scratch') in ctx, ctx[-300:])
+    doc = open(os.path.join(ROOT, 'docs', 'relay-hooks.md')).read()
+    check('docs/relay-hooks.md: every round 8 hook with its event, fields, output and budget, citing the hooks reference',
+          all(w in doc for w in ('PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'SessionStart', 'SessionEnd', 'scratchpad_dir',
+                                 'tool_input.prompt', 'tool_input.description', 'permissionDecision', 'additionalContext',
+                                 'autoSlots', 'scratchDir', 'fail open', 'code.claude.com/docs/en/hooks')))
+    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
+    claim_doc = tools[tools.index('### claim'):tools.index('### release')]
+    check('relay-tools: claim next and done next documented',
+          '| `next` |' in claim_doc and '`free_tasks: []`' in claim_doc and 'done(resource="task 03 median", evidence=' in tools
+          and 'next=true' in tools[tools.index('#### done'):tools.index('### handoff')])
+    skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+    check('relay skill: claim(next=true), done with next=true, autoSlots instead of the REGISTRY.md claim',
+          '`claim(next=true)`' in skill and '`next=true`' in skill and 'claim(resource="slot:REGISTRY.md"' not in skill)
+
+
 def main():
     seeker = Seeker()
     test_layout()
@@ -1041,6 +1937,13 @@ def main():
     test_keys()
     test_edit_keys_across_harnesses(seeker)
     test_docs()
+    test_release_wording()
+    test_briefs_wording()
+    test_wait_wording()
+    test_takeover_wording()
+    test_done_evidence(seeker)
+    test_round6_hooks(seeker)
+    test_round8_hooks(seeker)
     test_failure_safety(seeker)
     test_config_and_status(seeker)
     test_codex_rows(seeker)
