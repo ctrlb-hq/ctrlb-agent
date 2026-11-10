@@ -1751,9 +1751,7 @@
       ],
       "state": {
        "state": "free",
-       "seen_calls": [
-        "call_x1"
-       ]
+       "post_seen": true
       }
      }
     }
@@ -1877,7 +1875,7 @@
    ]
   },
   {
-   "name": "codex Stop scan: a run PostToolUse already handled (its call id seen) is not counted again for the next task",
+   "name": "codex scan: a run older than the machine's last done is not counted again for the next task (tasks that share a test)",
    "row": "codex stop scan dedupe",
    "harness": "codex",
    "state_before": {
@@ -1918,9 +1916,7 @@
       "lease_s": 1800
      }
     },
-    "seen_calls": [
-     "c9"
-    ]
+    "last_done_ts": 1794304860.0
    },
    "steps": [
     {
@@ -2047,6 +2043,74 @@
       ],
       "state": {
        "state": "ended"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "codex PostToolUse with Codex 0.166's payload (the nested command, its output only, no exit code): the rollout's earlier passing run sends done and the next brief",
+   "row": "codex post-tool scan",
+   "harness": "codex",
+   "state_before": "$holding1",
+   "steps": [
+    {
+     "event": "post-tool",
+     "input": {
+      "tool_name": "Bash",
+      "tool_input_raw": {
+       "command": "ls src"
+      },
+      "tool_use_id": "exec-1",
+      "tool_response": "parse.py\n",
+      "rollout": [
+       [
+        "function_call",
+        "c1",
+        {
+         "cmd": "python3 -m unittest tests/test_parse.py"
+        }
+       ],
+       [
+        "function_call_output",
+        "c1",
+        "Exit code: 0\nOutput:\nOK\n"
+       ]
+      ]
+     },
+     "answers": {
+      "done": [
+       {
+        "body": {
+         "done": true,
+         "resource": "task 01 parse",
+         "key": "name:task 01 parse",
+         "next": "$task2"
+        }
+       }
+      ]
+     },
+     "expect": {
+      "calls": [
+       [
+        "POST",
+        "done",
+        {
+         "resource": "task 01 parse",
+         "evidence": {
+          "command": "python3 -m unittest tests/test_parse.py",
+          "exit_code": 0
+         }
+        }
+       ]
+      ],
+      "context_has": [
+       "you hold task \"task 02 emit\""
+      ],
+      "state": {
+       "tasks": [
+        "task 02 emit"
+       ]
       }
      }
     }

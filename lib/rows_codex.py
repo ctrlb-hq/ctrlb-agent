@@ -375,8 +375,9 @@ def is_code_mode(text):
 
 def shell_runs(path, start=0):
     """The shell calls of a rollout from byte offset start, with their results: [{call_id, command, exit_code,
-    summary}] (exit_code None when the output names none), and the offset read to. For the Stop hook when Codex fires
-    no PostToolUse for a shell call."""
+    summary, ts}] (exit_code None when the output names none; ts the output record's time, epoch seconds), and the
+    offset read to. Codex 0.166's PostToolUse carries no exit code (tool_response is the command's output only), so
+    the hooks read it here."""
     out, calls = [], {}
     try:
         fh = open(path, 'rb')
@@ -405,10 +406,11 @@ def shell_runs(path, start=0):
                     calls[r['tool_use_id']] = ('shell', r['command'])
             elif pt in ('custom_tool_call_output', 'function_call_output') and p.get('call_id') in calls:
                 kind, cmd = calls.pop(p['call_id'])
+                ts = micros(rec['timestamp']) / 1e6 if rec.get('timestamp') else 0.0
                 if kind == 'code':
                     for c, code, line in code_mode_runs(cmd, p.get('output')):
-                        out.append(dict(call_id=p['call_id'], command=c, exit_code=code, summary=line))
+                        out.append(dict(call_id=p['call_id'], command=c, exit_code=code, summary=line, ts=ts))
                 else:
                     code, line = shell_result(p.get('output'))
-                    out.append(dict(call_id=p['call_id'], command=cmd, exit_code=code, summary=line))
+                    out.append(dict(call_id=p['call_id'], command=cmd, exit_code=code, summary=line, ts=ts))
     return out, start

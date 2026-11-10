@@ -112,17 +112,17 @@ def machine(cfg, inp):
 
 
 def post_tool(cfg, inp):
-    """PostToolUse on a shell call: the machine's done on a passing test. In code mode (Codex 0.166: the model's
-    tools run inside one JavaScript exec) the call's text holds several tools.exec_command({cmd}) calls and its result
-    one JSON chunk per call: each command is paired with its own exit code. The call id is kept, so the Stop and
-    SessionEnd scans of the rollout never count the same run again. Returns the hook output or None."""
+    """PostToolUse on a shell call: the machine's done on a passing test. Codex 0.166 sends the nested command
+    (tool_input.command) and only its output as tool_response, with no exit code, so a done can rarely come from the
+    call itself; the hook then scans the rollout (the earlier exec calls, whose results carry exit codes) and sends
+    done for a passing run there, one call later, with the next task's brief. Code-mode JavaScript in tool_input is
+    read too (each command paired with its own result chunk). Returns the hook output or None."""
     if (inp.get('tool_name') or '') not in SHELL_NAMES:
         return None
     m = machine(cfg, inp)
     if not m:
         return None
-    call_id = inp.get('tool_use_id') or ''
-    m.change(lambda d: d.update(post_seen=True, seen_calls=(d.get('seen_calls') or [])[-499:] + ([call_id] if call_id else [])))
+    m.change(lambda d: d.update(post_seen=True))
     args = inp.get('tool_input')
     cmd = rows_codex.shell_command(args) if isinstance(args, dict) else args if isinstance(args, str) else ''
     texts = [x for x in rows_codex.strings_in(args)] if not rows_codex.is_code_mode(cmd) else []
@@ -136,27 +136,32 @@ def post_tool(cfg, inp):
         o = m.post_bash(c, code, line)
         if o:
             said.append(o['hookSpecificOutput']['additionalContext'])
+    said += stop_fallback(cfg, inp)
     return context('PostToolUse', '\n'.join(said)) if said else None
 
 
 def stop_fallback(cfg, inp):
-    """The Stop hook, and SessionEnd before its handoff: the rollout's shell calls since the last scan that no
-    PostToolUse handled (its call id is not in the state's seen_calls), in order, each through the machine's Bash rule
-    (a passing run of a held task's test sends done). Covers a session whose PostToolUse did not fire or could not
-    read the exit code."""
+    """PostToolUse, Stop, and SessionEnd before its handoff: the rollout's shell calls since the last scan, in order,
+    each through the machine's Bash rule (a passing run of a held task's test sends done). A run whose output is older
+    than the machine's last done is skipped, so one test run never finishes two tasks that share a test command.
+    Returns the texts the done answers gave (the next task's brief)."""
     m = machine(cfg, inp)
     path = inp.get('agent_transcript_path') or inp.get('transcript_path')
     if not m or not path:
-        return
+        return []
     st = m.read()
     if not st['tasks']:
-        return
+        return []
     runs, offset = rows_codex.shell_runs(path, int(st.get('rollout_offset') or 0))
     m.change(lambda d: d.update(rollout_offset=offset))
-    seen = set(st.get('seen_calls') or [])
+    said = []
     for r in runs:
-        if r['call_id'] not in seen:
-            m.post_bash(r['command'], r['exit_code'], r['summary'])
+        if r['ts'] and r['ts'] <= (m.read().get('last_done_ts') or 0):
+            continue
+        o = m.post_bash(r['command'], r['exit_code'], r['summary'])
+        if o:
+            said.append(o['hookSpecificOutput']['additionalContext'])
+    return said
 
 
 def end_machine(cfg, inp):

@@ -824,7 +824,7 @@ class Machine:
                 raise
             self.change(lambda d: d.update(pending_done=dict(task=name, evidence=ev)))
             return ''
-        self.change(lambda d: d.update(pending_done=None))
+        self.change(lambda d: d.update(pending_done=None, last_done_ts=time.time()))
         if ans.get('done') is not True:
             msg = ans.get('message') or ans.get('reason') or 'no reason given'
             return f'CtrlB Relay (run {self.run}): task "{name}" was not marked finished: {msg}'

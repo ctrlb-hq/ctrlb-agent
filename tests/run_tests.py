@@ -2194,9 +2194,10 @@ MUTANTS = [
     ('ended: SessionStart as idle', 'lib/hooks_shared.py', "        if st['state'] == 'ended':\n            self.change(lambda d: d.update(self._blank()))\n", ''),
     ('claim on write failure: said', 'lib/hooks_shared.py', '        if failed:\n            lines.append(', '        if failed and False:\n            lines.append('),
     ('codex PostToolUse on Bash', 'codex/hook.py', "    if (inp.get('tool_name') or '') not in SHELL_NAMES:\n        return None", "    return None"),
-    ('codex Stop fallback', 'codex/hook.py', "    for r in runs:\n        if r['call_id'] not in seen:", "    for r in []:\n        if r['call_id'] not in seen:"),
+    ('codex rollout scan', 'codex/hook.py', "    for r in runs:\n        if r['ts'] and", "    for r in []:\n        if r['ts'] and"),
     ('codex code mode: each command with its own chunk', 'codex/hook.py', '    if code_js:\n', '    if False:\n'),
-    ('codex scan skips runs PostToolUse handled', 'codex/hook.py', "        if r['call_id'] not in seen:", '        if True:'),
+    ('codex scan skips runs older than the last done', 'codex/hook.py', "        if r['ts'] and r['ts'] <= (m.read().get('last_done_ts') or 0):", '        if False:'),
+    ('codex PostToolUse scans the rollout', 'codex/hook.py', '    said += stop_fallback(cfg, inp)\n', ''),
     ('codex SessionEnd scan before the handoff', 'codex/hook.py', "        try:      # a passing test the PostToolUse hook missed is finished before the handoff releases the task\n            stop_fallback(cfg, inp)",
      "        try:      # a passing test the PostToolUse hook missed is finished before the handoff releases the task\n            pass"),
 ]
