@@ -8,11 +8,20 @@ slug: connect-codex
 
 The installer writes CtrlB into Codex's `config.toml`. After that, Codex does what Claude Code does with the plugin:
 
-- Every session, including subagent threads, is uploaded to the session store from the rollout files in `~/.codex/sessions`. Secrets are redacted before upload.
+- Every session, including subagent threads, is uploaded to the session store from the rollout files in `~/.codex/sessions`. Secrets are redacted before upload, and text you mark private is replaced with `[PRIVATE]` (see [Private text](#private-text)).
 - CtrlB's MCP server gives the agent the recall tools and the relay tools (`peers`, `post`, `claim`, `release`).
 - At session start the agent is told its run id and agent id. Before each `apply_patch`, the files the patch names are checked against the run's claims.
 
 It needs Codex CLI 0.166 or newer and Python 3.9 or newer. Nothing else is installed.
+
+## Private text
+
+Put text that must not leave your machine between `<private>` and `</private>`, in a message to the agent or in anything the agent writes. The hook replaces it with `[PRIVATE]` before upload, in the message, the command, the tool result and the edited file paths. Secrets are redacted after that.
+
+- An unclosed `<private>` hides the rest of that block: the message, or the one tool call or tool result.
+- Close the tag in the same block. If a `<private>` opens in one block and `</private>` closes in a later one, only the first block is hidden; the later block's text up to `</private>` is uploaded.
+- Tags nest, and their case does not matter.
+- A file that holds a private tag is not kept as a run artefact.
 
 ## 1. Set the environment
 

@@ -1927,6 +1927,97 @@ def test_round8_hooks(seeker):
           '`claim(next=true)`' in skill and '`next=true`' in skill and 'claim(resource="slot:REGISTRY.md"' not in skill)
 
 
+def test_private_tags(seeker):
+    """Item 1: text inside <private> and </private> never leaves the machine, in both harnesses, in body, command and
+    paths. An unclosed tag strips to the end of its block; a tag opened in one block and closed in the next is stripped
+    in the first block only, and the second block's text up to the close is uploaded (the stated limit)."""
+    import redact as _redact
+    P = 'PRIVX'   # every private word below starts with it; none may reach Seeker
+    check('private: nested spans strip to the balancing close, tags in any case',
+          _redact.strip_private(f'a <PRIVATE>{P}1 <private>{P}2</private> {P}3</Private> b') == ('a [PRIVATE] b', 1))
+    check('private: an unclosed tag strips to the end of the text', _redact.strip_private(f'a <private>{P}4 more') == ('a [PRIVATE]', 1))
+    check('private: a close with no open is left as it is', _redact.strip_private('tail</private> b') == ('tail</private> b', 0))
+    check('private: secrets are still redacted after the strip', _redact.clean('PASSWORD=hunter22x <private>x</private>')[0]
+          == 'PASSWORD=[REDACTED] [PRIVATE]')
+
+    # Claude Code: a user message, an assistant message (nested), a Bash command, a tool result, an unclosed tag, a
+    # private path, and a span split across two blocks of one message
+    seeker.reset()
+    psid = '5f0c7a52-0000-4000-8000-0000000000aa'
+    proj = os.path.join(WORK, 'projects', '-work-priv')
+    os.makedirs(proj, exist_ok=True)
+    path = os.path.join(proj, psid + '.jsonl')
+
+    def pl(t, content, ts):
+        return line(t, content, ts, dict(sessionId=psid, cwd='/work/priv'))
+    with open(path, 'w') as fh:
+        fh.write(pl('user', f'Deploy it. The host is <private>{P}-user-host</private>, keep it out of the record.', '2026-11-03T11:00:00Z'))
+        fh.write(pl('assistant', [dict(type='text', text=f'Noted <private>{P}-a1 <private>{P}-a2</private> {P}-a3</private> done.')],
+                    '2026-11-03T11:00:01Z'))
+        fh.write(pl('assistant', [dict(type='tool_use', id='p1', name='Bash', input=dict(command=f'ssh <private>{P}-cmd</private> uptime'))],
+                    '2026-11-03T11:00:02Z'))
+        fh.write(pl('user', [dict(type='tool_result', tool_use_id='p1', content=f'up 3 days <private>{P}-result</private> load 0.1')],
+                    '2026-11-03T11:00:03Z'))
+        fh.write(pl('assistant', [dict(type='text', text=f'Unclosed: <private>{P}-open and the rest of the block')], '2026-11-03T11:00:04Z'))
+        fh.write(pl('assistant', [dict(type='tool_use', id='p2', name='Write', input=dict(
+            file_path=f'/work/priv/<private>{P}-path</private>.md', content='x'))], '2026-11-03T11:00:05Z'))
+        fh.write(pl('assistant', [dict(type='tool_use', id='p3', name='Write', input=dict(file_path='/work/priv/open.md', content='y'))],
+                    '2026-11-03T11:00:06Z'))
+        fh.write(pl('assistant', [dict(type='text', text=f'Split: <private>{P}-split-head'),
+                                  dict(type='text', text='SPLITTAIL</private> after the close')], '2026-11-03T11:00:07Z'))
+    hook('upload', dict(session_id=psid, transcript_path=path, cwd='/work/priv', hook_event_name='Stop'),
+         base_env(seeker.url, os.path.join(WORK, 'home-private')))
+    rows = list(seeker.rows)
+    sent = json.dumps(rows)
+    by = {(r['seq'], r['block_idx']): r for r in rows}
+    check('private (claude): no private text reaches Seeker in body, command or paths', len(rows) == 9 and P not in sent,
+          f'{len(rows)} rows; leaked at {[k for k, r in by.items() if P in json.dumps(r)]}')
+    check('private (claude): user message, nested assistant text, tool result',
+          by[(0, 0)]['body'] == 'Deploy it. The host is [PRIVATE], keep it out of the record.'
+          and by[(1, 0)]['body'] == 'Noted [PRIVATE] done.' and by[(3, 0)]['body'] == 'up 3 days [PRIVATE] load 0.1',
+          repr([by[(0, 0)]['body'], by[(1, 0)]['body'], by[(3, 0)]['body']]))
+    check('private (claude): the Bash command and its body', by[(2, 0)]['command'] == 'ssh [PRIVATE] uptime'
+          and by[(2, 0)]['body'] == 'ssh [PRIVATE] uptime', repr(by[(2, 0)]['command']))
+    check('private (claude): an unclosed tag strips to the end of its block', by[(4, 0)]['body'] == 'Unclosed: [PRIVATE]',
+          repr(by[(4, 0)]['body']))
+    check('private (claude): a path inside the tag leaves paths; an ordinary path stays',
+          by[(5, 0)]['paths'] == '' and by[(6, 0)]['paths'] == '["open.md"]', repr([by[(5, 0)]['paths'], by[(6, 0)]['paths']]))
+    check('private (claude): a span split across two blocks is stripped in the first block only (stated limit)',
+          by[(7, 0)]['body'] == 'Split: [PRIVATE]' and by[(7, 1)]['body'] == 'SPLITTAIL</private> after the close',
+          repr([by[(7, 0)]['body'], by[(7, 1)]['body']]))
+
+    # Codex: a user message, an exec call with a private command and an apply_patch to a private path, its output
+    seeker.reset()
+    chome = os.path.join(WORK, 'codex-home-private')
+    shutil.rmtree(chome, ignore_errors=True)
+    day = os.path.join(chome, 'sessions', '2026', '11', '03')
+    os.makedirs(day)
+    psid2 = '01a0bbbb-0000-7000-8000-0000000000bb'
+    rpath = os.path.join(day, f'rollout-2026-11-03T11-00-00-{psid2}.jsonl')
+    patch = f'*** Begin Patch\n*** Add File: /work/engine/<private>{P}-cpath</private>.md\n+x\n*** End Patch'
+    with open(rpath, 'w') as fh:
+        fh.write(crec('session_meta', dict(id=psid2, session_id=psid2, cwd='/work/engine', cli_version='0.166.0'), '2026-11-03T11:00:00.000Z'))
+        fh.write(citem(dict(type='message', role='user', content=[dict(type='input_text', text=f'Use <private>{P}-cuser</private> as the key.')]),
+                       '2026-11-03T11:00:00.100Z'))
+        fh.write(citem(dict(type='custom_tool_call', call_id='c1', name='exec', status='completed',
+                            input=f'text(await tools.exec_command({{cmd:"curl <private>{P}-ccmd</private>/health"}}));'), '2026-11-03T11:00:01.000Z'))
+        fh.write(citem(dict(type='custom_tool_call_output', call_id='c1', output=f'200 OK <private>{P}-cout</private>'), '2026-11-03T11:00:02.000Z'))
+        fh.write(citem(dict(type='custom_tool_call', call_id='c2', name='exec', status='completed',
+                            input=f'text(await tools.apply_patch("{patch}"));'), '2026-11-03T11:00:03.000Z'))
+        fh.write(citem(dict(type='message', role='assistant', content=[dict(type='output_text', text=f'Done. <private>{P}-copen')]),
+                       '2026-11-03T11:00:04.000Z'))
+    chook('upload', dict(session_id=psid2, transcript_path=rpath, cwd='/work/engine', hook_event_name='Stop'),
+          base_env(seeker.url, os.path.join(WORK, 'home-private-codex'), CODEX_HOME=chome))
+    crows = list(seeker.rows)
+    csent = json.dumps(crows)
+    calls = [r for r in crows if r['block_type'] == 'tool_use']
+    check('private (codex): no private text reaches Seeker in body, command or paths', len(crows) >= 5 and P not in csent,
+          f'{len(crows)} rows; leaked in {[r["seq"] for r in crows if P in json.dumps(r)]}')
+    check('private (codex): the command keeps its public part, the patch row keeps no private path',
+          any('[PRIVATE]' in r['command'] and 'curl' in r['command'] for r in calls) and all(P not in r['paths'] for r in calls)
+          and any(r['body'].startswith('Done. [PRIVATE]') for r in crows), repr([(r['command'][:60], r['paths']) for r in calls]))
+
+
 def main():
     seeker = Seeker()
     test_layout()
@@ -1947,6 +2038,7 @@ def main():
     test_failure_safety(seeker)
     test_config_and_status(seeker)
     test_codex_rows(seeker)
+    test_private_tags(seeker)
     test_codex_hooks(seeker)
     test_codex_install()
     test_root_install()

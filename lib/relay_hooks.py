@@ -57,7 +57,7 @@ def in_relay(cfg, run, agent, sid):
 
 def _clean_text(text, limit=TEXT_MAX):
     """Text with the plugin's secret patterns redacted, cut at limit bytes (on a character boundary)."""
-    out, _ = redact.redact(text or '')
+    out, _ = redact.clean(text or '')
     b = out.encode()
     return out if len(b) <= limit else b[:limit].decode(errors='ignore')
 
@@ -101,7 +101,7 @@ def prompt_test(prompt):
     for s in spans + [ln for block in fenced for ln in block.splitlines()]:
         s = s.strip()
         s = s[1:].strip() if s.startswith('$') else s
-        if is_test_command(s) and len(s.encode()) <= 500 and redact.redact(s)[1] == 0:
+        if is_test_command(s) and len(s.encode()) <= 500 and redact.clean(s)[1] == 0:
             return s
     return ''
 
@@ -240,6 +240,8 @@ def artifact_of(path, roots):
                 why = 'binary'
             elif redact.redact(text)[1]:
                 why = 'matches a secret pattern'
+            elif redact.private_spans(text):
+                why = 'holds a private tag'
     except UnicodeDecodeError:
         why = 'binary'
     except OSError as e:
@@ -453,8 +455,8 @@ def restore_artifacts(parts, run, agent, scratch):
         dest = os.path.join(scratch, rel)
         try:
             if not os.path.exists(dest):
-                if redact.redact(text)[1]:
-                    common.log(f"artifact not restored: {rel}: matches a secret pattern")
+                if redact.redact(text)[1] or redact.private_spans(text):
+                    common.log(f"artifact not restored: {rel}: matches a secret pattern or holds a private tag")
                     continue
                 _write(dest, text)
             have.append(rel)

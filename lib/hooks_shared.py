@@ -8,6 +8,7 @@ import json
 import re
 import time
 import common
+from redact import clean as _clean
 from paths import PATH, edit_paths as normalise_edit_paths, key as resource_key
 
 CHECK_S = 2.0
@@ -398,9 +399,12 @@ def _cut(s, n):
 
 def handoff_text(rec, last_test=None):
     """The open handoff's text (decision 36), one paragraph from the hook's own record: the files edited in this
-    session, the last test command it saw and its exit code, and the agent's last note."""
+    session, the last test command it saw and its exit code, and the agent's last note. Each piece is cleaned
+    (private tags, secrets) on its own, so an unclosed private tag in one never hides the others."""
+    def c(t):
+        return _clean(t or '')[0]
     parts = ['Session ended.']
-    edited = [os.path.basename(p) if len(p) > 80 else p for p in (rec.get('edited') or [])]
+    edited = [c(os.path.basename(p) if len(p) > 80 else p) for p in (rec.get('edited') or [])]
     if edited:
         shown = edited[-12:]
         more = f' and {len(edited) - len(shown)} more' if len(edited) > len(shown) else ''
@@ -413,13 +417,13 @@ def handoff_text(rec, last_test=None):
         test = last_test
     if test:
         code = test.get('exit_code')
-        line = f" (last line: {_cut(test.get('summary'), LINE_MAX)})" if test.get('summary') else ''
-        parts.append(f"Last test: `{_cut(test.get('command'), 300)}` exit {code if code is not None else 'unknown'}{line}.")
+        line = f" (last line: {_cut(c(test.get('summary')), LINE_MAX)})" if test.get('summary') else ''
+        parts.append(f"Last test: `{_cut(c(test.get('command')), 300)}` exit {code if code is not None else 'unknown'}{line}.")
     else:
         parts.append('Last test: none run.')
     note = rec.get('note') or {}
     if note.get('text'):
-        parts.append('Last note: ' + _cut(note['text'], 400))
+        parts.append('Last note: ' + _cut(c(note['text']), 400))
     return _cut(' '.join(parts), HANDOFF_TEXT_MAX)
 
 

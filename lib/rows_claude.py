@@ -15,7 +15,7 @@ Beyond the content blocks:
 import datetime, glob, json, os, time
 import common
 from paths import edit_paths as normalise_edit_paths
-from redact import redact
+from redact import clean, private_paths, redact
 
 SUMMARY_PREFIX = 'This session is being continued from a previous conversation'
 SKIP_TYPES = {'mode', 'permission-mode', 'bridge-session', 'custom-title', 'agent-name', 'queue-operation',
@@ -179,10 +179,23 @@ def rows_from(rec, seq, st, ids, cfg, hostname):
 
 
 def _finish(r, counts):
+    """Redact a row before upload (both harnesses): private tags and secrets in body and command; paths keeps only the
+    paths that are not private (redact.private_paths), then has its secrets redacted."""
     n = 0
-    for k in ('body', 'command', 'paths'):
-        r[k], k_n = redact(r[k])
+    if r['paths']:
+        try:
+            ps = json.loads(r['paths'])
+        except ValueError:
+            ps = None
+        if isinstance(ps, list):
+            keep = private_paths(ps, (r['body'], r['command']))
+            n += len(ps) - len(keep)
+            r['paths'] = json.dumps(keep) if keep else ''
+    for k in ('body', 'command'):
+        r[k], k_n = clean(r[k])
         n += k_n
+    r['paths'], k_n = redact(r['paths'])
+    n += k_n
     counts['redacted'] += n
     raw = r['body'].encode()
     r['body_len'] = len(raw)
