@@ -14,6 +14,8 @@ The `ctrlb-agent` plugin does three things in Claude Code:
 
 Everything goes to CtrlB with your MCP key. Nothing else is installed: the hooks are standard-library Python 3.9 or newer.
 
+Do steps 1 and 2 yourself, or save the key in a file and let Claude Code do them: see [Set up with a prompt](#set-up-with-a-prompt).
+
 ## 1. Set the environment
 
 Mint a key on the Connect page in CtrlB. Add these lines to your shell profile (`~/.zshrc` or `~/.bashrc`) and open a new terminal:
@@ -45,6 +47,45 @@ claude --plugin-dir ~/ctrlb-agent/plugin
 ```
 
 `--plugin-dir` loads the plugin for that session only. Pass it every time, or put it in a shell alias.
+
+## Set up with a prompt
+
+Claude Code can do steps 1 and 2 for you. You do one thing yourself: save the key in a file. Do not give the key to the agent. What the agent reads goes into its transcript, and the transcript goes to the model provider and, with this plugin, to the session store.
+
+**1. Save the key, in a terminal.** The key is not shown when you paste it:
+
+```sh
+mkdir -p ~/.ctrlb && chmod 700 ~/.ctrlb
+( umask 077; printf 'Paste your CtrlB MCP key: '; stty -echo; IFS= read -r k; stty echo; echo; printf '%s' "$k" > ~/.ctrlb/key )
+```
+
+**2. Give Claude Code this prompt.** Replace `<your CtrlB URL>` first.
+
+```text
+Set up CtrlB for Claude Code on this machine. My CtrlB URL is <your CtrlB URL>.
+My MCP key is in ~/.ctrlb/key. Never read, cat, print or copy that file, and never
+write the key's value into a command, file or message. Refer to it only as
+$(cat ~/.ctrlb/key). To check that the file exists, run: test -s ~/.ctrlb/key && echo present
+
+1. Run: claude plugin marketplace add ctrlb-hq/ctrlb-agent
+   Then: claude plugin install ctrlb-agent@ctrlb-agent
+2. In the profile my $SHELL reads (~/.zshrc or ~/.bashrc), add this block. If a
+   block marked "# ctrlb" is already there, replace it:
+     # ctrlb
+     export CTRLB_URL="<your CtrlB URL>"
+     export CTRLB_MCP_URL="<your CtrlB URL>/mcp"
+     export CTRLB_KEY="$(cat ~/.ctrlb/key)"
+     # end ctrlb
+3. Check the key without showing it:
+     curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $(cat ~/.ctrlb/key)" "<your CtrlB URL>/ai/relay/agent_sessions/runs?limit=1"
+   200 means the key works. 401 or 403 means the key is wrong, expired or revoked:
+   tell me to mint a new one and save it again.
+4. Tell me to open a new terminal, start claude, and run /ctrlb-agent:setup.
+```
+
+The plugin loads only in a new session, so the restart in step 4 is necessary. `/ctrlb-agent:setup` then checks the connection and offers to upload your past sessions.
+
+If your organization already installs the plugin through managed settings, remove step 1 from the prompt. To change the key later, run the command in step 1 again and open a new terminal.
 
 ## 3. Runs
 
