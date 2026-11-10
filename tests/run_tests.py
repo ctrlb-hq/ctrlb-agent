@@ -2245,7 +2245,6 @@ def main():
     test_done_evidence(seeker)
     test_round6_hooks(seeker)
     test_round8_hooks(seeker)
-    test_machine()
     test_failure_safety(seeker)
     test_config_and_status(seeker)
     test_codex_rows(seeker)
@@ -2254,6 +2253,7 @@ def main():
     test_root_install()
     test_codex_backfill(seeker)
     test_validate()
+    test_machine()      # last: earlier tests clear tests/work, where the mutant table is written
     seeker.httpd.shutdown()
     fails = [r for r in results if not r[1]]
     print(f'\n{len(results) - len(fails)}/{len(results)} passed (Seeker: synthetic fixtures in tests/fixtures/seeker)')
