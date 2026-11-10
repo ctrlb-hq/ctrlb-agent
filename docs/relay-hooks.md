@@ -6,6 +6,40 @@ slug: relay-hooks
 
 # Relay hooks
 
+## The agent-side state machine
+
+In a run, the agent makes no Relay bookkeeping call. The plugin's hooks run the protocol on the harness's events, Seeker decides, and the model does the work. One agent session is one machine. Every action is one Seeker call made by a hook, never by the model. `lib/hooks_shared.py` (`Machine`) implements this table for Claude Code (`plugin/hooks/hook.py`) and Codex (`codex/hook.py`). The two `hook.py` files only parse their harness's input.
+
+| State | Event | Action | Next state |
+|---|---|---|---|
+| idle | SessionStart, or SubagentStart, with a run id | `claim(next=true)`. Held: inject the task's name, files, test and ask_about. | holding |
+| idle | SessionStart with no run id, or no free task (also: the claim failed, or the sub-agent is a read-only type: `Explore`, `Plan`, `claude-code-guide`, `statusline-setup`) | inject only the run and agent ids and the peers line | free |
+| holding (also free, after a compaction or resume) | SessionStart with `source` `compact`, `resume` or `clear` | no call; inject the held tasks' briefs again from the state file | same |
+| holding or free | PreToolUse on an edit of a file nobody holds (not in `check`'s `conflicts` or `own`; or a `lapsed` or `unheld` conflict) | `claim(resource=path)` for this agent. On `belongs_to_task`: `claim(resource=task)` and inject its brief. | holding |
+| holding or free | PreToolUse on an edit of a file the agent holds (in `check`'s `own`) | nothing | same |
+| holding or free | PreToolUse on an edit of a file another agent holds (a `held` conflict, or a claim refused with `held_by`) | advisory: inject who holds it. enforce: deny with that reason. | same |
+| holding | PreToolUse on an edit, own hold (or the hold's task) within 20% of its lease end | claim again, which renews: the task name for a file of a held task, else the path. No injection. | holding |
+| holding | PostToolUse (or PostToolUseFailure) on Bash whose command names a held task's registered `test`, exit code 0 | `done(resource=task, evidence={command, exit_code, summary: last output line}, witnessed=true, next=true)`. Inject the next task's brief, or that no task is free. | holding, or free |
+| holding | PostToolUse or PostToolUseFailure on Bash, a `done` pending from an earlier failed call | send that `done` again first | as above |
+| holding | Stop | the existing upload (Stop fires after every turn; it does not end the session) | same |
+| holding or free | SessionEnd | the existing open handoff and upload | ended |
+| ended | SessionStart | as idle | as idle |
+| any | SubagentStart | the existing join behaviour, then the idle rule, for the sub-agent's own machine | as above |
+
+Rules for the machine:
+
+- **Run id.** `CTRLB_RUN`, or `run` in `~/.ctrlb/config.json`. With no run id the hooks do the session store work and the edit check of decision 7, and never claim.
+- **State file.** `~/.ctrlb/state/<session_id>.json` (a sub-agent: `<session_id>.<agent_id>.json`), written by the hooks under a lock, never by the model. It is the only memory between events: `{session_id, agent, run, state, tasks: {name: {key, paths, test, ask_about, lease_until, lease_s}}, holds: {key: {resource, task, lease_until, lease_s}}, pending_done, calls: {claim, check, done, read}}`. `lease_until` is in µs as Seeker sends it. `lease_s` is the length of the lease: `check`'s `own[].lease_s`, or `lease_until` minus the time of the claim's answer. `calls` counts this session's hook calls to Seeker.
+- **Time budgets.** The edit check gives up after two seconds and lets the edit through. A claim on write has its own two seconds (alarm at 4.5 s, inside the hook's 5 s `timeout`). If it fails or does not answer, advisory mode (the mode `check` answered) lets the edit through and enforce mode denies it. A `done` that fails (no answer, or an HTTP error) is logged and sent again on the next Bash event. A `done` that Seeker refuses (`done: false`) is not sent again: its message is injected. SessionStart's `claim(next=true)` has 5 s inside the hook's 10 s. Errors go to `~/.ctrlb/hooks.log`, one line per hook call to Seeker (`relay-hook <agent> <call> <resource> -> <answer>`).
+- **Facts only.** The hook decides from what it can see: the file path, `check`'s `conflicts` and `own`, the registered task list in the claim answers, the Bash command and its exit code, and the lease times in Seeker's answers. A test "passes" when the command names the task's `test` (Seeker's rule: the test, with white space collapsed, appears in the command) and the exit code is 0.
+- **Mode off.** `CTRLB_ENFORCE=off`, or Seeker's mode `off`: no check and no claim on write. The SessionStart claim and the `done` on a passing test still run.
+- **autoSlots files** (decision 47, below) are not claimed on write. Their slot is claimed and released around the edit, as before.
+- **The model can still call the tools.** The `claim`, `release` and `done` tools work as before, and the witness (decision 38) still checks a `done` the model sends. The hook's own `done` is witnessed: the hook saw the command and its exit code.
+
+The injected text names the run and agent ids. It says that Relay holds files and tasks for the agent through hooks, so the agent never claims or releases by hand, and that a blocked edit names who holds the file. It gives the peers line (`peers`, `post`, `ask`, `answer`, with the run and agent ids) and the scratch directory. It says nothing about claim, release, renew or done. A held task's brief adds the task's name, files, test command (to run as written) and ask_about. The round 8 rule text (v10), for a harness without hooks, is in [Relay tools](relay-tools.md#rule-text-for-a-harness-without-hooks).
+
+## Each hook
+
 The plugin's hooks run `python3 -I plugin/hooks/hook.py <mode>` (Codex: `codex/hook.py`) with the hook's JSON on stdin. A hook never fails a session: every error goes to `~/.ctrlb/hooks.log` and the hook exits 0. Every round 8 hook is built to fail open: when Seeker is slow, down or answers an error, the session goes on as if the hook were not there. This page lists, per hook, the event, the input fields it relies on, what it writes and its time budget. The field names and budgets are from the Claude Code hooks reference (code.claude.com/docs/en/hooks.md; sections cited by name below).
 
 ## Fields the hooks rely on
