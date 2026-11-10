@@ -117,12 +117,12 @@ Before an edit, the hook sends the file path, relative to the session's working 
 | `enforce` | When another agent in the run holds the file |
 |---|---|
 | `off` | Nothing happens. |
-| `advisory` (default) | The agent gets a note naming the holder and the `claim` call to make. The edit goes ahead. |
-| `enforce` | The edit is refused. The reason names the holder and the `claim` call to make. |
+| `advisory` (default) | The agent gets a note naming the holder. The edit goes ahead. |
+| `enforce` | The edit is refused. The reason names the holder. |
 
 The check gives up after two seconds. If CtrlB does not answer, the edit goes ahead and the error is written to `~/.ctrlb/hooks.log`. Claims are advisory unless the workspace turns on `enforce`. `CTRLB_ENFORCE=off` skips the check on one machine.
 
-In a relay run the plugin also registers a task for each sub-agent it spawns, keeps small text files from the session's scratch directories in the record, starts each session with the run's open tasks, contracts and handoffs, and claims shared files such as `REGISTRY.md` around each edit (`CTRLB_AUTO_SLOTS`, `CTRLB_SCRATCH_DIR`). See [Relay hooks](relay-hooks.md).
+In a relay run (`CTRLB_RUN` set), the hooks run Relay's bookkeeping and the agent makes no Relay call for it. The session starts by claiming the run's next task, whose name, files and test are injected. The first edit of a file nobody holds claims it (or the task it belongs to), and an edit near the lease end renews the hold. When a Bash command runs the task's test and exits 0, the hook marks the task done with that run as witnessed evidence and claims the next one. If the claim on write fails, advisory mode lets the edit go ahead and enforce mode refuses it. The plugin also registers a task for each sub-agent it spawns, keeps small text files from the session's scratch directories in the record, and claims shared files such as `REGISTRY.md` around each edit (`CTRLB_AUTO_SLOTS`, `CTRLB_SCRATCH_DIR`). See [Relay hooks](relay-hooks.md).
 
 ### When the session ends, and when the agent calls done
 

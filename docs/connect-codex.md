@@ -39,7 +39,7 @@ python3 -I install.py --codex
 
 `--dry-run` prints the change to `~/.codex/config.toml` as a diff and writes nothing. The second command writes it.
 
-Then start Codex and run `/hooks` once. Codex skips new or changed hooks until you trust them.
+Then a person starts Codex and runs `/hooks` once, before any run, to trust the new hooks. Codex skips new or changed hooks until they are trusted, so a `codex exec` run with untrusted hooks makes no claim, no edit check and no `done`. Run `/hooks` again after the installer changes the block (this version adds `PostToolUse`).
 
 ## What it writes
 
@@ -60,12 +60,13 @@ Then one `[[hooks.<Event>]]` table per event. Each runs `python3 -I <clone>/code
 
 | Event | Mode | What it does |
 |---|---|---|
-| `SessionStart` | `session-start` | Tells the agent its run id and agent id, and how to search its record |
-| `SubagentStart` | `subagent-start` | Uploads the parent's new lines, tells the subagent its parent and ids |
+| `SessionStart` | `session-start` | Tells the agent its run id and agent id, and how to search its record. In a run (`CTRLB_RUN` set), claims the next task and names it ([Relay hooks](relay-hooks.md#the-agent-side-state-machine)) |
+| `SubagentStart` | `subagent-start` | Uploads the parent's new lines, tells the subagent its parent and ids (the subagent thread's own `SessionStart` claims its task) |
 | `PreCompact` | `flush` | Uploads the lines added since the last upload |
-| `SessionEnd` | `session-end` | In a relay run (`CTRLB_RUN` set), hands off every hold the agent still has to nobody, in one write (tasks open for the next claimer, paths and slots released), then uploads like `flush`. Codex has no hook after a tool call, so the handoff's text cannot list edits or tests, and `done` carries no witness |
-| `Stop`, `SubagentStop` | `upload` | The same, in the background (`async = true`) |
-| `PreToolUse`, matcher `apply_patch` | `pre-tool` | Sends the patch's file paths to the edit check |
+| `SessionEnd` | `session-end` | In a relay run (`CTRLB_RUN` set), hands off every hold the agent still has to nobody, in one write (tasks open for the next claimer, paths and slots released), then uploads like `flush`. The handoff's text does not list edits or tests |
+| `Stop`, `SubagentStop` | `upload` | The same, in the background (`async = true`). If no `PostToolUse` reached the session, first reads the rollout's shell calls for a passing test of a held task and sends `done` |
+| `PreToolUse`, matcher `apply_patch` | `pre-tool` | Sends the patch's file paths to the edit check. In a run, claims a file nobody holds (or the task it belongs to), renews a hold near its lease end, and names the agent that holds a file |
+| `PostToolUse`, matcher `Bash` | `post-tool` | In a run, when a shell command runs a held task's test and exits 0, sends `done` with that run as witnessed evidence and claims the next task |
 
 For example, the `PreToolUse` table:
 
@@ -78,7 +79,7 @@ command = "python3 -I \"/home/you/ctrlb-agent/codex/hook.py\" pre-tool"
 timeout = 5
 ```
 
-Every hook exits 0 and never blocks a session. Errors go to `~/.ctrlb/hooks.log`. The edit check gives up after two seconds and lets the patch through.
+Every hook exits 0. Errors go to `~/.ctrlb/hooks.log`. The edit check gives up after two seconds and lets the patch through. A claim on write that fails lets the patch through in advisory mode and blocks it in enforce mode.
 
 ## Backup and running it again
 

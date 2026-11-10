@@ -13,8 +13,9 @@ In a run, the agent makes no Relay bookkeeping call. The plugin's hooks run the 
 | State | Event | Action | Next state |
 |---|---|---|---|
 | idle | SessionStart, or SubagentStart, with a run id | `claim(next=true)`. Held: inject the task's name, files, test and ask_about. | holding |
-| idle | SessionStart with no run id, or no free task (also: the claim failed, or the sub-agent is a read-only type: `Explore`, `Plan`, `claude-code-guide`, `statusline-setup`) | inject only the run and agent ids and the peers line | free |
-| holding (also free, after a compaction or resume) | SessionStart with `source` `compact`, `resume` or `clear` | no call; inject the held tasks' briefs again from the state file | same |
+| idle | SessionStart with no run id, or no free task (also: the claim failed, or the sub-agent is a read-only type: `Explore`, `Plan`, `claude-code-guide`, `statusline-setup`) | inject only the run and agent ids and the peers line (with a run id, also the hooks line) | free |
+| holding | SessionStart with `source` `compact`, `resume` or `clear` | no call; inject the held tasks' briefs again from the state file | same |
+| free | SessionStart with `source` `compact` | no call (the same session goes on) | same |
 | holding or free | PreToolUse on an edit of a file nobody holds (not in `check`'s `conflicts` or `own`; or a `lapsed` or `unheld` conflict) | `claim(resource=path)` for this agent. On `belongs_to_task`: `claim(resource=task)` and inject its brief. | holding |
 | holding or free | PreToolUse on an edit of a file the agent holds (in `check`'s `own`) | nothing | same |
 | holding or free | PreToolUse on an edit of a file another agent holds (a `held` conflict, or a claim refused with `held_by`) | advisory: inject who holds it. enforce: deny with that reason. | same |
@@ -24,12 +25,12 @@ In a run, the agent makes no Relay bookkeeping call. The plugin's hooks run the 
 | holding | Stop | the existing upload (Stop fires after every turn; it does not end the session) | same |
 | holding or free | SessionEnd | the existing open handoff and upload | ended |
 | ended | SessionStart | as idle | as idle |
-| any | SubagentStart | the existing join behaviour, then the idle rule, for the sub-agent's own machine | as above |
+| any | SubagentStart | the existing join behaviour, then the idle rule, for the sub-agent's own machine (Codex: join only; the sub-agent thread's own SessionStart runs the idle rule) | as above |
 
 Rules for the machine:
 
 - **Run id.** `CTRLB_RUN`, or `run` in `~/.ctrlb/config.json`. With no run id the hooks do the session store work and the edit check of decision 7, and never claim.
-- **State file.** `~/.ctrlb/state/<session_id>.json` (a sub-agent: `<session_id>.<agent_id>.json`), written by the hooks under a lock, never by the model. It is the only memory between events: `{session_id, agent, run, state, tasks: {name: {key, paths, test, ask_about, lease_until, lease_s}}, holds: {key: {resource, task, lease_until, lease_s}}, pending_done, calls: {claim, check, done, read}}`. `lease_until` is in µs as Seeker sends it. `lease_s` is the length of the lease: `check`'s `own[].lease_s`, or `lease_until` minus the time of the claim's answer. `calls` counts this session's hook calls to Seeker.
+- **State file.** `~/.ctrlb/state/<session_id>.json` (a Claude Code sub-agent: `<session_id>.<agent_id>.json`; a Codex sub-agent: its own thread id, which is the `agent_id` its tool calls carry), written by the hooks (held exclusively while it is read and written), never by the model. It is the only memory between events: `{session_id, agent, run, state, tasks: {name: {key, paths, test, ask_about, lease_until, lease_s}}, holds: {key: {resource, task, lease_until, lease_s}}, pending_done, calls: {claim, check, done, read}}`. `lease_until` is in µs as Seeker sends it. `lease_s` is the length of the lease: `check`'s `own[].lease_s`, or `lease_until` minus the time of the claim's answer. `calls` counts this session's hook calls to Seeker.
 - **Time budgets.** The edit check gives up after two seconds and lets the edit through. A claim on write has its own two seconds (alarm at 4.5 s, inside the hook's 5 s `timeout`). If it fails or does not answer, advisory mode (the mode `check` answered) lets the edit through and enforce mode denies it. A `done` that fails (no answer, or an HTTP error) is logged and sent again on the next Bash event. A `done` that Seeker refuses (`done: false`) is not sent again: its message is injected. SessionStart's `claim(next=true)` has 5 s inside the hook's 10 s. Errors go to `~/.ctrlb/hooks.log`, one line per hook call to Seeker (`relay-hook <agent> <call> <resource> -> <answer>`).
 - **Facts only.** The hook decides from what it can see: the file path, `check`'s `conflicts` and `own`, the registered task list in the claim answers, the Bash command and its exit code, and the lease times in Seeker's answers. A test "passes" when the command names the task's `test` (Seeker's rule: the test, with white space collapsed, appears in the command) and the exit code is 0.
 - **Mode off.** `CTRLB_ENFORCE=off`, or Seeker's mode `off`: no check and no claim on write. The SessionStart claim and the `done` on a passing test still run.
@@ -49,6 +50,7 @@ From "Common input fields": `session_id`, `transcript_path`, `cwd`, `hook_event_
 | Event | Fields read | Reference section |
 |---|---|---|
 | SessionStart | `source` (`startup`, `resume`, `clear`, `compact`, `fork`) | SessionStart input |
+| SubagentStart | `agent_id`, `agent_type` (a read-only type claims nothing) | SubagentStart input |
 | PreToolUse | `tool_name`, `tool_input`; for the `Agent` tool `tool_input.prompt`, `tool_input.description` (`subagent_type`, `model` are not used); for `Write` and `Edit` `tool_input.file_path` (always absolute) | PreToolUse input, `##### Agent`, `##### Write`, `##### Edit` |
 | PostToolUse | `tool_name`, `tool_input`, `tool_response` (`duration_ms` is not used) | PostToolUse input |
 | PostToolUseFailure | `tool_name`, `tool_input`, `error` | PostToolUseFailure input |
@@ -73,7 +75,10 @@ A hook "is in a relay run" as the session-end handoff decides it: `CTRLB_RUN` is
 |---|---|---|---|---|---|
 | Spawn registers a task (`pre-agent`, decision 43) | PreToolUse, `Agent\|Task` | 5 s | synchronous, all writes inside 2.5 s (alarm at 3 s) | `POST /ai/relay/{dataset}/runs/{run}/briefs` (task), again for the contract | open: prints nothing, ever; the spawn goes ahead unchanged |
 | Artefacts (`post-tool`, decision 44) | PostToolUse, `Edit\|Write\|MultiEdit\|NotebookEdit\|...` | 5 s | the checks inline, the post detached (10 s) | `POST .../posts` with `key` and `hash` | open: no output; a failed post is retried on the next write |
-| Record at session start (`session-start`, decision 45) | SessionStart | 10 s | synchronous, all reads in parallel inside 3 s | `GET .../tasks`, `GET .../contracts?agent=`, `GET .../peers?kind=note`, `GET .../peers?kind=handoff`, `GET .../artifacts?agent=` | the rule always; a part that did not answer comes from the local cache, or is left out |
+| Claim the next task (`session-start`, `subagent-start`, the hooks protocol) | SessionStart, SubagentStart | 10 s | synchronous, 5 s | `POST .../claims` `{next: true}` | open: state free, the text without a brief |
+| Claim on write, renew, name the holder (`pre-tool`, the hooks protocol) | PreToolUse, `Edit\|Write\|MultiEdit\|NotebookEdit` | 5 s | synchronous: the check inside 2 s, the claims inside 2 s more (alarm at 4.5 s) | `POST .../check` (answer has `own`), then `POST .../claims` `{resource: <path or task>}` | check fails or is slow: open, no output. A claim fails or is slow: advisory open, enforce deny |
+| Done on a passing test (`post-tool`, `post-tool-failure`, the hooks protocol) | PostToolUse and PostToolUseFailure, `Bash` | 5 s | synchronous, 3 s | `POST .../done` `{resource, evidence, witnessed: true, next: true}` | kept and sent again on the next Bash event |
+| Artefacts at session start (`session-start`, decision 45) | SessionStart | 10 s | synchronous, inside 3 s | `GET .../artifacts?agent=` | the text without the artefacts line |
 | Scratch directory (`session-start`, D) | SessionStart | 10 s | local | none | — |
 | autoSlots claim (`pre-tool`, decision 47) | PreToolUse, `Edit\|Write\|MultiEdit\|NotebookEdit` | 5 s | synchronous, the claim inside 1.5 s (alarm at 2 s) | `POST .../claims` `{resource: "slot:<path>", paths: [<path>]}` | open: deny only on a definite answer that another agent holds it |
 | autoSlots release (`post-tool`, `post-tool-failure`, decision 47) | PostToolUse and PostToolUseFailure, edit tools | 5 s | synchronous, inside 1 s | `DELETE .../claims` `{resource: "slot:<path>"}` | the slot lapses (a slot's lease is two minutes) |
@@ -93,22 +98,9 @@ The hook never prints anything and never changes the prompt. Ordering: Claude Co
 
 PostToolUse on the edit tools, in a relay run, for a file under the session's `scratchpad_dir` or under `scratchDir`. A text file (UTF-8, no NUL byte) under 32 KB is posted as a NOTE keyed `artifact:<path relative to that directory>` with its text and `hash` (`sha256:<hex>`). The hook keeps the hash of the last posted content per path, so a write with the same content posts nothing; the hash is kept before the post and dropped again when the post fails, so the next write retries. Skipped, with a line in the hook log naming only the relative path and why: binaries, files of 32 KB or more, files with a secret-looking name (`.env*`, `*.pem`, `*.key`, `id_rsa`, `auth.json`, `credentials`, `.netrc`, ...) and files any of the plugin's secret patterns (`lib/redact.py`) matches. Nothing leaves the machine before those checks. The post runs in a detached process (its own session, stdout and stderr to `/dev/null`, the content on its stdin), so the hook returns at once. The plugin also keeps a local copy of each posted artefact under `~/.ctrlb/state/`, for the session-start fallback.
 
-### A session starts with the record (decision 45)
+### Artefacts at session start (decision 45)
 
-SessionStart, when the environment carries a run id (`CTRLB_RUN`) and `source` is not `compact` (after a compaction the same session goes on, with its holds and scratch files in place). Within 3 s, in parallel, the hook reads the run's tasks (holder, `stalled`, `test`, `handed_off`), contracts, notes, handoffs and this agent's artefacts. It writes the artefacts this machine does not have into `scratchDir` (never outside it; an existing file is left alone) and adds a block under 2 KB after the rule text:
-
-```text
-CtrlB Relay record of run nightly-7 at session start:
-Open tasks: task 01 parse (held by agent-b, stalled; test: python3 -m pytest tests/test_parse.py); task 02 emit (free, handed off).
-Contracts: parse api. Read them with `contracts` before building on them.
-Handoffs: task 02 emit handed off openly by agent-c: Session ended. Edited: src/emit.py. ... | task 04 render handed to you by agent-c: ...
-Your last notes: parse: tokenizer done.
-Your artefacts from the previous session are in ~/.ctrlb/relay/nightly-7/scratch.
-```
-
-Lines with nothing to say are left out; when the block would pass 2 KB, the notes go first, then the handoffs, then the contracts.
-
-Decision: the reads are synchronous inside the hook. SessionStart has no budget of its own beyond the hook's `timeout` (10 s here), and Claude's first response waits for SessionStart hooks, so a synchronous read puts the block in context before the agent's first claim; a background refresh could not reach this session's context. A part that does not answer inside 3 s (or answers an error) comes from the local cache, which every successful read refreshes, and the block says which parts came from the cache and when. Artefacts fall back to the local copies of what this machine posted. With neither, the session gets the rule alone. The hook ends inside its budget either way.
+SessionStart, when the environment carries a run id (`CTRLB_RUN`) and `source` is not `compact`. Under the hooks protocol the session no longer starts with the record block (open tasks and holders, contracts, handoffs, notes): the hooks hold the agent's task, so the injected text is who the agent is, how to talk to peers and, when one is held, its task's brief. The hook still reads this agent's artefacts (`GET .../artifacts?agent=`, inside 3 s) and writes those this machine does not have into `scratchDir` (never outside it; an existing file is left alone), falling back to the local copies of what this machine posted. When it wrote any, one line says where: `Your artefacts from the previous session are in <scratchDir>.` A read that fails or is slow leaves the line out.
 
 ### Durable scratch directory (D)
 
@@ -125,8 +117,9 @@ Fail-open: a claim that errors or does not answer inside 1.5 s lets the edit go 
 | Hook | Codex |
 |---|---|
 | Spawn registers a task (43) | No: Codex's hooks give no sub-agent spawn tool input to read (its PreToolUse hook is installed for `apply_patch` only). |
-| Artefacts (44) | No: Codex has no hook after a tool call. |
-| Record at session start (45) and scratch directory (D) | Yes: `codex/hook.py session-start` adds the same block (artefacts only from the record; Codex posts none). |
+| Artefacts (44) | No: Codex's PostToolUse hook is installed for `Bash` only. |
+| The hooks protocol | Yes. SessionStart claims the next task. PreToolUse on `apply_patch` checks the patch's files, claims on write and renews. PostToolUse on `Bash` sends `done` on a passing test (Codex 0.166 and later fire PostToolUse with `tool_name` `Bash`, `tool_input.command` and `tool_response`, and accept `additionalContext` in its output). A sub-agent's SubagentStart only joins; the sub-agent thread's own SessionStart claims. If no PostToolUse reached a session (its hooks were not trusted for that event), the Stop hook reads the rollout's shell calls since the last Stop for a passing test and sends `done` then; that `done` cannot inject the next task's brief, because Stop takes no context. |
+| Artefacts at session start (45) and scratch directory (D) | Yes: the scratch directory; artefacts only from the record (Codex posts none). |
 | autoSlots (47) | No: with no hook after a patch, a slot claimed before it could not be released after it. Codex agents claim `slot:REGISTRY.md` themselves (see [Relay tools](relay-tools.md#slots)). |
 | Session-end handoff (36) | Yes, with a fixed text. |
 
