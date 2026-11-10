@@ -3,7 +3,7 @@
 Seeker is a local fake that answers with the synthetic responses in tests/fixtures/seeker/ (relay-plan section 4).
 Nothing is sent anywhere else, Claude is never called, and no real config is read: every CTRLB_* variable from the
 calling environment is dropped and CTRLB_HOME points into tests/work/."""
-import base64, glob, hashlib, http.server, json, os, re, shutil, socket, stat, subprocess, sys, threading, time
+import base64, glob, hashlib, http.server, json, os, re, shutil, socket, stat, subprocess, sys, tempfile, threading, time
 sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -106,7 +106,12 @@ class Seeker:
                     if s == 'slow':
                         time.sleep(5)
                         s = 'allow'
-                    return self._answer(**outer.check_fx['responses'][s])
+                    ans = outer.check_fx['responses'][s]
+                    if outer.state.get('echo') and ans['body'].get('conflicts'):
+                        # the hooks protocol matches conflicts by path: answer for the paths asked about
+                        c0 = ans['body']['conflicts'][0]
+                        ans = dict(ans, body=dict(ans['body'], conflicts=[dict(c0, path=x, key='path:' + x) for x in body.get('paths') or []]))
+                    return self._answer(**ans)
                 m = re.match(r'^/ai/relay/([A-Za-z0-9_]+)/runs/([^/]+)/handoffs$', self.path)
                 if m and method == 'POST':
                     s = outer.state['handoff']
@@ -164,6 +169,8 @@ def r8_answer(route, method, body, query, state):
                      'resource': res, 'paths': ['path:' + p for p in body.get('paths') or []]}
     if route == 'claims':
         res = body.get('resource') or ''
+        if body.get('next') and not res:      # claim(next=true) of the hooks protocol: no task is free here
+            return 200, {'held': False, 'free_tasks': [], 'message': 'There is no free task in this run'}
         k = 'slot:' + res[len('slot:'):].lower() if res.startswith('slot:') else res
         if state == 'held':
             return 200, {'held': False, 'resource': res, 'key': k, 'held_by': 'agent-b', 'message': f'{res} is already held by agent-b'}
@@ -275,6 +282,26 @@ def task_claim_first(text, name_claim, file_claim):
 REGISTERED = 'Claim the task by the name your orchestrator registered'
 
 
+def v10_rule(run='<run>', agent='<agent>'):
+    """The round 8 rule text (v10), kept in docs/relay-tools.md as the reference for a harness without hooks; the
+    plugin injects the hooks text (hooks_shared.RELAY) instead."""
+    doc = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
+    sec = doc.split('## Rule text for a harness without hooks', 1)[1]
+    text = sec.split('```text\n', 1)[1].split('\n```', 1)[0]
+    return text.replace('<run>', run).replace('<agent>', agent).replace('<scratch directory>', '{scratch}')
+
+
+def hooks_rule(text, run, agent):
+    """The hooks protocol's injected text: ids, the hooks hold files and tasks (never by hand), a blocked edit names
+    the holder, the peers line with the ids, and nothing about claim, release, renew or done."""
+    return (f'your run id is {run} and your agent id is {agent}' in text
+            and 'Relay holds files and tasks for you through the plugin\'s hooks, so never claim or release anything by hand' in text
+            and 'If an edit is blocked, the message names the agent that holds the file' in text
+            and f'pass run_id="{run}" and agent="{agent}" to the ctrlb tools peers' in text
+            and 'post (a note to all), ask (a question to one agent) and answer' in text
+            and not any(w in text for w in ('claim(', 'release(', 'done(', 'renew', 'finished=true', 'next=true', 'takeover')))
+
+
 def registered_rule(text, md=False):
     """Rule 3 after Seeker decision 18: claim the registered task, its files come with it, one claim held, release it
     finished; a file of no task is claimed by its path; no separate claim of the task's file."""
@@ -361,31 +388,41 @@ def test_hooks(seeker):
     ctx = o.get('additionalContext', '')
     check('session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {SID}' in ctx and f'run id is {SID}' in ctx and f'agent id is {SID}' in ctx and p.returncode == 0)
-    check('session-start: claims the registered task, its files come with it, holds one claim', registered_rule(ctx))
-    check('session-start: refusals, unknown_task, reopen a finished task',
-          'held is false with finished_by, the task is done' in ctx and 'held is false with held_by, another agent has it' in ctx
-          and 'If reason is unknown_task, claim again with the suggestion' in ctx and 'claim its name with reopen=true' in ctx)
-    check('session-start: slots for things that are not files', 'is claimed as slot:<name> and released when you are done with it' in ctx
-          and ctx.index('slot:<name>') < ctx.index('reopen=true'))
+    check('session-start without a run id: ids and the peers line only, no hooks line (the hooks never claim)',
+          f'pass run_id="{SID}" and agent="{SID}" to the ctrlb tools peers' in ctx and "through the plugin's hooks" not in ctx
+          and 'claim' not in ctx.split('CtrlB Relay:', 1)[1])
+    rule = v10_rule()
+    check('v10 rule (docs, harness without hooks): claims the registered task, its files come with it, holds one claim',
+          registered_rule(rule))
+    check('v10 rule: refusals, unknown_task, reopen a finished task',
+          'held is false with finished_by, the task is done' in rule and 'held is false with held_by, another agent has it' in rule
+          and 'If reason is unknown_task, claim again with the suggestion' in rule and 'claim its name with reopen=true' in rule)
+    check('v10 rule: slots for things that are not files', 'is claimed as slot:<name> and released when you are done with it' in rule
+          and rule.index('slot:<name>') < rule.index('reopen=true'))
     check('relay skill and tools: slots, two-minute lease, never finished',
           'claimed as `slot:<name>` and released when you are done with it' in open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
           and all(n in open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read() for n in
                   ('## Slots', '`slot:devserver`', '`slot:port-3000`', '`slot:db-migrate`', '`slot:screenshots`', '`slot:commit`', 'lasts two minutes')))
-    check('session-start: names the relay tools, contract and contracts among them',
-          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts)' in ctx)
-    check('session-start: the coordination tools before a prose note, one sentence each',
+    check('v10 rule: names the relay tools, contract and contracts among them',
+          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts)' in rule)
+    ctx_session = ctx
+    ctx = rule
+    check('v10 rule: the coordination tools before a prose note, one sentence each',
           'Use the coordination tools before a prose note: handoff when you must leave a task you hold, so it moves to the agent '
           'you name in one step; ask when you are blocked on something only another agent or the orchestrator can decide; '
           "answer, with the question's id, when you can settle an open question; contract when you finish an interface others "
           'will build on (a type, a route, a config shape), with its name, the shape in a few lines and the files that define '
           "it. Before you build on a contract, read it with `contracts`. If it is stale, read the file it names and check your "
           "assumptions against it. Post a note only for what none of them covers." in ctx)
+    ctx = ctx_session
     check('session-start under 1 s', dt < 1.0, f'{dt:.2f}s')
     p, _ = hook('session-start', I['session_start_compact'], dict(env, CTRLB_RUN='relay-run-7', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
     check('session-start: CTRLB_RUN and CTRLB_AGENT win', 'run id is relay-run-7' in ctx and 'agent id is builder-1' in ctx
           and 'run_id="relay-run-7"' in ctx)
-    check('session-start sends nothing to Seeker', not seeker.calls)
+    check('session-start with a run id: the hooks text (ids, hooks hold files and tasks, blocked edit names the holder, '
+          'peers), nothing about claim, release, renew or done', hooks_rule(ctx, 'relay-run-7', 'builder-1'), ctx[-500:])
+    check('session-start after a compaction sends nothing to Seeker (the same session goes on)', not seeker.calls)
 
     # Stop: main and subagent rows
     seeker.reset()
@@ -1035,16 +1072,13 @@ def test_codex_hooks(seeker):
     ctx = o.get('additionalContext', '')
     check('codex session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {CSID}' in ctx and f'run id is {CSID}' in ctx and f'agent id is {CSID}' in ctx and p.returncode == 0, f'{dt:.2f}s')
-    check('codex session-start: claims the registered task, its files come with it', registered_rule(ctx))
-    check('codex session-start: names the relay tools, ask and answer among them',
-          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts)' in ctx
-          and 'Use the coordination tools before a prose note: handoff when' in ctx and '; ask when you are blocked' in ctx)
-    check('codex session-start: slots', 'slot:<name>' in ctx)
-    check('codex session-start: release it finished; reopen a finished task',
-          'release it with finished=true' in ctx and 'claim its name with reopen=true' in ctx)
+    check('codex session-start without a run id: ids and the peers line, no hooks line',
+          f'pass run_id="{CSID}" and agent="{CSID}" to the ctrlb tools peers' in ctx and "through the plugin's hooks" not in ctx)
     p, _ = chook('session-start', I['session_start'], dict(env, CTRLB_RUN='relay-run-8', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
     check('codex session-start: CTRLB_RUN and CTRLB_AGENT win', 'run id is relay-run-8' in ctx and 'agent id is builder-1' in ctx)
+    check('codex session-start with a run id: the hooks text, nothing about claim, release, renew or done',
+          hooks_rule(ctx, 'relay-run-8', 'builder-1'), ctx[-400:])
     p, _ = chook('session-start', I['session_start_subagent'], env)
     ctx = out_of(p).get('additionalContext', '')
     check('codex session-start in a subagent thread: parent session, parent run, own agent id', f'subagent of session {CSID}' in ctx
@@ -1111,7 +1145,9 @@ def test_codex_hooks(seeker):
           seeker.calls and seeker.calls[0]['body']['paths'] == ['src/service/rti_ab.rs'] and out_of(p).get('permissionDecision') == 'deny')
     p, _ = run('enforce', 'pre_tool_bash')
     check('codex pre-tool: a shell command without a patch makes no call', not seeker.calls and not p.stdout.strip())
+    seeker.state['echo'] = True
     p, _ = run('enforce', 'pre_tool_subagent_patch', dict(env, CTRLB_RUN='relay-run-8'))
+    seeker.state['echo'] = False
     c = seeker.calls[0] if seeker.calls else {}
     check('codex pre-tool in a subagent: CTRLB_RUN in the route, the subagent thread id as agent',
           c.get('path') == '/ai/relay/agent_sessions/runs/relay-run-8/check' and c.get('body', {}).get('agent') == CSUB
@@ -1283,7 +1319,7 @@ def test_wait_wording():
     belongs_to_task means, ask_about, and contracts (now: read it before building on it, and check a stale one)."""
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import hooks_shared as H
-    rule = H.RELAY
+    rule = v10_rule('{run}', '{agent}')   # the v10 text, now in docs/relay-tools.md (a harness without hooks)
     check('relay rule v9: no wait_s, no waiting in line on a claim', 'wait_s' not in rule and 'wait in line' not in rule.replace('Never wait in line', ''))
     check('relay rule: belongs_to_task means claim the task it names', 'If reason is belongs_to_task' in rule and 'claim that task (task in the answer)' in rule)
     check('relay rule v9: read a contract before building on it; a stale one means read its file',
@@ -1320,7 +1356,7 @@ def test_takeover_wording():
     a held takeover's token is kept like a claim's."""
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import hooks_shared as H
-    rule = H.RELAY
+    rule = v10_rule('{run}', '{agent}')   # the v10 text, now in docs/relay-tools.md (a harness without hooks)
     v8 = ("If tasks shows a task you need as stalled, claim it with takeover=true, read its evidence and notes, and "
           "continue it. Never wait in line on a stalled task. If a file you need is held by an agent that has stopped, "
           "the hold shows as stalled; take it over the same way.")
@@ -1356,7 +1392,7 @@ def test_done_evidence(seeker):
     like a release."""
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import hooks_shared as H
-    rule = H.RELAY
+    rule = v10_rule('{run}', '{agent}')   # the v10 text, now in docs/relay-tools.md (a harness without hooks)
     v7 = ("Run the task's test command (tasks and claim show it as test); when it passes, call done on the task name "
           "with that command, its exit code and its last output line as the evidence. When the task has no test "
           "command, give the check you ran. A task is finished only when the record shows what was checked.")
@@ -1485,7 +1521,7 @@ def test_round6_hooks(seeker):
     agent set itself is dropped."""
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import hooks_shared as H
-    rule = H.RELAY
+    rule = v10_rule('{run}', '{agent}')   # the v10 text, now in docs/relay-tools.md (a harness without hooks)
     check('relay rule v9: redirect to a free task; an empty list means note and stop',
           'If a claim is refused and the answer lists free tasks, claim one of them next. If the list is empty, post a note '
           'saying you have no task and stop.' in rule and 'wait_s' not in rule)
@@ -1632,7 +1668,7 @@ def test_round8_hooks(seeker):
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import hooks_shared as H
     import relay_hooks as RH
-    rule = H.RELAY
+    rule = v10_rule('{run}', '{agent}')   # the v10 text, now in docs/relay-tools.md (a harness without hooks)
     check('relay rule v10: claim(next=true) first, done with next=true, peers only to wait',
           'Start with `claim(next=true)`. When your test passes, call `done` with the evidence and `next=true`. Call `peers` '
           'only when you are waiting for an answer or a handoff.' in rule)
@@ -1710,25 +1746,17 @@ def test_round8_hooks(seeker):
     ctx = out_of(p).get('additionalContext', '')
     check('session-start: the default scratchDir is <CTRLB_HOME>/relay/<run id>/scratch', os.path.isdir(default) and default in ctx)
 
-    # C: the record block.
-    block = ctx[ctx.find('CtrlB Relay record of run'):] if 'CtrlB Relay record of run' in ctx else ''
+    # C under the hooks protocol: no record block; this agent's artefacts are written back and one line says where.
     gets = sorted(c['path'].split('?')[0].rsplit('/', 1)[-1] for c in seeker.calls if c['method'] == 'GET')
-    check('session-start (relay run): reads tasks, contracts, peers (notes, handoffs) and artifacts of this agent',
-          gets == ['artifacts', 'contracts', 'peers', 'peers', 'tasks'] and any('agent=agent-1' in c['path'] for c in seeker.calls
-                                                                                   if '/artifacts' in c['path']), ','.join(gets))
-    check('session-start block: open tasks with holder, stalled flag and test; a finished task left out',
-          'task 01 parse (held by agent-b, stalled; test: python3 -m pytest tests/test_parse.py)' in block
-          and 'task 02 emit (free, handed off)' in block and 'task 00 setup' not in block, block)
-    check('session-start block: contract names, the open handoff and the one addressed to this agent, not others',
-          'Contracts: parse api.' in block and 'task 02 emit handed off openly by agent-c' in block
-          and 'task 04 render handed to you by agent-c' in block and 'task 09 other' not in block, block)
-    check('session-start block: this agent\'s last notes only (no artifact notes)',
-          'Your last notes: parse: tokenizer done.' in block and 'someone else' not in block and 'artifact body' not in block, block)
+    check('session-start (relay run): reads only this agent\'s artifacts (no tasks, contracts or peers), and claims the next task',
+          gets == ['artifacts'] and any('agent=agent-1' in c['path'] for c in seeker.calls if '/artifacts' in c['path'])
+          and any(c['path'].endswith('/claims') and (c['body'] or {}).get('next') is True for c in seeker.calls), ','.join(gets))
+    check('session-start: no record block (open tasks, contracts, handoffs, notes) is injected',
+          'CtrlB Relay record of run' not in ctx and 'Open tasks:' not in ctx and 'Contracts:' not in ctx, ctx[-300:])
     restored = os.path.join(default, 'plan.md')
-    check('session-start: artefacts written back to scratchDir (a path escaping it is not), and the block says where',
+    check('session-start: artefacts written back to scratchDir (a path escaping it is not), and one line says where',
           os.path.isfile(restored) and open(restored).read() == R8_ARTIFACT and not os.path.exists(os.path.join(home, 'relay', run, 'escape.md'))
-          and f'Your artefacts from the previous session are in {default}.' in block, block)
-    check('session-start block: under 2 KB, after the rule', 0 < len(block.encode()) < 2048 and ctx.index('CtrlB Relay: your run id') < ctx.index(block))
+          and f'Your artefacts from the previous session are in {default}.' in ctx, ctx[-300:])
     seeker.reset()
     for r in ('tasks', 'contracts', 'peers', 'artifacts'):
         seeker.state[r] = 'slow'
@@ -1736,9 +1764,8 @@ def test_round8_hooks(seeker):
     for r in ('tasks', 'contracts', 'peers', 'artifacts'):
         seeker.state[r] = 'ok'
     ctx = out_of(p).get('additionalContext', '')
-    check(f'session-start budget: Seeker slower ({SLOW_S}s) than the {RH.RECORD_S}s read: returns inside it with the rule and '
-          'the block from the local cache, saying so', p.returncode == 0 and dt < RH.RECORD_S + 1.0 and 'your run id is run-r8' in ctx
-          and 'from the local cache of' in ctx and 'task 01 parse (held by agent-b' in ctx, f'{dt:.2f}s')
+    check(f'session-start budget: Seeker slower ({SLOW_S}s) than the {RH.RECORD_S}s artefacts read: returns inside it with the rule',
+          p.returncode == 0 and dt < RH.RECORD_S + 1.0 and 'your run id is run-r8' in ctx, f'{dt:.2f}s')
     fresh = base_env(f'http://127.0.0.1:{closed_port()}', os.path.join(WORK, 'home-r8-fresh'), CTRLB_RUN=run, CTRLB_AGENT='agent-1')
     p, dt = hook('session-start', dict(base, hook_event_name='SessionStart', source='startup'), fresh)
     ctx = out_of(p).get('additionalContext', '')
@@ -1746,7 +1773,7 @@ def test_round8_hooks(seeker):
           and dt < 2, f'{dt:.2f}s')
     seeker.reset()
     hook('session-start', dict(base, hook_event_name='SessionStart', source='startup'), base_env(seeker.url, os.path.join(WORK, 'home-r8-plain')))
-    check('session-start without CTRLB_RUN: no record read', not seeker.calls)
+    check('session-start without CTRLB_RUN: no read and no claim', not seeker.calls)
 
     # B: artefacts.
     pad = os.path.join(WORK, 'pad-r8')
@@ -1909,8 +1936,8 @@ def test_round8_hooks(seeker):
     p, dt = chook('session-start', {'session_id': CSID, 'transcript_path': '', 'cwd': ws, 'hook_event_name': 'SessionStart',
                                     'source': 'startup'}, cenv)
     ctx = out_of(p).get('additionalContext', '')
-    check('codex session-start (relay run): the same record block and scratch directory',
-          'CtrlB Relay record of run run-r8' in ctx and 'task 01 parse (held by agent-b' in ctx
+    check('codex session-start (relay run): the hooks text, the scratch directory, no record block',
+          'CtrlB Relay record of run' not in ctx and hooks_rule(ctx, run, 'agent-1')
           and os.path.join(WORK, 'home-r8-codex', 'relay', run, 'scratch') in ctx, ctx[-300:])
     doc = open(os.path.join(ROOT, 'docs', 'relay-hooks.md')).read()
     check('docs/relay-hooks.md: every round 8 hook with its event, fields, output and budget, citing the hooks reference',
@@ -1926,6 +1953,280 @@ def test_round8_hooks(seeker):
     check('relay skill: claim(next=true), done with next=true, autoSlots instead of the REGISTRY.md claim',
           '`claim(next=true)`' in skill and '`next=true`' in skill and 'claim(resource="slot:REGISTRY.md"' not in skill)
 
+
+
+# ---------------------------------------------------------------- the hooks protocol (tests/fixtures/machine.json)
+
+class ScriptedSeeker:
+    """A fake Seeker for the machine fixtures: each route answers from a script (answers used in order, the last
+    repeats), and every call is recorded as (method, route, body)."""
+
+    def __init__(self):
+        self.calls, self.script = [], {}
+        outer = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _handle(self, method):
+                n = int(self.headers.get('Content-Length') or 0)
+                body = json.loads(self.rfile.read(n) or b'null') if n else None
+                path = self.path.split('?')[0]
+                route = 'records' if path.startswith('/ai/sessions/') else path.rstrip('/').rsplit('/', 1)[-1]
+                outer.calls.append((method, route, body))
+                q = outer.script.get(route) or []
+                a = (q.pop(0) if len(q) > 1 else q[0]) if q else (
+                    {'status': 202, 'body': {'accepted': len(body or [])}} if route == 'records' else
+                    {'body': {'artifacts': []}} if route == 'artifacts' else {'status': 404, 'body': {'error': 'no script'}})
+                if a.get('sleep'):
+                    time.sleep(a['sleep'])
+                raw = json.dumps(a.get('body', {})).encode()
+                try:
+                    self.send_response(a.get('status', 200))
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def do_POST(self):
+                self._handle('POST')
+
+            def do_GET(self):
+                self._handle('GET')
+
+            def do_DELETE(self):
+                self._handle('DELETE')
+
+        self.httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H)
+        self.httpd.daemon_threads = True
+        self.url = f'http://127.0.0.1:{self.httpd.server_address[1]}'
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+
+PROTOCOL_ROUTES = ('claims', 'check', 'done', 'handoffs')
+MSID = '7a1c0de0-0000-4000-8000-00000000000a'
+
+
+def _expand(v, defs, now):
+    """Fixture values: "$name" is a def, "{now+N}" is now plus N seconds in µs."""
+    if isinstance(v, str):
+        if v.startswith('$') and v[1:] in defs:
+            return _expand(defs[v[1:]], defs, now)
+        m = re.fullmatch(r'\{now([+-]\d+)\}', v)
+        if m:
+            return int((now + int(m.group(1))) * 1e6)
+        return v
+    if isinstance(v, list):
+        return [_expand(x, defs, now) for x in v]
+    if isinstance(v, dict):
+        return {k: _expand(x, defs, now) for k, x in v.items()}
+    return v
+
+
+def _subset(want, got):
+    if isinstance(want, dict):
+        return isinstance(got, dict) and all(_subset(v, got.get(k)) for k, v in want.items())
+    return want == got
+
+
+def _machine_input(case, step, ws, home):
+    harness = case.get('harness', 'claude')
+    i = dict(step.get('input') or {})
+    inp = dict(session_id=MSID, cwd=ws, transcript_path=None, hook_event_name={
+        'session-start': 'SessionStart', 'subagent-start': 'SubagentStart', 'pre-tool': 'PreToolUse', 'post-tool': 'PostToolUse',
+        'post-tool-failure': 'PostToolUseFailure', 'session-end': 'SessionEnd', 'upload': 'Stop'}[step['event']])
+    for k in ('source', 'agent_id', 'agent_type', 'reason'):
+        if k in i:
+            inp[k] = i[k]
+    if 'file' in i:
+        f = os.path.join(ws, i['file'])
+        inp['tool_name'] = i['tool_name']
+        inp['tool_input'] = ({'input': f"*** Begin Patch\n*** Update File: {i['file']}\n@@\n-a\n+b\n*** End Patch\n"}
+                             if harness == 'codex' else {'file_path': f, 'old_string': 'a', 'new_string': 'b'})
+    if 'command' in i:
+        inp['tool_name'] = i['tool_name']
+        inp['tool_input'] = {'command': i['command']}
+        if 'error' in i:
+            inp['error'] = i['error']
+        elif 'tool_response' in i:
+            inp['tool_response'] = i['tool_response']
+        else:
+            inp['tool_response'] = {'stdout': i.get('stdout', ''), 'stderr': '', 'interrupted': False}
+    if 'rollout' in i:
+        path = os.path.join(home, 'rollout.jsonl')
+        with open(path, 'w') as fh:
+            for kind, cid, arg in i['rollout']:
+                if kind == 'function_call':
+                    p = dict(type='function_call', name='exec_command', call_id=cid, arguments=json.dumps(arg))
+                else:
+                    p = dict(type='function_call_output', call_id=cid, output=arg)
+                fh.write(json.dumps(dict(timestamp='2026-11-10T10:00:00Z', type='response_item', payload=p)) + '\n')
+        inp['transcript_path'] = path
+    return inp
+
+
+def run_machine_case(case, defs, seeker, root=ROOT, quiet=False):
+    """Run one fixture case through the hooks (of the plugin tree at root). Returns a list of failure strings."""
+    harness = case.get('harness', 'claude')
+    script = os.path.join(root, 'plugin', 'hooks', 'hook.py') if harness == 'claude' else os.path.join(root, 'codex', 'hook.py')
+    base = os.path.join(WORK, 'machine')
+    os.makedirs(base, exist_ok=True)
+    home = tempfile.mkdtemp(prefix='home-', dir=base)
+    ws = tempfile.mkdtemp(prefix='ws-', dir=base)
+    for f in ('src/util.py', 'src/parse.py', 'src/emit.py'):
+        os.makedirs(os.path.dirname(os.path.join(ws, f)), exist_ok=True)
+        open(os.path.join(ws, f), 'w').write('a\n')
+    env = base_env(seeker.url, home, CTRLB_RUN='run-m', CTRLB_AGENT='agent-1', CTRLB_AUTO_SLOTS='')
+    for k, v in (case.get('env') or {}).items():
+        if v is None:
+            env.pop(k, None)
+        else:
+            env[k] = v
+    now = time.time()
+    if case.get('state_before'):
+        os.makedirs(os.path.join(home, 'state'), exist_ok=True)
+        with open(os.path.join(home, 'state', MSID + '.json'), 'w') as fh:
+            json.dump(_expand(case['state_before'], defs, now), fh)
+    fails = []
+    for n, step in enumerate(case['steps']):
+        seeker.calls.clear()
+        seeker.script = {k: [_expand(a, defs, time.time()) for a in v] for k, v in (step.get('answers') or {}).items()}
+        inp = _machine_input(case, step, ws, home)
+        t = time.time()
+        p = subprocess.run([sys.executable, '-I', script, step['event']], input=json.dumps(inp), capture_output=True,
+                           text=True, env=env, timeout=30)
+        dt = time.time() - t
+        try:
+            o = json.loads(p.stdout or '{}').get('hookSpecificOutput', {})
+        except ValueError:
+            o = {'_unparsed': p.stdout}
+        text = o.get('additionalContext') or o.get('permissionDecisionReason') or ''
+        e = step['expect']
+        tag = f'step {n + 1}'
+        calls = [c for c in seeker.calls if c[1] in PROTOCOL_ROUTES]
+        want = e.get('calls', [])
+        if len(calls) != len(want) or not all(m == c[0] and r == c[1] and _subset(b, c[2] or {}) for (m, r, b), c in zip(want, calls)):
+            fails.append(f'{tag} calls {[(c[0], c[1], c[2]) for c in calls]}')
+        for h in e.get('context_has', []):
+            if h not in text:
+                fails.append(f'{tag} context lacks {h!r}')
+        for h in e.get('context_not', []):
+            if h in text.split('CtrlB Relay', 1)[-1] if h == 'claim(' else h in text:
+                fails.append(f'{tag} context has {h!r}')
+        if e.get('context_empty') and (text or o.get('permissionDecision')):
+            fails.append(f'{tag} said {text[:120]!r}')
+        if 'decision' in e and (o.get('permissionDecision') or None) != e['decision']:
+            fails.append(f'{tag} decision {o.get("permissionDecision")}')
+        if e.get('max_s') and dt > e['max_s']:
+            fails.append(f'{tag} took {dt:.2f}s')
+        sf = os.path.join(home, 'state', (e.get('state_file') or '{sid}').replace('{sid}', MSID) + '.json')
+        try:
+            st = json.load(open(sf))
+        except (OSError, ValueError):
+            st = None
+        if e.get('state') is not None:
+            ws_ = dict(e['state'])
+            if st is None:
+                fails.append(f'{tag} no state file')
+            else:
+                for k in ('tasks', 'holds'):
+                    if k in ws_ and sorted(st.get(k) or {}) != sorted(ws_.pop(k)):
+                        fails.append(f'{tag} state {k} {sorted(st.get(k) or {})}')
+                if not _subset(ws_, st):
+                    fails.append(f'{tag} state {json.dumps({k: st.get(k) for k in ws_})}')
+        for name, secs in (e.get('lease_after') or {}).items():
+            until = ((st or {}).get('tasks', {}).get(name) or {}).get('lease_until') or 0
+            if until / 1e6 - time.time() < secs:
+                fails.append(f'{tag} {name} lease not renewed')
+        if p.returncode != 0:
+            fails.append(f'{tag} exit {p.returncode}')
+    return fails
+
+
+def test_machine():
+    fx = load('machine.json')
+    defs, cases = fx['defs'], fx['cases']
+    seeker = ScriptedSeeker()
+    for c in cases:
+        fails = run_machine_case(c, defs, seeker)
+        check(f'machine: {c["name"]}', not fails, '; '.join(fails)[:400])
+    rows = {c['row'] for c in cases}
+    check('machine: every row of the state table has a fixture',
+          all(r in rows for r in ('idle SessionStart run', 'idle SubagentStart run', 'idle SessionStart no run', 'idle SessionStart none free',
+                                  'holding SessionStart compact', 'edit unheld', 'edit belongs_to_task', 'edit own', 'edit other advisory',
+                                  'edit other enforce', 'edit renew', 'bash test pass', 'done retry', 'session end', 'ended SessionStart')))
+    test_mutants(defs, cases, seeker)
+    seeker.httpd.shutdown()
+
+
+# Each action of the machine removed in turn (a text patch of a copy of the plugin): some fixture must fail.
+MUTANTS = [
+    ('SessionStart claim(next=true)', 'lib/hooks_shared.py', "ans = self._call('claim', 'next=true',", "ans = {} if True else self._call('claim', 'next=true',"),
+    ('SessionStart brief of the held task', 'lib/hooks_shared.py', '            task = self.change(lambda d: self._take_task(d, ans, at=at))\n            return brief_text(task)',
+     '            task = self.change(lambda d: self._take_task(d, ans, at=at))\n            return ""'),
+    ('no run id: ids and peers only', 'lib/hooks_shared.py', "return (RELAY if cfg.get('run') else RELAY_NO_RUN)", 'return (RELAY)'),
+    ('read-only sub-agent claims nothing', 'lib/hooks_shared.py', 'if agent_type in READ_ONLY_AGENTS:', 'if False:'),
+    ('compaction: briefs again, no call', 'lib/hooks_shared.py', "return '\\n'.join(brief_text(t) for t in st['tasks'].values())", "return ''"),
+    ('claim on write', 'lib/hooks_shared.py', "ans = self._call('claim', p, lambda:", "return 'held', None\n        ans = self._call('claim', p, lambda:"),
+    ('belongs_to_task: claim the task', 'lib/hooks_shared.py', "if ans.get('reason') == 'belongs_to_task' and ans.get('task'):", 'if False:'),
+    ('belongs_to_task: inject its brief', 'lib/hooks_shared.py', "return 'brief', brief_text(task)", "return 'held', None"),
+    ('own hold: nothing', 'lib/hooks_shared.py', '            if p in own:\n', '            if p in own and False:\n'),
+    ('another holder: name it', 'lib/hooks_shared.py', '        for p, holder, said in blocked:\n', '        for p, holder, said in []:\n'),
+    ('enforce: deny', 'lib/hooks_shared.py', "if enforce and (blocked or failed):", 'if False:'),
+    ('renew near the lease end', 'lib/hooks_shared.py', '        if _now_us() < until - RENEW_AT * lease * 1e6:\n            return', '        if True:\n            return'),
+    ('done on a passing test', 'lib/hooks_shared.py', "if t.get('test') and names_test(command, t['test']):", 'if False:'),
+    ('done only for the registered test', 'lib/hooks_shared.py', "if t.get('test') and names_test(command, t['test']):", "if t.get('test'):"),
+    ('done witnessed', 'lib/hooks_shared.py', 'witnessed=True, next_=True, timeout=DONE_S', 'witnessed=False, next_=True, timeout=DONE_S'),
+    ('done: next task brief', 'lib/hooks_shared.py', "return brief_text(task, lead=head + ' Next: ')", 'return head'),
+    ('failed done kept for the next Bash event', 'lib/hooks_shared.py', 'self.change(lambda d: d.update(pending_done=dict(task=name, evidence=ev)))', 'pass'),
+    ('refused done: message injected', 'lib/hooks_shared.py', "return f'CtrlB Relay (run {self.run}): task \"{name}\" was not marked finished: {msg}'", "return ''"),
+    ('SessionEnd ends the machine', 'lib/hooks_shared.py', "self.change(lambda d: d.update(state='ended', tasks={}, holds={}, pending_done=None))", 'pass'),
+    ('ended: SessionStart as idle', 'lib/hooks_shared.py', "        if st['state'] == 'ended':\n            self.change(lambda d: d.update(self._blank()))\n", ''),
+    ('claim on write failure: said', 'lib/hooks_shared.py', '        if failed:\n            lines.append(', '        if failed and False:\n            lines.append('),
+    ('codex PostToolUse on Bash', 'codex/hook.py', "    if (inp.get('tool_name') or '') not in SHELL_NAMES:\n        return None", "    return None"),
+    ('codex Stop fallback', 'codex/hook.py', "    for r in runs:\n        m.post_bash(", "    for r in []:\n        m.post_bash("),
+]
+
+
+def _mutant_tree(base, rel, old, new):
+    d = tempfile.mkdtemp(prefix='mutant-', dir=base)
+    for sub in ('lib', 'codex', os.path.join('plugin', 'hooks')):
+        shutil.copytree(os.path.join(ROOT, sub), os.path.join(d, sub), symlinks=True)
+    os.symlink(os.path.join('..', 'lib'), os.path.join(d, 'plugin', 'lib'))
+    f = os.path.join(d, rel)
+    text = open(f).read()
+    if text.count(old) != 1:
+        return None
+    open(f, 'w').write(text.replace(old, new))
+    return d
+
+
+def test_mutants(defs, cases, seeker):
+    """The mutant check: each action removed in turn, the fixtures that fail. Writes tests/work/mutants.md."""
+    base = os.path.join(WORK, 'mutants')
+    shutil.rmtree(base, ignore_errors=True)
+    os.makedirs(base)
+    rows, survived = [], []
+    for name, rel, old, new in MUTANTS:
+        d = _mutant_tree(base, rel, old, new)
+        if d is None:
+            rows.append((name, 'patch did not apply', ''))
+            survived.append(name)
+            continue
+        killed = [c['row'] for c in cases if run_machine_case(c, defs, seeker, root=d)]
+        rows.append((name, f'{len(killed)} of {len(cases)}', ', '.join(killed)))
+        if not killed:
+            survived.append(name)
+    with open(os.path.join(WORK, 'mutants.md'), 'w') as fh:
+        fh.write('| Action removed | Fixtures failing | Which |\n|---|---|---|\n')
+        for r in rows:
+            fh.write(f'| {r[0]} | {r[1]} | {r[2]} |\n')
+    for r in rows:
+        print(f'  mutant: {r[0]}: {r[1]} fail ({r[2][:140]})')
+    check(f'mutants: each of the {len(MUTANTS)} actions removed fails a fixture', not survived, ', '.join(survived))
 
 def main():
     seeker = Seeker()
@@ -1944,6 +2245,7 @@ def main():
     test_done_evidence(seeker)
     test_round6_hooks(seeker)
     test_round8_hooks(seeker)
+    test_machine()
     test_failure_safety(seeker)
     test_config_and_status(seeker)
     test_codex_rows(seeker)
