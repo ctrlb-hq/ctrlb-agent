@@ -3,7 +3,7 @@
 Seeker is a local fake that answers with the synthetic responses in tests/fixtures/seeker/ (relay-plan section 4).
 Nothing is sent anywhere else, Claude is never called, and no real config is read: every CTRLB_* variable from the
 calling environment is dropped and CTRLB_HOME points into tests/work/."""
-import base64, glob, hashlib, http.server, json, os, re, shutil, socket, stat, subprocess, sys, threading, time
+import base64, glob, hashlib, http.server, json, os, re, shutil, socket, stat, subprocess, sys, threading, time, urllib.parse
 sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -62,7 +62,8 @@ class Seeker:
         # Round 8 routes: each answers 'ok', or 'slow' (sleeps SLOW_S, longer than any hook budget), 'error' (500),
         # 'missing' (404, a Seeker without the route); claims also 'held' (another agent holds it).
         self.state.update(briefs='ok', claims='ok', release='ok', posts='ok', tasks='ok', contracts='ok', peers='ok',
-                          artifacts='ok')
+                          artifacts='ok', index='ok')
+        self.notes = {}     # session id -> (seq, text): the running notes the index route answers with
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -100,6 +101,16 @@ class Seeker:
                         return self._answer(**outer.records['responses']['other_user'])
                     outer.rows.extend(body)
                     return self._answer(202, dict(outer.records['responses']['accepted']['body'], accepted=len(body)))
+                m = re.match(r'^/ai/sessions/([A-Za-z0-9_]+)/index(?:\?(.*))?$', self.path)
+                if m and method == 'GET':
+                    s = outer.state['index']
+                    if s == 'slow':
+                        time.sleep(SLOW_S)
+                    if s == 'error':
+                        return self._answer(500, {'error': 'boom'})
+                    if s == 'missing':
+                        return self._answer(404, {'error': 'no route'})
+                    return self._answer(200, fake_index(outer.rows, outer.notes, urllib.parse.parse_qs(m.group(2) or '')))
                 m = re.match(r'^/ai/relay/([A-Za-z0-9_]+)/runs/([^/]+)/check$', self.path)
                 if m and method == 'POST':
                     s = outer.state['check']
@@ -152,6 +163,32 @@ class Seeker:
 
 
 SLOW_S = 5
+INDEX_EXPAND = 'Expand a line with fetch_records(session_id, seq_from, seq_to).'
+
+
+def fake_index(rows, notes, q):
+    """The fake index route: the uploaded main sessions whose cwd is the query's or under it, newest first, one line
+    each (session id and first user text), the shape of Seeker's answer."""
+    cwd = (q.get('cwd') or [''])[0].rstrip('/')
+    by = {}
+    for r in rows:
+        c = r.get('cwd') or ''
+        if r.get('parent_session') or (cwd and c != cwd and not c.startswith(cwd + '/')):
+            continue
+        by.setdefault(r['session_id'], []).append(r)
+    order = sorted(by, key=lambda k: -max(r['_timestamp'] for r in by[k]))[:int((q.get('limit') or ['10'])[0])]
+    sessions = []
+    for k in order:
+        first = next((r['body'] for r in sorted(by[k], key=lambda r: r['seq']) if r['role'] == 'user' and r['block_type'] == 'text'), '')
+        sessions.append(dict(session_id=k, line=f'{k} | asked: "{first[:120]}"'))
+    sid = (q.get('session_id') or [''])[0]
+    note = dict(session_id=sid, seq=notes[sid][0], text=notes[sid][1]) if sid in notes else None
+    text = (f"Running note of session {sid} (record seq {note['seq']}):\n{note['text']}\n\n" if note else '')
+    text += (f'Session index: the {len(sessions)} most recent sessions in {cwd}. {INDEX_EXPAND}\n' +
+             '\n'.join('- ' + x['line'] for x in sessions)) if sessions else f'Session index: no earlier sessions in {cwd} in the record.'
+    return dict(sessions=sessions, note=note, expand=INDEX_EXPAND, text=text)
+
+
 R8_ARTIFACT = '# plan\nstep 1: parse\n'
 
 
@@ -385,7 +422,9 @@ def test_hooks(seeker):
     ctx = out_of(p).get('additionalContext', '')
     check('session-start: CTRLB_RUN and CTRLB_AGENT win', 'run id is relay-run-7' in ctx and 'agent id is builder-1' in ctx
           and 'run_id="relay-run-7"' in ctx)
-    check('session-start sends nothing to Seeker', not seeker.calls)
+    check('session-start sends nothing to Seeker but the session index read (store item 2)',
+          all(c['method'] == 'GET' and '/ai/sessions/agent_sessions/index?' in c['path'] for c in seeker.calls),
+          str([c['path'] for c in seeker.calls]))
 
     # Stop: main and subagent rows
     seeker.reset()
@@ -1712,7 +1751,8 @@ def test_round8_hooks(seeker):
 
     # C: the record block.
     block = ctx[ctx.find('CtrlB Relay record of run'):] if 'CtrlB Relay record of run' in ctx else ''
-    gets = sorted(c['path'].split('?')[0].rsplit('/', 1)[-1] for c in seeker.calls if c['method'] == 'GET')
+    gets = sorted(c['path'].split('?')[0].rsplit('/', 1)[-1] for c in seeker.calls if c['method'] == 'GET'
+                  and c['path'].startswith('/ai/relay/'))
     check('session-start (relay run): reads tasks, contracts, peers (notes, handoffs) and artifacts of this agent',
           gets == ['artifacts', 'contracts', 'peers', 'peers', 'tasks'] and any('agent=agent-1' in c['path'] for c in seeker.calls
                                                                                    if '/artifacts' in c['path']), ','.join(gets))
@@ -1746,7 +1786,7 @@ def test_round8_hooks(seeker):
           and dt < 2, f'{dt:.2f}s')
     seeker.reset()
     hook('session-start', dict(base, hook_event_name='SessionStart', source='startup'), base_env(seeker.url, os.path.join(WORK, 'home-r8-plain')))
-    check('session-start without CTRLB_RUN: no record read', not seeker.calls)
+    check('session-start without CTRLB_RUN: no record read', not [c for c in seeker.calls if c['path'].startswith('/ai/relay/')])
 
     # B: artefacts.
     pad = os.path.join(WORK, 'pad-r8')
@@ -2018,6 +2058,71 @@ def test_private_tags(seeker):
           and any(r['body'].startswith('Done. [PRIVATE]') for r in crows), repr([(r['command'][:60], r['paths']) for r in calls]))
 
 
+def test_session_index(seeker):
+    """Item 2: SessionStart injects the session index under the recall rule (both harnesses), absent on the first session
+    of a project and present on the second; SubagentStart injects the parent's line only; nothing on a slow or failing
+    Seeker, within the budget."""
+    seeker.reset()
+    seeker.rows.clear()
+    env = base_env(seeker.url, os.path.join(WORK, 'home-index'))
+    s1, s2 = '5f0c7a52-0000-4000-8000-0000000000c1', '5f0c7a52-0000-4000-8000-0000000000c2'
+    proj = os.path.join(WORK, 'projects', '-work-idx')
+    os.makedirs(proj, exist_ok=True)
+
+    def start(sid, source='startup', cwd='/work/idx'):
+        p, dt = hook('session-start', dict(session_id=sid, transcript_path=os.path.join(proj, sid + '.jsonl'), cwd=cwd,
+                                           hook_event_name='SessionStart', source=source), env)
+        return out_of(p).get('additionalContext', ''), dt
+
+    ctx, _ = start(s1)
+    gets = [c for c in seeker.calls if '/index' in c['path']]
+    check('index: the first session of a project gets no index (nothing earlier in the record)',
+          'Session index' not in ctx and f'session_id {s1}' in ctx and len(gets) == 1, ctx[:200])
+    check('index: asked by cwd and limit, no branch outside a repository, no session_id at startup',
+          gets and urllib.parse.parse_qs(urllib.parse.urlsplit(gets[0]['path']).query) == {'cwd': ['/work/idx'], 'limit': ['10']},
+          gets[0]['path'] if gets else '')
+    path = os.path.join(proj, s1 + '.jsonl')
+    with open(path, 'w') as fh:
+        fh.write(line('user', 'Make the zebra importer stream its rows.', '2026-11-03T12:00:00Z', dict(sessionId=s1, cwd='/work/idx')))
+        fh.write(line('assistant', [dict(type='text', text='Streaming now.')], '2026-11-03T12:00:05Z', dict(sessionId=s1, cwd='/work/idx')))
+    hook('upload', dict(session_id=s1, transcript_path=path, cwd='/work/idx', hook_event_name='Stop'), env)
+    ctx, dt = start(s2)
+    check('index: the second session starts with the first one\'s line, under the recall rule and above the relay rule',
+          f'- {s1} | asked: "Make the zebra importer stream its rows."' in ctx
+          and ctx.index('session_id ' + s2) < ctx.index('Session index:') < ctx.index('CtrlB Relay:') and INDEX_EXPAND in ctx,
+          ctx[ctx.find('Session index'):][:300])
+    ctx, _ = start(s2, cwd='/work/other')
+    check('index: another project gets no index', 'Session index' not in ctx)
+
+    # SubagentStart: the parent's line only
+    p, _ = hook('subagent-start', dict(session_id=s1, transcript_path=path, cwd='/work/idx', hook_event_name='SubagentStart',
+                                       agent_id='sub1', agent_type='Explore'), env)
+    sctx = out_of(p).get('additionalContext', '')
+    check('index: a subagent gets its parent session\'s line only', f'Your parent session in the record: {s1} | asked:' in sctx
+          and 'Session index:' not in sctx and sctx.count(' | asked:') == 1, sctx[:300])
+
+    # fail open: a slow, failing or older Seeker injects nothing and the hook stays in its budget
+    for state in ('slow', 'error', 'missing'):
+        seeker.state['index'] = state
+        ctx, dt = start(s2)
+        check(f'index: {state} Seeker: nothing injected, the session starts (in {dt:.1f}s)',
+              'Session index' not in ctx and 'CtrlB Relay:' in ctx and dt < 4.5)
+    seeker.state['index'] = 'ok'
+
+    # Codex: a thread starts with the index under the recall rule
+    chome = os.path.join(WORK, 'codex-home-index')     # its own Codex home: the shared one carries test_codex_hooks' state
+    shutil.rmtree(chome, ignore_errors=True)
+    os.makedirs(os.path.join(chome, 'sessions'))
+    main = os.path.join(chome, 'sessions', f'rollout-2026-09-06T11-58-07-{CSID}.jsonl')
+    shutil.copy(os.path.join(FIX, 'codex-rollout.jsonl'), main)
+    cenv = base_env(seeker.url, os.path.join(WORK, 'home-index-codex'), CODEX_HOME=chome)
+    p, _ = chook('session-start', dict(session_id=CSID, transcript_path=main, cwd='/work/idx', hook_event_name='SessionStart',
+                                       source='startup'), cenv)
+    cctx = out_of(p).get('additionalContext', '')
+    check('index (codex): a thread starts with the index under the recall rule',
+          f'- {s1} | asked:' in cctx and cctx.index('Session index:') < cctx.index('CtrlB Relay:'), cctx[:200])
+
+
 def main():
     seeker = Seeker()
     test_layout()
@@ -2039,6 +2144,7 @@ def main():
     test_config_and_status(seeker)
     test_codex_rows(seeker)
     test_private_tags(seeker)
+    test_session_index(seeker)
     test_codex_hooks(seeker)
     test_codex_install()
     test_root_install()

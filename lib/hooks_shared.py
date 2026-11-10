@@ -12,6 +12,12 @@ from redact import clean as _clean
 from paths import PATH, edit_paths as normalise_edit_paths, key as resource_key
 
 CHECK_S = 2.0
+# The session index (item 2 of the session store plan): the SessionStart and SubagentStart hooks wait at most INDEX_S
+# for it and inject nothing on a timeout or an error.
+INDEX_S = 2.0
+INDEX_LIMIT = 10
+# A default branch names no project: sessions in other repositories share it, so the index is asked by cwd alone.
+DEFAULT_BRANCHES = {'main', 'master', 'dev', 'develop', 'development', 'trunk', 'staging', 'release', 'prod', 'production'}
 
 RECALL = ("Your earlier turns in this session are not all in your context: compaction leaves details out, including "
           "instructions the user gave, files you read, commands that failed and decisions you made. The full record of "
@@ -58,6 +64,86 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
 # Seeker decision 33: a hold whose holder has stopped is taken over, not waited out.
 STALLED_HINT = ("If the holder has stopped, the hold shows as stalled (tasks lists stalled tasks); claim it with "
                 "takeover=true instead of waiting.")
+
+
+def git_branch(cwd):
+    """The branch checked out at cwd (from .git/HEAD, a worktree's .git file followed), or '' (no repository, a
+    detached HEAD, anything unreadable). No subprocess: the hook budget is short."""
+    d = os.path.abspath(cwd or '.')
+    for _ in range(64):
+        g = os.path.join(d, '.git')
+        try:
+            if os.path.isfile(g):
+                with open(g) as fh:
+                    line = fh.read(4096).strip()
+                if not line.startswith('gitdir:'):
+                    return ''
+                g = os.path.normpath(os.path.join(d, line[len('gitdir:'):].strip()))
+            if os.path.isdir(g):
+                with open(os.path.join(g, 'HEAD')) as fh:
+                    head = fh.read(4096).strip()
+                return head[len('ref: refs/heads/'):] if head.startswith('ref: refs/heads/') else ''
+        except OSError:
+            return ''
+        parent = os.path.dirname(d)
+        if parent == d:
+            return ''
+        d = parent
+    return ''
+
+
+def _index_query(cwd, sid='', limit=INDEX_LIMIT):
+    q = dict(cwd=cwd or '', limit=limit)
+    branch = git_branch(cwd) if cwd else ''
+    if branch and branch not in DEFAULT_BRANCHES:
+        q['branch'] = branch
+    if sid:
+        q['session_id'] = sid
+    return q
+
+
+def _within(fn, budget):
+    """fn() in a daemon thread, or None when it does not answer within budget seconds or raises."""
+    import threading
+    box = {}
+
+    def run():
+        try:
+            box['v'] = fn()
+        except BaseException as e:      # noqa: BLE001 - reported by the caller's log line
+            box['e'] = e
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(budget)
+    if t.is_alive():
+        common.log(f"session index: no answer in {budget}s, nothing injected")
+        return None
+    if 'e' in box:
+        common.log(f"session index: {type(box['e']).__name__}: {str(box['e'])[:200]}")
+        return None
+    return box.get('v')
+
+
+def index_block(cfg, cwd, sid='', source='', budget=INDEX_S):
+    """The session index injected under the recall rule at SessionStart: the caller's recent sessions in this project
+    (cwd or under it, or a non-default branch), one line each. On a resumed or compacted session it carries the
+    session's running note above the index. '' when there is no earlier session, or on an error or a timeout."""
+    resumed = sid if source in ('resume', 'compact') else ''
+    ans = _within(lambda: common.session_index(cfg, _index_query(cwd, resumed), timeout=budget), budget)
+    if not isinstance(ans, dict) or not (ans.get('sessions') or ans.get('note')):
+        return ''
+    return str(ans.get('text') or '')
+
+
+def parent_line(cfg, cwd, parent, budget=INDEX_S):
+    """The parent session's index line for a subagent, or '' (not found, an error, a timeout)."""
+    if not parent:
+        return ''
+    ans = _within(lambda: common.session_index(cfg, _index_query(cwd), timeout=budget), budget)
+    for s in (ans or {}).get('sessions') or [] if isinstance(ans, dict) else []:
+        if isinstance(s, dict) and s.get('session_id') == parent and s.get('line'):
+            return f"Your parent session in the record: {s['line']}\n{ans.get('expand') or ''}".strip()
+    return ''
 
 
 def context(event, text):

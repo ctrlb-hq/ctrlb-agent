@@ -176,6 +176,12 @@ def ingest_records(cfg, rows, timeout=20):
     return request(cfg, 'POST', f"/ai/sessions/{_seg(cfg['dataset'])}/records", rows, timeout=timeout)
 
 
+def session_index(cfg, query, timeout=2):
+    """GET /ai/sessions/{dataset}/index?cwd=&branch=&limit=&session_id=: {sessions: [{session_id, line, ...}], note?,
+    expand, text}, the caller's recent sessions in the project from the record."""
+    return request(cfg, 'GET', f"/ai/sessions/{_seg(cfg['dataset'])}/index", query=query, timeout=timeout)
+
+
 def check(cfg, run, agent, paths, cwd='', timeout=2, tokens=None):
     """POST /ai/relay/{dataset}/runs/{run}/check: {mode, allowed, conflicts: [{path, key, held_by, lease_until, reason,
     lapsed_at?, message?}], renewed?}. tokens maps a path (as sent) to the token its claim answered."""

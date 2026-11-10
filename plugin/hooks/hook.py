@@ -13,7 +13,7 @@ for _lib in (os.path.join(_HERE, '..', 'lib'), os.path.join(_HERE, '..', '..', '
 import common, relay_hooks, rows_claude  # noqa: E402
 from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, context as _context, decide, record_tokens, _tool_answer,  # noqa: E402
                           bash_result, evidence_hint, is_test_command, record_test, record_bash, record_edit, record_note,
-                          mark_relay, handoff_text, witness, _deny)
+                          mark_relay, handoff_text, witness, _deny, index_block, parent_line)
 from paths import edit_paths as normalise_edit_paths  # noqa: E402
 
 SYNC_S, ASYNC_S = 5, 90
@@ -188,7 +188,9 @@ def main():
     if mode == 'session-start':
         run, agent = common.run_id(cfg, sid), common.agent_name(cfg, sid)
         scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
-        text = RECALL.format(sid=sid) + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
+        text = RECALL.format(sid=sid)
+        index = index_block(cfg, inp.get('cwd') or '', sid, inp.get('source') or '')   # item 2: orientation, no search
+        text += ('\n\n' + index if index else '') + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
         try:      # decision 45: a relay run's session starts with the record
             block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
         except Exception as e:
@@ -200,7 +202,8 @@ def main():
         run = common.run_id(cfg, sid)
         relay = RELAY.format(run=run, agent=common.agent_name(cfg, sid, inp.get('agent_id') or ''),
                              scratch=common.scratch_dir(cfg, run))
-        out = _context('SubagentStart', SUBAGENT.format(sid=sid) + '\n\n' + relay)
+        line = parent_line(cfg, inp.get('cwd') or '', sid)     # item 2: the parent session's index line only
+        out = _context('SubagentStart', SUBAGENT.format(sid=sid) + ('\n\n' + line if line else '') + '\n\n' + relay)
     elif mode == 'flush':
         upload(cfg, inp, SYNC_S)
     elif mode == 'session-end':

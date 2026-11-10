@@ -34,6 +34,19 @@ Claims are advisory unless the workspace sets `enforce` to `enforce`. Relay reco
 - Nothing is updated or deleted. A release is a new row; a claim's state is read from the rows.
 - Both datasets are ordinary logs datasets. Data Explorer, alerts and SQL see them.
 
+## The session index
+
+At the start of each session the plugin and the Codex hooks put a short index of your recent sessions in this project into the agent's context, under the recall rule. The agent knows what happened before without searching. CtrlB builds the index from the record. No model is called.
+
+- **Which sessions:** your own recent sessions whose working directory is the session's directory or under it. A session on the same git branch also counts, unless the branch is a default branch such as `main` or `master`. With `relay.read_all`, every user's sessions count, and a line names its user. Subagent sessions are not listed.
+- **One line each, newest first, at most 10:** the session id, the start time, the duration, the cost, the `seq` range, the first user message and the last assistant message (120 characters each), up to 8 edited files, and the last command. A line is at most 340 characters, so 10 lines stay under about 1,000 tokens.
+- **Expand a line** with `fetch_records(session_id, seq_from, seq_to)`, or search one session with `search_sessions(term, session_id)`.
+- **A subagent** gets only its parent session's line.
+- **The first session in a project** gets no index: there is nothing earlier in the record.
+- **A slow or unreachable CtrlB:** the hook waits at most 2 seconds. When CtrlB does not answer in time or answers an error, the session starts without the index.
+
+The same index is the `session_index` tool (`cwd`, `branch`, `limit`, `since`, `session_id`) and `GET /ai/sessions/{dataset}/index`. It answers `{sessions: [{session_id, user_name?, started, duration_s, seq_from, seq_to, first_message, files_edited, last_command, last_message, cost_usd, note_seq?, line}], note?, expand, text}`. `text` is the index as the hooks inject it.
+
 ## The write-first claim
 
 Two agents can claim the same key at the same moment. If each read the record first and wrote a hold only when it saw none, both would read nothing and both would write: both would think they hold it. A claim in CtrlB writes first and decides on a second read:

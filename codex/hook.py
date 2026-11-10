@@ -15,7 +15,7 @@ import json, os, signal, sys, time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 import common, relay_hooks, rows_codex  # noqa: E402
-from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, context, decide  # noqa: E402
+from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, context, decide, index_block, parent_line  # noqa: E402
 
 SYNC_S, ASYNC_S = 5, 90
 HANDOFF_S = 0.8
@@ -103,6 +103,10 @@ def main():
     if mode == 'session-start':
         run, parent = session_run(cfg, sid, inp.get('transcript_path'))
         head = SUBAGENT.format(sid=parent) if parent else RECALL.format(sid=sid)
+        cwd = inp.get('cwd') or ''
+        # item 2: a thread starts with the session index under the recall rule; a subagent thread with its parent's line
+        index = parent_line(cfg, cwd, parent) if parent else index_block(cfg, cwd, sid, inp.get('source') or '')
+        head += '\n\n' + index if index else ''
         agent = rows_codex.agent_for(cfg, sid, parent)
         scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
         text = head + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
@@ -117,7 +121,8 @@ def main():
         run, _ = session_run(cfg, sid, inp.get('transcript_path'))
         sub = inp.get('agent_id') or ''
         agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid)
-        out = context('SubagentStart', SUBAGENT.format(sid=sid) + '\n\n'
+        line = parent_line(cfg, inp.get('cwd') or '', sid)
+        out = context('SubagentStart', SUBAGENT.format(sid=sid) + ('\n\n' + line if line else '') + '\n\n'
                       + RELAY.format(run=run, agent=agent, scratch=common.scratch_dir(cfg, run)))
     elif mode == 'flush':
         upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
