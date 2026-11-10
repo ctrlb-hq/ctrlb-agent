@@ -328,6 +328,51 @@ def shell_result(resp):
     return None, ''
 
 
+_EXIT_IN_TEXT = re.compile(r'\\?"exit_code\\?"\s*:\s*(-?\d+)')
+
+
+def _parts(resp):
+    """The text parts of a code-mode result: a list of {type, text} items, a dict with output or content, or text
+    (split into lines)."""
+    if isinstance(resp, dict):
+        resp = resp.get('output') if resp.get('output') is not None else resp.get('content', '')
+    if isinstance(resp, list):
+        return [x.get('text') or '' if isinstance(x, dict) else str(x) for x in resp]
+    return str(resp or '').splitlines()
+
+
+def code_mode_runs(js, resp):
+    """Codex code mode: one JavaScript exec runs several tools.exec_command({cmd}) calls, and its result has one JSON
+    chunk per call ({chunk_id, exit_code, output, ...}), in order. [(command, exit code or None, last output line)],
+    each command paired with its own chunk; when the chunks and commands do not pair one to one (another tool's result
+    in between, a command still running), every exit code is None."""
+    cmds = exec_commands(js)
+    chunks = []
+    for t in _parts(resp):
+        t = t.strip()
+        if not t.startswith('{'):
+            continue
+        try:
+            d = json.loads(t)
+        except ValueError:
+            m = _EXIT_IN_TEXT.search(t)
+            if m:
+                chunks.append(dict(exit_code=int(m.group(1)), output=''))
+            continue
+        if isinstance(d, dict) and ('exit_code' in d or 'chunk_id' in d):
+            chunks.append(d)
+    out = []
+    for i, c in enumerate(cmds):
+        ch = chunks[i] if len(chunks) == len(cmds) else {}      # paired only one to one: never another command's code
+        code = ch.get('exit_code') if isinstance(ch.get('exit_code'), int) and not isinstance(ch.get('exit_code'), bool) else None
+        out.append((c, code, _last(ch.get('output') if isinstance(ch.get('output'), str) else '')))
+    return out
+
+
+def is_code_mode(text):
+    return isinstance(text, str) and 'exec_command' in text and bool(CMD_RE.search(text))
+
+
 def shell_runs(path, start=0):
     """The shell calls of a rollout from byte offset start, with their results: [{call_id, command, exit_code,
     summary}] (exit_code None when the output names none), and the offset read to. For the Stop hook when Codex fires
@@ -349,12 +394,21 @@ def shell_runs(path, start=0):
             if not isinstance(p, dict):
                 continue
             pt = p.get('type')
-            if pt in ('custom_tool_call', 'function_call', 'local_shell_call'):
+            if pt == 'custom_tool_call' and (p.get('name') or '') == 'exec':
+                raw = p.get('input') if isinstance(p.get('input'), str) else json.dumps(p.get('input'))
+                if is_code_mode(raw):
+                    calls[p.get('call_id') or ''] = ('code', raw)
+            elif pt in ('custom_tool_call', 'function_call', 'local_shell_call'):
                 r = dict(cwd='')
                 _tool_use(r, p, dict(names={}))
                 if r.get('command'):
-                    calls[r['tool_use_id']] = r['command']
+                    calls[r['tool_use_id']] = ('shell', r['command'])
             elif pt in ('custom_tool_call_output', 'function_call_output') and p.get('call_id') in calls:
-                code, line = shell_result(p.get('output'))
-                out.append(dict(call_id=p['call_id'], command=calls.pop(p['call_id']), exit_code=code, summary=line))
+                kind, cmd = calls.pop(p['call_id'])
+                if kind == 'code':
+                    for c, code, line in code_mode_runs(cmd, p.get('output')):
+                        out.append(dict(call_id=p['call_id'], command=c, exit_code=code, summary=line))
+                else:
+                    code, line = shell_result(p.get('output'))
+                    out.append(dict(call_id=p['call_id'], command=cmd, exit_code=code, summary=line))
     return out, start

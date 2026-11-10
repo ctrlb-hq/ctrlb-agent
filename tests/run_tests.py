@@ -2046,6 +2046,9 @@ def _machine_input(case, step, ws, home):
         inp['tool_name'] = i['tool_name']
         inp['tool_input'] = ({'input': f"*** Begin Patch\n*** Update File: {i['file']}\n@@\n-a\n+b\n*** End Patch\n"}
                              if harness == 'codex' else {'file_path': f, 'old_string': 'a', 'new_string': 'b'})
+    if 'tool_input_raw' in i:
+        inp['tool_name'], inp['tool_input'], inp['tool_response'] = i['tool_name'], i['tool_input_raw'], i['tool_response']
+        inp['tool_use_id'] = i.get('tool_use_id', '')
     if 'command' in i:
         inp['tool_name'] = i['tool_name']
         inp['tool_input'] = {'command': i['command']}
@@ -2061,6 +2064,10 @@ def _machine_input(case, step, ws, home):
             for kind, cid, arg in i['rollout']:
                 if kind == 'function_call':
                     p = dict(type='function_call', name='exec_command', call_id=cid, arguments=json.dumps(arg))
+                elif kind == 'exec':
+                    p = dict(type='custom_tool_call', name='exec', call_id=cid, input=arg)
+                elif kind == 'exec_output':
+                    p = dict(type='custom_tool_call_output', call_id=cid, output=arg)
                 else:
                     p = dict(type='function_call_output', call_id=cid, output=arg)
                 fh.write(json.dumps(dict(timestamp='2026-11-10T10:00:00Z', type='response_item', payload=p)) + '\n')
@@ -2187,7 +2194,11 @@ MUTANTS = [
     ('ended: SessionStart as idle', 'lib/hooks_shared.py', "        if st['state'] == 'ended':\n            self.change(lambda d: d.update(self._blank()))\n", ''),
     ('claim on write failure: said', 'lib/hooks_shared.py', '        if failed:\n            lines.append(', '        if failed and False:\n            lines.append('),
     ('codex PostToolUse on Bash', 'codex/hook.py', "    if (inp.get('tool_name') or '') not in SHELL_NAMES:\n        return None", "    return None"),
-    ('codex Stop fallback', 'codex/hook.py', "    for r in runs:\n        m.post_bash(", "    for r in []:\n        m.post_bash("),
+    ('codex Stop fallback', 'codex/hook.py', "    for r in runs:\n        if r['call_id'] not in seen:", "    for r in []:\n        if r['call_id'] not in seen:"),
+    ('codex code mode: each command with its own chunk', 'codex/hook.py', '    if code_js:\n', '    if False:\n'),
+    ('codex scan skips runs PostToolUse handled', 'codex/hook.py', "        if r['call_id'] not in seen:", '        if True:'),
+    ('codex SessionEnd scan before the handoff', 'codex/hook.py', "        try:      # a passing test the PostToolUse hook missed is finished before the handoff releases the task\n            stop_fallback(cfg, inp)",
+     "        try:      # a passing test the PostToolUse hook missed is finished before the handoff releases the task\n            pass"),
 ]
 
 

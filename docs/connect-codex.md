@@ -39,7 +39,7 @@ python3 -I install.py --codex
 
 `--dry-run` prints the change to `~/.codex/config.toml` as a diff and writes nothing. The second command writes it.
 
-Then a person starts Codex and runs `/hooks` once, before any run, to trust the new hooks. Codex skips new or changed hooks until they are trusted, so a `codex exec` run with untrusted hooks makes no claim, no edit check and no `done`. Run `/hooks` again after the installer changes the block (this version adds `PostToolUse`).
+Then a person starts Codex and runs `/hooks` once, before any run, to trust the new hooks. Codex skips new or changed hooks until they are trusted, so a `codex exec` run with untrusted hooks makes no claim, no edit check and no `done`. Run `/hooks` again after the installer changes the block (this version adds `PostToolUse`) and after every update of this repository: Codex hashes each hook's content, so changed files make the hooks untrusted, and an unattended `codex exec` with changed, untrusted hooks can hang instead of running without them.
 
 ## What it writes
 

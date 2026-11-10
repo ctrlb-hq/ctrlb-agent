@@ -19,7 +19,7 @@ shell calls for a passing test instead. Codex gets no spawn registration (decisi
 import json, os, signal, sys, time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
-import common, relay_hooks, rows_codex  # noqa: E402
+import common, redact, relay_hooks, rows_codex  # noqa: E402
 from hooks_shared import PRE_TOOL_ALARM_S, RECALL, SUBAGENT, Machine, relay_text, context, decide  # noqa: E402
 from paths import edit_paths as normalise_edit_paths  # noqa: E402
 
@@ -112,33 +112,51 @@ def machine(cfg, inp):
 
 
 def post_tool(cfg, inp):
-    """PostToolUse on a shell call: the machine's done on a passing test. Returns the hook output or None."""
+    """PostToolUse on a shell call: the machine's done on a passing test. In code mode (Codex 0.166: the model's
+    tools run inside one JavaScript exec) the call's text holds several tools.exec_command({cmd}) calls and its result
+    one JSON chunk per call: each command is paired with its own exit code. The call id is kept, so the Stop and
+    SessionEnd scans of the rollout never count the same run again. Returns the hook output or None."""
     if (inp.get('tool_name') or '') not in SHELL_NAMES:
         return None
     m = machine(cfg, inp)
     if not m:
         return None
-    m.change(lambda d: d.update(post_seen=True))
+    call_id = inp.get('tool_use_id') or ''
+    m.change(lambda d: d.update(post_seen=True, seen_calls=(d.get('seen_calls') or [])[-499:] + ([call_id] if call_id else [])))
     args = inp.get('tool_input')
     cmd = rows_codex.shell_command(args) if isinstance(args, dict) else args if isinstance(args, str) else ''
-    code, line = rows_codex.shell_result(inp.get('tool_response'))
-    return m.post_bash(cmd, code, line)
+    texts = [x for x in rows_codex.strings_in(args)] if not rows_codex.is_code_mode(cmd) else []
+    code_js = cmd if rows_codex.is_code_mode(cmd) else next((x for x in texts if rows_codex.is_code_mode(x)), '')
+    if code_js:
+        runs = rows_codex.code_mode_runs(code_js, inp.get('tool_response'))
+    else:
+        runs = [(cmd,) + tuple(rows_codex.shell_result(inp.get('tool_response')))]
+    said = []
+    for c, code, line in runs:
+        o = m.post_bash(c, code, line)
+        if o:
+            said.append(o['hookSpecificOutput']['additionalContext'])
+    return context('PostToolUse', '\n'.join(said)) if said else None
 
 
 def stop_fallback(cfg, inp):
-    """The Stop hook, when no PostToolUse reached this session: the rollout's shell calls since the last Stop, each
-    through the machine's Bash rule (a passing run of a held task's test sends done)."""
+    """The Stop hook, and SessionEnd before its handoff: the rollout's shell calls since the last scan that no
+    PostToolUse handled (its call id is not in the state's seen_calls), in order, each through the machine's Bash rule
+    (a passing run of a held task's test sends done). Covers a session whose PostToolUse did not fire or could not
+    read the exit code."""
     m = machine(cfg, inp)
     path = inp.get('agent_transcript_path') or inp.get('transcript_path')
     if not m or not path:
         return
     st = m.read()
-    if st.get('post_seen') or not st['tasks']:
+    if not st['tasks']:
         return
     runs, offset = rows_codex.shell_runs(path, int(st.get('rollout_offset') or 0))
     m.change(lambda d: d.update(rollout_offset=offset))
+    seen = set(st.get('seen_calls') or [])
     for r in runs:
-        m.post_bash(r['command'], r['exit_code'], r['summary'])
+        if r['call_id'] not in seen:
+            m.post_bash(r['command'], r['exit_code'], r['summary'])
 
 
 def end_machine(cfg, inp):
@@ -167,6 +185,12 @@ def main():
         return
     sid = inp.get('session_id') or ''
     event = inp.get('hook_event_name') or mode
+    if os.environ.get('CTRLB_HOOK_DUMP'):      # diagnosis: what this Codex sends each hook (secrets redacted)
+        try:
+            with open(os.environ['CTRLB_HOOK_DUMP'], 'a') as fh:
+                fh.write(redact.redact(json.dumps(dict(mode=mode, input=inp)))[0][:20000] + '\n')
+        except Exception as e:
+            common.log(f"codex hook dump: {type(e).__name__}")
     out = None
     if mode == 'session-start':
         run, parent = session_run(cfg, sid, inp.get('transcript_path'))
@@ -196,6 +220,10 @@ def main():
     elif mode == 'flush':
         upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
     elif mode == 'session-end':
+        try:      # a passing test the PostToolUse hook missed is finished before the handoff releases the task
+            stop_fallback(cfg, inp)
+        except Exception as e:
+            common.log(f"codex session-end scan: {type(e).__name__}: {str(e)[:200]}")
         try:
             session_end(cfg, inp)
         except Exception as e:
