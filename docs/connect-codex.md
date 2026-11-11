@@ -69,7 +69,7 @@ Then one `[[hooks.<Event>]]` table per event. Each runs `python3 -I <clone>/code
 
 | Event | Mode | What it does |
 |---|---|---|
-| `SessionStart` | `session-start` | Tells the agent its run id and agent id, and how to search its record. On a resumed or compacted thread it adds the session's running note above the session index, ending with a line that says the note is an orientation and the record must be searched. After a compaction it first waits up to 7 seconds for the note update the `PreCompact` hook started, and uses the latest note when that is not done |
+| `SessionStart` | `session-start` | Tells the agent its run id and agent id, and how to search its record. On a resumed or compacted thread it adds the session's running note above the session index. After a compaction it first waits up to 7 seconds for the note update the `PreCompact` hook started, and uses the latest note when that is not done |
 | `SubagentStart` | `subagent-start` | Uploads the parent's new lines, tells the subagent its parent and ids |
 | `PreCompact` | `flush` | Uploads the lines added since the last upload, then asks CtrlB to bring the session's running note up to date and does not wait (a main thread only). Codex ignores this hook's output, so nothing is printed |
 | `SessionEnd` | `session-end` | In a relay run (`CTRLB_RUN` set), hands off every hold the agent still has to nobody, in one write (tasks open for the next claimer, paths and slots released), then uploads like `flush`. Codex has no hook after a tool call, so the handoff's text cannot list edits or tests, and `done` carries no witness |
