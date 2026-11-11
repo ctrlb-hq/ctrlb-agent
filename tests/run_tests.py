@@ -276,6 +276,17 @@ def base_env(url, home, **extra):
     return env
 
 
+def no_gate(hk):
+    """hooks.json's events without the search-before-act gate's groups (mode search-first), which test_search_first
+    checks on their own."""
+    out = {}
+    for e, groups in hk.items():
+        gs = [g for g in groups if not all(h['command'].endswith(' search-first') for h in g['hooks'])]
+        if gs:
+            out[e] = gs
+    return out
+
+
 def hook(mode, inp, env, timeout=20, script=HOOK):
     t = time.time()
     p = subprocess.run([sys.executable, '-I', script, mode], input=inp if isinstance(inp, str) else json.dumps(inp),
@@ -350,7 +361,7 @@ def test_layout():
     ent = mk.get('plugins') or []
     check('marketplace.json: one entry, ctrlb-agent at ./plugin', len(ent) == 1 and ent[0]['name'] == 'ctrlb-agent'
           and ent[0]['source'] == './plugin')
-    hk = load('../../plugin/hooks/hooks.json')['hooks']
+    hk = no_gate(load('../../plugin/hooks/hooks.json')['hooks'])
     events = {'SessionStart': 'session-start', 'SubagentStart': 'subagent-start', 'PreCompact': 'flush', 'SessionEnd': 'session-end',
               'Stop': 'upload', 'SubagentStop': 'upload', 'PreToolUse': 'pre-tool', 'PostToolUse': 'post-tool',
               'PostToolUseFailure': 'post-tool-failure'}
@@ -1518,7 +1529,7 @@ def test_done_evidence(seeker):
         {'done': True, 'resource': 'task 07 latency', 'key': 'name:task 07 latency', 'paths': ['path:src/panels/Latency.tsx']})}]), env)
     gone = tokens().get('path:src/panels/Latency.tsx')
     check('post-tool done: no output, the task\'s tokens dropped', not p.stdout.strip() and had and not gone, f'{had} {gone}')
-    hk = load('../../plugin/hooks/hooks.json')['hooks']['PostToolUse']
+    hk = no_gate(load('../../plugin/hooks/hooks.json')['hooks'])['PostToolUse']
     check('hooks.json: a second PostToolUse group for Bash and the done tool', len(hk) == 3
           and hk[1].get('matcher') == 'Bash|mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'
           and hk[1]['hooks'][0]['command'].endswith('hook.py" post-tool'))
@@ -1650,7 +1661,7 @@ def test_round6_hooks(seeker):
     check('witness: only this session counts (another session of the same agent saw nothing)',
           o.get('permissionDecision') == 'deny' and 'no Bash command in this session' in o.get('permissionDecisionReason', ''),
           json.dumps(o)[:200])
-    hk = load('../../plugin/hooks/hooks.json')['hooks']
+    hk = no_gate(load('../../plugin/hooks/hooks.json')['hooks'])
     check('hooks.json: PreToolUse on the done tool, PostToolUse on edits and post, PostToolUseFailure on Bash',
           len(hk['PreToolUse']) == 3 and hk['PreToolUse'][1]['matcher'] == 'mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'
           and hk['PostToolUse'][2]['matcher'].startswith('Edit|Write|MultiEdit|NotebookEdit|mcp__ctrlb__post')
@@ -1959,7 +1970,7 @@ def test_round8_hooks(seeker):
     check('autoSlots outside a relay run: no claim', not [c for c in seeker.calls if c['path'].endswith('/claims')])
 
     # hooks.json, Codex and the docs.
-    hk = load('../../plugin/hooks/hooks.json')['hooks']
+    hk = no_gate(load('../../plugin/hooks/hooks.json')['hooks'])
     agent_hook = [g for g in hk['PreToolUse'] if g.get('matcher') == 'Agent|Task']
     fail_edit = [g for g in hk['PostToolUseFailure'] if g.get('matcher') == 'Edit|Write|MultiEdit|NotebookEdit']
     check('hooks.json: PreToolUse Agent|Task runs pre-agent (timeout 5); PostToolUseFailure on edit tools; SessionStart timeout 10',
@@ -2207,7 +2218,7 @@ def test_note_flush_hooks(seeker):
     seeker.flushed.clear()
     env = base_env(seeker.url, os.path.join(WORK, 'home-flush'))
     hooks_json = json.load(open(os.path.join(ROOT, 'plugin', 'hooks', 'hooks.json')))
-    pre = [h['timeout'] for e in hooks_json['hooks']['PreCompact'] for h in e['hooks']]
+    pre = [h['timeout'] for e in no_gate(hooks_json['hooks'])['PreCompact'] for h in e['hooks']]
     check('note flush: the PreCompact timeout in hooks.json is the hook\'s budget (45 s)', pre == [45], pre)
     sid = '5f0c7a52-0000-4000-8000-0000000000f1'
     proj = os.path.join(WORK, 'projects', '-work-flush')
@@ -2354,6 +2365,143 @@ def test_codex_note_flush(seeker):
     seeker.flushed.clear()
 
 
+SF_REASON = ("CtrlB Relay: search this session's record before you act. Nothing has been read from it since the "
+             "session resumed.")
+SF_RECALL = ('search_sessions', 'fetch_records', 'find_command', 'next_actions', 'session_index')
+
+
+def test_search_first(seeker):
+    """search-before-act-test.md item 1: the gate. With searchFirst on, SessionStart resume or compact (and PreCompact)
+    arms it; while armed, edits and Bash are denied with one line and Stop blocks the turn end once; any recall tool
+    clears it. Off, a fresh session or a subagent: nothing. No Seeker call."""
+    seeker.reset()
+    sid = '5f0c7a52-0000-4000-8000-0000000000f3'
+
+    def env_for(name, **extra):
+        home = os.path.join(WORK, 'home-sf-' + name)
+        shutil.rmtree(home, ignore_errors=True)
+        return base_env(seeker.url, home, **extra)
+
+    def ev(event, env, **kw):
+        p, _ = hook('search-first', dict(session_id=sid, hook_event_name=event, cwd='/work/sf', **kw), env)
+        return p
+
+    def denied(p):
+        o = out_of(p)
+        return o.get('permissionDecision') == 'deny' and o.get('permissionDecisionReason') == SF_REASON
+
+    def tool(env, name, **kw):
+        return ev('PreToolUse', env, tool_name=name, tool_input={}, **kw)
+
+    on = env_for('on', CTRLB_SEARCH_FIRST='on')
+    # a fresh session is not armed
+    ev('SessionStart', on, source='startup')
+    check('search first: a fresh session (startup) is not armed: an edit goes through',
+          tool(on, 'Edit').stdout.strip() == '' and ev('Stop', on).stdout.strip() == '')
+    # resume arms it
+    ev('SessionStart', on, source='resume')
+    check('search first: armed on resume, an edit is denied with the line', denied(tool(on, 'Edit')))
+    check('search first: while armed, Write, MultiEdit, NotebookEdit and Bash are denied the same way',
+          all(denied(tool(on, t)) for t in ('Write', 'MultiEdit', 'NotebookEdit', 'Bash')))
+    free = ('Read', 'Glob', 'Grep', 'mcp__ctrlb__claim', 'mcp__plugin_ctrlb-agent_ctrlb__done', 'mcp__ctrlb__search_sessions')
+    check('search first: while armed, Read, Glob, Grep, the relay tools and the recall tools are never denied',
+          all(tool(on, t).stdout.strip() == '' for t in free))
+    p1, p2 = ev('Stop', on, stop_hook_active=False), ev('Stop', on, stop_hook_active=True)
+    first = json.loads(p1.stdout or '{}')
+    check('search first: while armed, Stop blocks the turn end once ({"decision": "block", "reason": <the line>}), then lets it end',
+          first == {'decision': 'block', 'reason': SF_REASON} and p2.stdout.strip() == '' and p1.returncode == 0,
+          (p1.stdout[:200], p2.stdout[:200]))
+    check('search first: a non-recall tool does not clear the gate',
+          ev('PostToolUse', on, tool_name='mcp__ctrlb__claim', tool_input={}, tool_response={}).stdout.strip() == ''
+          and ev('PostToolUse', on, tool_name='Read', tool_input={}, tool_response={}) is not None and denied(tool(on, 'Edit')))
+    ev('PostToolUse', on, tool_name='mcp__plugin_ctrlb-agent_ctrlb__search_sessions', tool_input={}, tool_response={})
+    check('search first: after a recall call, edits and Bash go through and Stop does not block',
+          tool(on, 'Edit').stdout.strip() == '' and tool(on, 'Bash').stdout.strip() == '' and ev('Stop', on).stdout.strip() == '')
+    # each recall tool, under both server names, clears it; compact and PreCompact arm it
+    bad = []
+    for server in ('mcp__ctrlb__', 'mcp__plugin_ctrlb-agent_ctrlb__', 'mcp__recall__'):
+        for t in SF_RECALL:
+            ev('SessionStart', on, source='compact')
+            if not denied(tool(on, 'Edit')):
+                bad.append('not armed on compact')
+            ev('PostToolUse', on, tool_name=server + t, tool_input={}, tool_response={})
+            if tool(on, 'Edit').stdout.strip():
+                bad.append(server + t)
+    check('search first: armed on compact; each recall tool clears it (mcp__ctrlb__, the plugin\'s and any server name)', not bad, bad)
+    pc = ev('PreCompact', on, trigger='auto', custom_instructions=None)
+    check('search first: PreCompact arms it and prints nothing', pc.stdout.strip() == '' and denied(tool(on, 'Edit')))
+    ev('PostToolUse', on, tool_name='mcp__ctrlb__fetch_records', tool_input={}, tool_response={})
+    # a subagent is never gated
+    ev('SessionStart', on, source='resume')
+    check('search first: a subagent\'s tool call is never denied', tool(on, 'Edit', agent_id='sub-1').stdout.strip() == ''
+          and denied(tool(on, 'Edit')))
+    # off: nothing
+    off = env_for('off')
+    ev('SessionStart', off, source='resume')
+    check('search first: off (the default): resume arms nothing, edits go through, Stop never blocks',
+          tool(off, 'Edit').stdout.strip() == '' and tool(off, 'Bash').stdout.strip() == '' and ev('Stop', off).stdout.strip() == '')
+    # the harness flag arms on any start
+    hf = env_for('harness', CTRLB_SEARCH_FIRST='on', CTRLB_SEARCH_FIRST_ARM_ON_START='1')
+    ev('SessionStart', hf, source='startup')
+    check('search first: CTRLB_SEARCH_FIRST_ARM_ON_START=1 arms on a fresh start (the harness path)', denied(tool(hf, 'Bash')))
+    # the state file
+    st = [json.load(open(f)) for f in glob.glob(os.path.join(WORK, 'home-sf-on', 'state', 'session-*.json'))]
+    sf = [d.get('search_first') for d in st if d.get('search_first')]
+    check('search first: the state file holds search_first {armed, since, stop_blocked}',
+          sf and all({'armed', 'since', 'stop_blocked'} <= set(x) for x in sf), sf)
+    check('search first: the gate makes no Seeker call', not seeker.calls, [c['path'] for c in seeker.calls])
+    # hooks.json
+    hk = load('../../plugin/hooks/hooks.json')['hooks']
+    gate = {e: [g for g in gs if all(h['command'].endswith(' search-first') for h in g['hooks'])] for e, gs in hk.items()}
+    pre = [g.get('matcher') for g in gate['PreToolUse']]
+    post = [g.get('matcher') for g in gate['PostToolUse']]
+    stop_sync = all(not h.get('async') for g in gate['Stop'] for h in g['hooks'])
+    names = [srv + t for srv in ('mcp__ctrlb__', 'mcp__plugin_ctrlb-agent_ctrlb__') for t in SF_RECALL]
+    check('hooks.json: search-first on SessionStart, PreCompact, Stop (synchronous), PreToolUse edits and Bash, PostToolUse recall tools',
+          len(gate['SessionStart']) == 1 and len(gate['PreCompact']) == 1 and len(gate['Stop']) == 1 and stop_sync
+          and pre == ['Edit|Write|MultiEdit|NotebookEdit|Bash'] and len(post) == 1
+          and all(re.fullmatch(post[0], n) for n in names) and not re.fullmatch(post[0], 'mcp__ctrlb__claim'), (pre, post))
+
+    # Codex: a main thread is gated the same way (apply_patch and Bash); a subagent thread is not
+    chome = os.path.join(WORK, 'codex-home-sf')
+    shutil.rmtree(chome, ignore_errors=True)
+    os.makedirs(os.path.join(chome, 'sessions'))
+    main = os.path.join(chome, 'sessions', f'rollout-2026-09-06T11-58-07-{CSID}.jsonl')
+    shutil.copy(os.path.join(FIX, 'codex-rollout.jsonl'), main)
+    cenv = env_for('codex', CTRLB_SEARCH_FIRST='on', CODEX_HOME=chome)
+
+    def cev(event, sid_, path, **kw):
+        p, _ = chook('search-first', dict(session_id=sid_, transcript_path=path, hook_event_name=event, cwd='/work/sf', **kw), cenv)
+        return p
+    cev('SessionStart', CSID, main, source='resume')
+    c1 = cev('Stop', CSID, main, stop_hook_active=False)
+    check('codex search first: armed on resume; apply_patch and Bash denied; Stop blocks once',
+          denied(cev('PreToolUse', CSID, main, tool_name='apply_patch', tool_input={}))
+          and denied(cev('PreToolUse', CSID, main, tool_name='Bash', tool_input={}))
+          and json.loads(c1.stdout or '{}') == {'decision': 'block', 'reason': SF_REASON}
+          and cev('Stop', CSID, main, stop_hook_active=True).stdout.strip() == '', c1.stdout[:200])
+    cev('PostToolUse', CSID, main, tool_name='mcp__ctrlb__fetch_records', tool_input={}, tool_response={})
+    check('codex search first: a recall call clears it',
+          cev('PreToolUse', CSID, main, tool_name='apply_patch', tool_input={}).stdout.strip() == '')
+    sub = os.path.join(chome, 'sessions', 'rollout-2026-09-06T11-59-00-sf-sub.jsonl')
+    with open(main) as fh:
+        first = json.loads(fh.readline())
+    first.setdefault('payload', {})['parent_thread_id'] = CSID
+    with open(sub, 'w') as fh:
+        fh.write(json.dumps(first) + '\n')
+    cev('SessionStart', 'sub-thread-3', sub, source='resume')
+    check('codex search first: a subagent thread is never gated',
+          cev('PreToolUse', 'sub-thread-3', sub, tool_name='apply_patch', tool_input={}).stdout.strip() == ''
+          and cev('Stop', 'sub-thread-3', sub).stdout.strip() == '')
+    sys.path.insert(0, os.path.join(ROOT, 'codex'))
+    import importlib
+    inst = importlib.import_module('install')
+    sfh = [h for h in inst.HOOKS if h[1] == 'search-first']
+    check('codex install: search-first on SessionStart, PreToolUse apply_patch|Bash, PostToolUse recall tools, Stop (synchronous)',
+          [(h[0], h[3], h[4]) for h in sfh] == [('SessionStart', None, False), ('PreToolUse', 'apply_patch|Bash', False),
+                                               ('PostToolUse', post[0], False), ('Stop', None, False)], sfh)
+
+
 def main():
     seeker = Seeker()
     test_layout()
@@ -2379,6 +2527,7 @@ def main():
     test_running_note_hooks(seeker)
     test_note_flush_hooks(seeker)
     test_codex_note_flush(seeker)
+    test_search_first(seeker)
     test_codex_hooks(seeker)
     test_codex_install()
     test_root_install()

@@ -17,6 +17,8 @@ Config comes from environment variables, falling back to ~/.ctrlb/config.json (w
                  (default <CTRLB_HOME>/relay/<run id>/scratch)          file key "scratchDir"
   CTRLB_AUTO_SLOTS   files the hooks claim as slot:<path> around each edit (relative paths, comma-separated;
                  empty turns it off; default REGISTRY.md)               file key "autoSlots" (a list)
+  CTRLB_SEARCH_FIRST  "on" turns on the search-before-act gate (lib/search_first.py; an experiment, default off)
+                                                                 file key "searchFirst"
   CTRLB_OFF=1    turns every hook off
   CTRLB_HOME     where config.json, hooks.log and upload state live (default ~/.ctrlb)
 
@@ -74,6 +76,7 @@ def config():
     c['mcp_url'] = pick('CTRLB_MCP_URL', 'mcp_url', c['url'] + '/mcp' if c['url'] else '')
     c['scratch_dir'] = pick('CTRLB_SCRATCH_DIR', 'scratchDir')
     c['auto_slots'] = _auto_slots(env('CTRLB_AUTO_SLOTS'), f.get('autoSlots'))
+    c['search_first'] = pick('CTRLB_SEARCH_FIRST', 'searchFirst', 'off').lower()
     c['off'] = env('CTRLB_OFF') == '1' or not c['url'] or not c['key'] or not NAME_RE.match(c['dataset'])
     return c
 

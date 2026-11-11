@@ -3,7 +3,7 @@
   [mcp_servers.ctrlb]   Seeker's /mcp URL; the key is read from the CTRLB_KEY environment variable
                         (bearer_token_env_var), never written into the file; X-CtrlB-Run and X-CtrlB-Agent are sent
                         from CTRLB_RUN and CTRLB_AGENT when they are set (env_http_headers)
-  [[hooks.<Event>]]     SessionStart, SubagentStart, PreCompact, SessionEnd, Stop, SubagentStop and PreToolUse
+  [[hooks.<Event>]]     SessionStart, SubagentStart, PreCompact, SessionEnd, Stop, SubagentStop, PreToolUse and PostToolUse
                         (matcher apply_patch), each calling codex/hook.py from this repo
   [otel]                only with --otel: Codex's own OTLP log export, straight to the lake's OTLP endpoint
 
@@ -32,7 +32,12 @@ HOOKS = [('SessionStart', 'session-start', 10, None, False),
          ('SessionEnd', 'session-end', 10, None, False),
          ('Stop', 'upload', 120, None, True),
          ('SubagentStop', 'upload', 120, None, True),
-         ('PreToolUse', 'pre-tool', 5, 'apply_patch', False)]
+         ('PreToolUse', 'pre-tool', 5, 'apply_patch', False),
+         # the search-before-act gate (lib/search_first.py; off unless CTRLB_SEARCH_FIRST=on)
+         ('SessionStart', 'search-first', 5, None, False),
+         ('PreToolUse', 'search-first', 5, 'apply_patch|Bash', False),
+         ('PostToolUse', 'search-first', 5, 'mcp__.*__(search_sessions|fetch_records|find_command|next_actions|session_index)', False),
+         ('Stop', 'search-first', 5, None, False)]
 EVENT_KEYS = {'hooks.' + h[0] for h in HOOKS}
 HEADER_RE = re.compile(r'^\s*\[(\[?)\s*([^\[\]]+?)\s*\]\]?\s*(?:#.*)?$')
 KEY_RE = re.compile(r'^\s*([A-Za-z0-9_\-."\' ]+?)\s*=')

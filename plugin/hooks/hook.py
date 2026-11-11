@@ -11,7 +11,7 @@ for _lib in (os.path.join(_HERE, '..', 'lib'), os.path.join(_HERE, '..', '..', '
     if os.path.isfile(os.path.join(_lib, 'common.py')):
         sys.path.insert(0, _lib)
         break
-import common, relay_hooks, rows_claude  # noqa: E402
+import common, relay_hooks, rows_claude, search_first  # noqa: E402
 from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, context as _context, decide, record_tokens, _tool_answer,  # noqa: E402
                           bash_result, evidence_hint, is_test_command, record_test, record_bash, record_edit, record_note,
                           mark_relay, handoff_text, witness, _deny, index_block, parent_line, precompact_note,
@@ -184,6 +184,15 @@ def main():
         inp = {}
     cfg = common.config()
     if cfg['off']:
+        return
+    if mode == 'search-first':     # the search-before-act gate (lib/search_first.py); its own hook entries
+        try:
+            out = search_first.hook(cfg, inp, 'claude')
+        except Exception as e:
+            common.log(f"search first: {type(e).__name__}: {str(e)[:200]}")
+            out = None
+        if out:
+            print(json.dumps(out))
         return
     sid = inp.get('session_id') or ''
     out = None

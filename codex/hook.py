@@ -14,7 +14,7 @@ claimed before a patch could not be released after it."""
 import json, os, signal, sys, time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
-import common, relay_hooks, rows_codex  # noqa: E402
+import common, relay_hooks, rows_codex, search_first  # noqa: E402
 from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, context, decide, index_block, parent_line,  # noqa: E402
                           end_flush, END_FLUSH_S, compact_index_block)
 
@@ -99,6 +99,16 @@ def main():
     if cfg['off']:
         return
     sid = inp.get('session_id') or ''
+    if mode == 'search-first':     # the search-before-act gate (lib/search_first.py); a subagent thread: nothing
+        try:
+            sub = bool(inp.get('agent_id')) or bool(session_run(cfg, sid, inp.get('transcript_path'))[1])
+            out = search_first.hook(cfg, inp, 'codex', subagent=sub)
+        except Exception as e:
+            common.log(f"codex search first: {type(e).__name__}: {str(e)[:200]}")
+            out = None
+        if out:
+            print(json.dumps(out))
+        return
     event = inp.get('hook_event_name') or mode
     out = None
     if mode == 'session-start':
