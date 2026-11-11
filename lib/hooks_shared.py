@@ -280,10 +280,49 @@ def refusal_test(answer):
 
 
 def names_test(command, test):
-    """Whether a command names the task's test (Seeker's rule: the test, each run of white space as one space,
-    appears in the command so spaced)."""
+    """Whether a command names the task's test: the test, each run of white space as one space, appears in the
+    command so spaced. Naming it is not running it alone (test_alone): `test | tail -8` names the test."""
     t = ' '.join((test or '').split())
     return bool(t) and t in ' '.join((command or '').split())
+
+
+TEST_ALONE_SUFFIX = ' 2>&1'
+
+
+def test_alone(command, test):
+    """Whether a command is the task's test run alone, so that its exit code is the test's (Seeker's rule,
+    models.IsTestAlone; docs/relay-hooks.md): with each run of white space as one space, exactly the test, allowing
+    only a leading `cd <one path> &&` (or `cd <one path>;`) and a trailing `2>&1`. Any other pipe, `;`, `&&`, `||`,
+    backtick or `$(` makes the exit code another command's. The one rule for post_bash, the Codex rollout scan
+    (which calls post_bash) and the done witness."""
+    t, c = ' '.join((test or '').split()), ' '.join((command or '').split())
+    if not t or not c:
+        return False
+    if c in (t, t + TEST_ALONE_SUFFIX):
+        return True
+    rest = _cut_cd(c)
+    return rest is not None and rest in (t, t + TEST_ALONE_SUFFIX)
+
+
+def _cut_cd(c):
+    """c (spaced) without a leading `cd <path> && ` or `cd <path>; `, the path one word with no shell operator; None
+    when c does not start so."""
+    if not c.startswith('cd '):
+        return None
+    path, sep, rest = c[3:].partition(' ')
+    if not sep:
+        return None
+    if path.endswith(';'):
+        path = path[:-1]
+    elif rest.startswith('&& '):
+        rest = rest[3:]
+    elif rest.startswith('; '):
+        rest = rest[2:]
+    else:
+        return None
+    if not path or any(ch in path for ch in ';&|`<>()$'):
+        return None
+    return rest or None
 
 
 def evidence_hint(run, agent, answer, transcript='', keys=()):
@@ -308,7 +347,7 @@ def evidence_hint(run, agent, answer, transcript='', keys=()):
     resource = answer.get('resource') or answer.get('key') or '<the task name>'
     head = f'CtrlB Relay (run {run}): {resource} was not marked finished: this run requires evidence.'
     test = refusal_test(answer)
-    if test and not (found and names_test(found.get('command'), test)):
+    if test and not (found and test_alone(found.get('command'), test)):
         # The task's own test wins over whatever the agent ran last.
         ran = f" The last test command you ran, `{found['command']}`, is not it." if found else ''
         return context('PostToolUse', f'{head} The task\'s test command is `{test}`.{ran} Run it; when it passes, call '
@@ -437,7 +476,8 @@ def _code(v):
 
 def witness(rec, tool_input):
     """Decision 38: the PreToolUse output for a done call, checked against this session's Bash record. A command
-    containing the evidence command (white space collapsed), with an equal exit code (newest first): allow, with
+    that is the evidence command run alone (test_alone: white space collapsed, at most a leading cd and a trailing
+    2>&1; a pipe or another command makes the exit code not its own), with an equal exit code (newest first): allow, with
     witnessed true (and the exit code filled in from the record when the call left it out). No such command: deny,
     naming what the hook saw. No evidence command: None, unless the agent set witnessed itself (then it is dropped).
     The hook asserts only what it saw; it is as strong as the host it runs on."""
@@ -451,7 +491,8 @@ def witness(rec, tool_input):
         return None
     want = _code(ev.get('exit_code')) if ev.get('exit_code') is not None else None
     bash = rec.get('bash') or []
-    seen = [b for b in reversed(bash) if cmd in _norm(b.get('command'))]
+    seen = [b for b in reversed(bash) if test_alone(b.get('command'), cmd)]
+    inside = [b for b in reversed(bash) if cmd in _norm(b.get('command'))] if not seen else []
     for b in seen:
         code = _code(b.get('exit_code'))
         if code is None:
@@ -468,6 +509,10 @@ def witness(rec, tool_input):
         b = seen[0]
         saw = (f"; this session ran it with exit code {b.get('exit_code') if b.get('exit_code') is not None else 'unknown'}"
                + (f" (last line: {_cut(b.get('summary'), LINE_MAX)})" if b.get('summary') else ''))
+    elif inside:
+        b = inside[0]
+        saw = (f"; this session ran it only inside `{_cut(b.get('command'), 300)}`, whose exit code is not the test's "
+               f"(a pipe or another command around it). Run it alone, exactly as written, on its own line")
     elif bash:
         tests = [b for b in reversed(bash) if is_test_command(b.get('command'))]
         b = tests[0] if tests else bash[-1]
@@ -526,8 +571,9 @@ def brief_text(task, lead=''):
     if shown:
         parts.append(f'Its files: {shown}.')
     if task.get('test'):
-        parts.append(f"When your change is ready, run its test exactly as written: `{task['test']}`. When it passes, "
-                     "the hooks record it and hand you your next task.")
+        parts.append(f"When your change is ready, run its test exactly as written, on its own line, with no pipe, tail or "
+                     f"other command before or after it: `{task['test']}`. When it passes, the hooks record it and hand "
+                     "you your next task.")
     asks = [a for a in task.get('ask_about') or [] if isinstance(a, str) and a.strip()]
     if asks:
         parts.append('Ask about these before deciding them yourself: ' + '; '.join(asks) + '.')
@@ -625,6 +671,8 @@ class Machine:
         until = ans.get('lease_until') or 0
         k = ans.get('key') or resource_key(resource, self.cwd)[0]
         d['holds'][k] = dict(resource=resource, task=None, lease_until=until, lease_s=_lease_s(until, at))
+        if ans.get('after_done'):
+            d['holds'][k]['after_done'] = True      # the finisher's hold of its task's file
 
     def _drop_task(self, d, name):
         t = d['tasks'].pop(name, None) or {}
@@ -763,6 +811,9 @@ class Machine:
             if t.get('reason') == 'waiting_on':
                 on = [w for w in t.get('waiting_on') or [] if isinstance(w, str)] or ['other tasks']
                 return 'waiting', (p, name, on)
+            if t.get('finished_by') == self.agent and not t.get('held_by'):
+                # the finisher keeps its files (docs/relay-hooks.md): a plain path hold, and the edit goes ahead
+                return self._finisher_hold(p)
             holder = t.get('held_by') or t.get('finished_by') or ans.get('held_by') or ''
             if holder:
                 said = (f'{p} belongs to task "{name}", finished by {holder}' if t.get('finished_by') and not t.get('held_by')
@@ -773,6 +824,25 @@ class Machine:
             holder = ans.get('held_by') or ans.get('finished_by')
             return 'blocked', (p, holder, f'{p} is held by {holder}')
         return 'failed', None
+
+    def _finisher_hold(self, p):
+        """This agent finished the task p belongs to: claim resource=p, a plain path hold (a Seeker with the
+        after-done rule answers held, after_done). The edit goes ahead unless another agent holds p; with an older
+        Seeker that refuses the path again, it goes ahead with no hold."""
+        at = time.time()
+        try:
+            ans = self._call('claim', f'{p} (after done)', lambda: common.claim(self.cfg, self.run, self.agent, p,
+                                                                                 cwd=self.cwd, timeout=CLAIM_S))
+        except BaseException as e:
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            return 'held', None
+        if ans.get('held') is True:
+            record_tokens(self.run, self.agent, 'claim', ans)
+            self.change(lambda d: self._take_hold(d, p, ans, at))
+        elif ans.get('held_by') and ans['held_by'] != self.agent:
+            return 'blocked', (p, ans['held_by'], f'{p} is held by {ans["held_by"]}')
+        return 'held', None
 
     def _renew(self, st, p, key, own, renewed):
         """Own hold within RENEW_AT of its lease end: claim again, which renews (the task for a file of a held task,
@@ -820,14 +890,33 @@ class Machine:
             texts.append(self._done(pending['task'], pending['evidence']))
         elif pending:
             self.change(lambda d: d.update(pending_done=None))
-        if code == 0 and isinstance(command, str):
+        if isinstance(command, str):
             for name, t in self.read()['tasks'].items():
-                if t.get('test') and names_test(command, t['test']):
+                if not (t.get('test') and names_test(command, t['test'])):
+                    continue
+                if not test_alone(command, t['test']):
+                    # its exit code may be another command's (`test | tail -8` exits 0 on a failing test): no done,
+                    # whatever the exit code; said once per task per session
+                    texts.append(self._nudge(name, t['test']))
+                elif code == 0:
                     ev = dict(command=command.strip()[:COMMAND_MAX], exit_code=0, summary=(line or '')[:SUMMARY_MAX])
                     texts.append(self._done(name, ev))
-                    break
+                break
         texts = [t for t in texts if t]
         return context('PostToolUse', '\n'.join(texts)) if texts else None
+
+    def _nudge(self, name, test):
+        """The one line for a run that named the task's test but did not run it alone; '' after the first time for
+        this task in this session (the state file's nudged list)."""
+        def fn(d):
+            if name in (d.get('nudged') or []):
+                return False
+            d['nudged'] = (d.get('nudged') or []) + [name]
+            return True
+        if not self.change(fn):
+            return ''
+        return (f'CtrlB Relay: that run did not count as the test of task "{name}" because the test was not run alone. '
+                f'Run it exactly as written, on its own line: {test}')
 
     def _done(self, name, ev):
         """done(resource=name, evidence=ev, witnessed=true, next=true). Returns the text to inject ('' for none). A

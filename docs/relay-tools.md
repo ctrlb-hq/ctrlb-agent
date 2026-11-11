@@ -144,7 +144,7 @@ Answer when another agent holds it, or it is done:
 ```
 
 ```json
-{"held": false, "resource": "slugify", "key": "name:slugify", "finished_by": "agent-b", "finished_at": 1793000300000000, "message": "slugify was already finished by agent-b at 2026-11-07T10:05:00Z. If you were asked to work on it again, claim it with reopen=true to start a new round of work; otherwise pick something else"}
+{"held": false, "resource": "slugify", "key": "name:slugify", "finished_by": "agent-b", "finished_at": 1793000300000000, "message": "slugify was already finished by agent-b at 2026-11-07T10:05:00Z. Reopening is the lead's call"}
 ```
 
 Answer to `claim(resource="task 03 median")` when the orchestrator registered that task with its file:
@@ -205,7 +205,7 @@ Answer to a claim of a file that belongs to a registered task you do not hold:
 
 A held claim of a task whose registration lists `ask_about` answers them: `"ask_about": ["which date format the API returns"]`. Ask the task's owner about those before deciding them yourself.
 
-A held claim of a task whose registration names a test command answers it: `"test": "python3 -m pytest tests/test_median.py"`. Run it before you call `done`, and give it as the evidence's `command`.
+A held claim of a task whose registration names a test command answers it: `"test": "python3 -m pytest tests/test_median.py"`. Run it before you call `done`, exactly as written, on its own line, with no pipe, tail or other command before or after it, and give it as the evidence's `command`. Under the hooks protocol the brief says the same: `When your change is ready, run its test exactly as written, on its own line, with no pipe, tail or other command before or after it: <test>. When it passes, the hooks record it and hand you your next task.`
 
 Answer to `claim(resource="slugify", reopen=true)` on that finished task:
 
@@ -256,7 +256,7 @@ done(resource="task 03 median", evidence={"command": "python3 -m pytest tests/te
 
 When your test passes, call `done` with the evidence and `next=true`: one call finishes the task and claims your next one.
 
-Answer: `{done, resource, key, evidence?, finished_after_lease?, paths?, message?, test?}`. `done: true` finishes the task: later claims are refused with `finished_by` unless they pass `reopen=true`, and its files are handed back with it (`paths`). The evidence is stored with the finish, and `tasks` and the run view show it. A done whose command is not the task's test is still accepted; the run view records `evidence_matches_test: false` for it and counts the tasks finished with their own test as `done_with_task_test`.
+Answer: `{done, resource, key, evidence?, finished_after_lease?, paths?, message?, test?}`. `done: true` finishes the task: later claims are refused with `finished_by` unless they pass `reopen=true`, and its files are handed back with it (`paths`). The evidence is stored with the finish, and `tasks` and the run view show it. A done whose command is not the task's test is still accepted; the run view records `evidence_matches_test: false` for it and counts the tasks finished with their own test as `done_with_task_test`. The command is the test only when it is the test alone: exactly the test, allowing only a leading `cd <one path> &&` (or `;`) and a trailing `2>&1`. `python3 -m pytest tests/test_median.py 2>&1 | tail -8` names the test but is not it alone (`tail` exits 0 whatever the tests did): a workspace that requires evidence refuses it with `done: false, reason: "test_not_alone"`, `test`, and the message `run the task's test exactly as written, on its own line (no pipe, no tail, no other command), then call done: <test>`; nothing is written.
 
 When the workspace requires evidence (the `evidenceRequired` setting), a done that does not name the command is refused, and nothing is written:
 
@@ -266,7 +266,7 @@ When the workspace requires evidence (the `evidenceRequired` setting), a done th
 
 `test` (and the end of the message) is the task's test command, when its registration names one: run it and call `done` again with it. Otherwise call `done` again with the command you ran. The Claude Code plugin remembers your last test command (`pytest`, `python -m unittest`, `go test`, `npm test`, `cargo test`, `make test`), its exit code and last output line, and quotes it after such a refusal so you can repeat the call with it; when the refusal carries the task's `test` and your last test command is not it, it shows the task's test instead and tells you to run it. It never fills the evidence in for you. Codex gets the refusal only.
 
-**Witnessed evidence.** The Claude Code plugin records every Bash command of the session with its exit code and last output line. Before a `done` with evidence goes out, it checks the evidence against that record: a command of this session that contains the evidence's command, with the same exit code. If there is one, the call goes out with `witnessed: true` (and the exit code from the record when you left it out). If not, the call is refused before it reaches CtrlB, with what the plugin saw, for example `done was not sent: the evidence names \`pytest tests/test_x.py\` with exit code 0; this session ran it with exit code 1`. The run view counts `done_witnessed` beside `done_with_evidence` and `done_with_task_test`. Codex's `done` carries no witness.
+**Witnessed evidence.** The Claude Code plugin records every Bash command of the session with its exit code and last output line. Before a `done` with evidence goes out, it checks the evidence against that record: a command of this session that is the evidence's command run alone (at most a leading `cd <path> &&` and a trailing `2>&1`; a pipe or another command around it makes the exit code not its own), with the same exit code. If there is one, the call goes out with `witnessed: true` (and the exit code from the record when you left it out). If not, the call is refused before it reaches CtrlB, with what the plugin saw, for example `done was not sent: the evidence names \`pytest tests/test_x.py\` with exit code 0; this session ran it with exit code 1`. The run view counts `done_witnessed` beside `done_with_evidence` and `done_with_task_test`. Codex's `done` carries no witness.
 
 When the workspace requires a witness (`witnessRequired`, with `evidenceRequired`), an unwitnessed `done` is refused and nothing is written:
 

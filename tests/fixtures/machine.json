@@ -1,5 +1,5 @@
 {
- "about": "The hooks protocol (docs/relay-hooks.md, The agent-side state machine): one case per row of the table, and the failure cases. Each step runs one hook (claude: plugin/hooks/hook.py, codex: codex/hook.py) against a scripted fake Seeker that records the calls. answers maps a route (claims, check, done, handoffs, artifacts) to answers used in order (the last repeats); an answer is {status?, body?, sleep?}. A string \"{now+N}\" becomes now plus N seconds in \u00b5s. expect: calls (the claims, check, done and handoffs calls in order, each [method, route, a subset of its body]), context_has and context_not (the injected text or deny reason), decision (deny or none), state (a subset of the state file after; tasks and holds compared by their keys). Synthetic: built by hand from the Seeker routes in docs/relay.md, not recorded.",
+ "about": "The hooks protocol (docs/relay-hooks.md, The agent-side state machine): one case per row of the table, and the failure cases. Each step runs one hook (claude: plugin/hooks/hook.py, codex: codex/hook.py) against a scripted fake Seeker that records the calls. answers maps a route (claims, check, done, handoffs, artifacts) to answers used in order (the last repeats); an answer is {status?, body?, sleep?}. A string \"{now+N}\" becomes now plus N seconds in µs. expect: calls (the claims, check, done and handoffs calls in order, each [method, route, a subset of its body]), context_has and context_not (the injected text or deny reason), decision (deny or none), state (a subset of the state file after; tasks and holds compared by their keys). Synthetic: built by hand from the Seeker routes in docs/relay.md, not recorded.",
  "defs": {
   "task1": {
    "held": true,
@@ -1764,6 +1764,489 @@
    ]
   },
   {
+   "name": "row 8: the failing test piped to tail, Bash exit 0 (test-pass-piped-no-done): no done, the one line injected once; the test run alone then sends done",
+   "row": "bash test piped",
+   "state_before": "$holding1",
+   "steps": [
+    {
+     "event": "post-tool",
+     "input": {
+      "tool_name": "Bash",
+      "command": "python3 -m unittest tests/test_parse.py 2>&1 | tail -8",
+      "stdout": "FAILED (errors=3)\n"
+     },
+     "expect": {
+      "calls": [],
+      "context_has": [
+       "CtrlB Relay: that run did not count as the test of task \"task 01 parse\" because the test was not run alone. Run it exactly as written, on its own line: python3 -m unittest tests/test_parse.py"
+      ],
+      "state": {
+       "tasks": [
+        "task 01 parse"
+       ],
+       "nudged": [
+        "task 01 parse"
+       ]
+      }
+     }
+    },
+    {
+     "event": "post-tool",
+     "input": {
+      "tool_name": "Bash",
+      "command": "python3 -m unittest tests/test_parse.py 2>&1 | tail -8",
+      "stdout": "FAILED (errors=3)\n"
+     },
+     "expect": {
+      "calls": [],
+      "context_empty": true,
+      "state": {
+       "tasks": [
+        "task 01 parse"
+       ]
+      }
+     }
+    },
+    {
+     "event": "post-tool",
+     "input": {
+      "tool_name": "Bash",
+      "command": "python3 -m unittest tests/test_parse.py",
+      "stdout": "OK\n"
+     },
+     "answers": {
+      "done": [
+       {
+        "body": {
+         "done": true,
+         "resource": "task 01 parse",
+         "key": "name:task 01 parse",
+         "next": "$none_free"
+        }
+       }
+      ]
+     },
+     "expect": {
+      "calls": [
+       [
+        "POST",
+        "done",
+        {
+         "resource": "task 01 parse",
+         "witnessed": true,
+         "evidence": {
+          "command": "python3 -m unittest tests/test_parse.py",
+          "exit_code": 0
+         }
+        }
+       ]
+      ],
+      "context_has": [
+       "task \"task 01 parse\" is finished"
+      ],
+      "state": {
+       "state": "free",
+       "tasks": []
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "row 8: cd <dir> && the test, exit 0 (test-pass-cd-prefix): done",
+   "row": "bash test cd prefix",
+   "state_before": "$holding1",
+   "steps": [
+    {
+     "event": "post-tool",
+     "input": {
+      "tool_name": "Bash",
+      "command": "cd /w && python3 -m unittest tests/test_parse.py",
+      "stdout": "OK\n"
+     },
+     "answers": {
+      "done": [
+       {
+        "body": {
+         "done": true,
+         "resource": "task 01 parse",
+         "key": "name:task 01 parse",
+         "next": "$none_free"
+        }
+       }
+      ]
+     },
+     "expect": {
+      "calls": [
+       [
+        "POST",
+        "done",
+        {
+         "resource": "task 01 parse",
+         "evidence": {
+          "command": "cd /w && python3 -m unittest tests/test_parse.py",
+          "exit_code": 0
+         }
+        }
+       ]
+      ],
+      "state": {
+       "state": "free",
+       "tasks": []
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "row 8: the test with 2>&1, exit 0 (test-pass-redirect): done",
+   "row": "bash test redirect",
+   "state_before": "$holding1",
+   "steps": [
+    {
+     "event": "post-tool",
+     "input": {
+      "tool_name": "Bash",
+      "command": "python3 -m unittest tests/test_parse.py 2>&1",
+      "stdout": "OK\n"
+     },
+     "answers": {
+      "done": [
+       {
+        "body": {
+         "done": true,
+         "resource": "task 01 parse",
+         "key": "name:task 01 parse",
+         "next": "$none_free"
+        }
+       }
+      ]
+     },
+     "expect": {
+      "calls": [
+       [
+        "POST",
+        "done",
+        {
+         "resource": "task 01 parse",
+         "evidence": {
+          "command": "python3 -m unittest tests/test_parse.py 2>&1",
+          "exit_code": 0
+         }
+        }
+       ]
+      ],
+      "state": {
+       "state": "free",
+       "tasks": []
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "row 8: the test then another command, exit 0 (test-then-other-no-done): no done, the one line injected",
+   "row": "bash test then other",
+   "state_before": "$holding1",
+   "steps": [
+    {
+     "event": "post-tool",
+     "input": {
+      "tool_name": "Bash",
+      "command": "python3 -m unittest tests/test_parse.py; echo ok",
+      "stdout": "FAILED (failures=1)\nok\n"
+     },
+     "expect": {
+      "calls": [],
+      "context_has": [
+       "CtrlB Relay: that run did not count as the test of task \"task 01 parse\" because the test was not run alone. Run it exactly as written, on its own line: python3 -m unittest tests/test_parse.py"
+      ],
+      "state": {
+       "tasks": [
+        "task 01 parse"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "row 6b: the finisher edits its task's file after the hook's done (finisher-edits-after-done): the task claim answers finished_by this agent, the hook claims the path, the edit goes ahead in enforce and a path hold is recorded",
+   "row": "edit after own done",
+   "state_before": "$holding1",
+   "steps": [
+    {
+     "event": "post-tool",
+     "input": {
+      "tool_name": "Bash",
+      "command": "python3 -m unittest tests/test_parse.py",
+      "stdout": "OK\n"
+     },
+     "answers": {
+      "done": [
+       {
+        "body": {
+         "done": true,
+         "resource": "task 01 parse",
+         "key": "name:task 01 parse",
+         "next": "$none_free"
+        }
+       }
+      ]
+     },
+     "expect": {
+      "calls": [
+       [
+        "POST",
+        "done",
+        {
+         "resource": "task 01 parse"
+        }
+       ]
+      ],
+      "state": {
+       "state": "free",
+       "tasks": [],
+       "holds": []
+      }
+     }
+    },
+    {
+     "event": "pre-tool",
+     "input": {
+      "tool_name": "Write",
+      "file": "src/parse.py"
+     },
+     "answers": {
+      "check": [
+       {
+        "body": {
+         "mode": "enforce",
+         "allowed": true,
+         "conflicts": [],
+         "own": []
+        }
+       }
+      ],
+      "claims": [
+       {
+        "body": {
+         "held": false,
+         "resource": "src/parse.py",
+         "key": "path:src/parse.py",
+         "reason": "belongs_to_task",
+         "task": "task 01 parse",
+         "finished_by": "agent-1"
+        }
+       },
+       {
+        "body": {
+         "held": false,
+         "resource": "task 01 parse",
+         "key": "name:task 01 parse",
+         "finished_by": "agent-1",
+         "finished_at": "{now-5}",
+         "message": "task 01 parse was already finished by agent-1. Reopening is the lead's call",
+         "free_tasks": []
+        }
+       },
+       {
+        "body": {
+         "held": true,
+         "resource": "src/parse.py",
+         "key": "path:src/parse.py",
+         "lease_until": "{now+1800}",
+         "token": "tok-p",
+         "after_done": true,
+         "finished_by": "agent-1"
+        }
+       }
+      ]
+     },
+     "expect": {
+      "calls": [
+       [
+        "POST",
+        "check",
+        {}
+       ],
+       [
+        "POST",
+        "claims",
+        {
+         "resource": "src/parse.py"
+        }
+       ],
+       [
+        "POST",
+        "claims",
+        {
+         "resource": "task 01 parse"
+        }
+       ],
+       [
+        "POST",
+        "claims",
+        {
+         "resource": "src/parse.py"
+        }
+       ]
+      ],
+      "decision": null,
+      "context_empty": true,
+      "state": {
+       "holds": [
+        "path:src/parse.py"
+       ],
+       "tasks": []
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "row 6b: the finisher's claim on write, a Seeker with the after-done rule: the path claim is held with after_done at once, the edit goes ahead",
+   "row": "edit after own done (after_done)",
+   "steps": [
+    {
+     "event": "pre-tool",
+     "input": {
+      "tool_name": "Edit",
+      "file": "src/parse.py"
+     },
+     "answers": {
+      "check": [
+       {
+        "body": {
+         "mode": "enforce",
+         "allowed": true,
+         "conflicts": [],
+         "own": []
+        }
+       }
+      ],
+      "claims": [
+       {
+        "body": {
+         "held": true,
+         "resource": "src/parse.py",
+         "key": "path:src/parse.py",
+         "lease_until": "{now+1800}",
+         "token": "tok-p",
+         "after_done": true,
+         "finished_by": "agent-1"
+        }
+       }
+      ]
+     },
+     "expect": {
+      "calls": [
+       [
+        "POST",
+        "check",
+        {}
+       ],
+       [
+        "POST",
+        "claims",
+        {
+         "resource": "src/parse.py"
+        }
+       ]
+      ],
+      "decision": null,
+      "context_empty": true,
+      "state": {
+       "holds": [
+        "path:src/parse.py"
+       ],
+       "tasks": []
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "row 6b: another agent edits a file of a task agent-2 finished (other-edits-after-done), enforce: denied, naming the finisher",
+   "row": "edit after other's done",
+   "steps": [
+    {
+     "event": "pre-tool",
+     "input": {
+      "tool_name": "Edit",
+      "file": "src/parse.py"
+     },
+     "answers": {
+      "check": [
+       {
+        "body": {
+         "mode": "enforce",
+         "allowed": true,
+         "conflicts": [],
+         "own": []
+        }
+       }
+      ],
+      "claims": [
+       {
+        "body": {
+         "held": false,
+         "resource": "src/parse.py",
+         "key": "path:src/parse.py",
+         "reason": "belongs_to_task",
+         "task": "task 01 parse",
+         "finished_by": "agent-2"
+        }
+       },
+       {
+        "body": {
+         "held": false,
+         "resource": "task 01 parse",
+         "key": "name:task 01 parse",
+         "finished_by": "agent-2",
+         "finished_at": "{now-5}",
+         "message": "task 01 parse was already finished by agent-2. Reopening is the lead's call",
+         "free_tasks": []
+        }
+       }
+      ]
+     },
+     "expect": {
+      "calls": [
+       [
+        "POST",
+        "check",
+        {}
+       ],
+       [
+        "POST",
+        "claims",
+        {
+         "resource": "src/parse.py"
+        }
+       ],
+       [
+        "POST",
+        "claims",
+        {
+         "resource": "task 01 parse"
+        }
+       ]
+      ],
+      "decision": "deny",
+      "context_has": [
+       "src/parse.py belongs to task \"task 01 parse\", finished by agent-2",
+       "leave it to agent-2"
+      ],
+      "state": {
+       "holds": [],
+       "tasks": []
+      }
+     }
+    }
+   ]
+  },
+  {
    "name": "codex row 1: SessionStart with a run id claims the next task",
    "row": "codex idle SessionStart",
    "harness": "codex",
@@ -2404,6 +2887,60 @@
       "state": {
        "tasks": [
         "task 02 emit"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "codex bash test piped: Codex's PostToolUse on a failing test piped to tail (exit 0), and the same run in the rollout at Stop: no done, the one line once",
+   "row": "codex bash test piped",
+   "harness": "codex",
+   "state_before": "$holding1",
+   "steps": [
+    {
+     "event": "post-tool",
+     "input": {
+      "tool_name": "Bash",
+      "command": "python3 -m unittest tests/test_parse.py 2>&1 | tail -3",
+      "tool_response": "Exit code: 0\nWall time: 0.2 seconds\nOutput:\nFAILED (errors=3)\n"
+     },
+     "expect": {
+      "calls": [],
+      "context_has": [
+       "CtrlB Relay: that run did not count as the test of task \"task 01 parse\" because the test was not run alone. Run it exactly as written, on its own line: python3 -m unittest tests/test_parse.py"
+      ],
+      "state": {
+       "tasks": [
+        "task 01 parse"
+       ]
+      }
+     }
+    },
+    {
+     "event": "upload",
+     "input": {
+      "rollout": [
+       [
+        "function_call",
+        "c9",
+        {
+         "cmd": "python3 -m unittest tests/test_parse.py 2>&1 | tail -3"
+        }
+       ],
+       [
+        "function_call_output",
+        "c9",
+        "Exit code: 0\nOutput:\nFAILED (errors=3)\n"
+       ]
+      ]
+     },
+     "expect": {
+      "calls": [],
+      "state": {
+       "tasks": [
+        "task 01 parse"
        ]
       }
      }

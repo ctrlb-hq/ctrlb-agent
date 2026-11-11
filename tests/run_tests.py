@@ -1468,15 +1468,28 @@ def test_done_evidence(seeker):
     ctx = out_of(p).get('additionalContext', '')
     check('post-tool done refused: the test is read from the message when the answer has no test field',
           f"The task's test command is `{task_test}`. Run it;" in ctx, ctx[:300])
-    hook('post-tool', dict(base, tool_name='Bash', tool_use_id='b3', tool_input={'command': 'cd /work/dash && ' + task_test + ' -q'},
+    hook('post-tool', dict(base, tool_name='Bash', tool_use_id='b3', tool_input={'command': 'cd /work/dash && ' + task_test + ' 2>&1'},
                            tool_response={'stdout': '...\n2 passed in 0.01s\n', 'stderr': ''}), fresh)
     p, _ = hook('post-tool', dict(done_in, tool_response=[{'type': 'text', 'text': json.dumps(quoted)}]), fresh)
     ctx = out_of(p).get('additionalContext', '')
     check('post-tool done refused: a last test command that runs the task\'s test is quoted with its result',
-          f'`cd /work/dash && {task_test} -q` (exit code 0), the task\'s test' in ctx and '"summary": "2 passed in 0.01s"' in ctx, ctx[:400])
+          f'`cd /work/dash && {task_test} 2>&1` (exit code 0), the task\'s test' in ctx and '"summary": "2 passed in 0.01s"' in ctx, ctx[:400])
     check('names_test: white space collapsed, a cd before and a flag after still match',
           H.names_test('cd x &&  python3 -m pytest   tests/test_lat.py -q', task_test) and not H.names_test('python3 -I -c "x"', task_test)
           and not H.names_test('pytest', ''))
+    alone = ['python3 -m pytest tests/test_lat.py', '  python3 -m  pytest tests/test_lat.py ', 'cd x && python3 -m pytest tests/test_lat.py',
+             'cd x; python3 -m pytest tests/test_lat.py 2>&1', 'python3 -m pytest tests/test_lat.py 2>&1']
+    not_alone = ['python3 -m pytest tests/test_lat.py 2>&1 | tail -8', 'python3 -m pytest tests/test_lat.py -q', 'echo; python3 -m pytest tests/test_lat.py',
+                 'python3 -m pytest tests/test_lat.py; echo ok', 'python3 -m pytest tests/test_lat.py || true', 'cd x && cd y && python3 -m pytest tests/test_lat.py',
+                 'cd $(pwd) && python3 -m pytest tests/test_lat.py', 'cd `pwd` && python3 -m pytest tests/test_lat.py', '']
+    check('test_alone: the test, a cd before and 2>&1 after only (Seeker\'s IsTestAlone)',
+          all(H.test_alone(c, task_test) for c in alone) and not any(H.test_alone(c, task_test) for c in not_alone)
+          and not H.test_alone('pytest', ''), [c for c in alone if not H.test_alone(c, task_test)] + [c for c in not_alone if H.test_alone(c, task_test)])
+    o = H.witness({'bash': [{'command': task_test + ' 2>&1 | tail -3', 'exit_code': 0, 'summary': 'FAILED (errors=3)'}]},
+                  {'resource': 'task 07 latency', 'evidence': {'command': task_test, 'exit_code': 0}})
+    reason = (o or {}).get('hookSpecificOutput', {}).get('permissionDecisionReason', '')
+    check('witness: the evidence command ran only inside a pipe: denied, saying its exit code is not the test\'s',
+          (o or {}).get('hookSpecificOutput', {}).get('permissionDecision') == 'deny' and 'only inside' in reason and 'Run it alone' in reason, reason[:300])
     # A done that finished the task: no output, and the task's tokens are dropped like a release's.
     hook('post-tool', dict(base, tool_name='mcp__ctrlb__claim', tool_use_id='c1', tool_input={'resource': 'task 07 latency'},
                            tool_response=[{'type': 'text', 'text': json.dumps({'held': True, 'key': 'name:task 07 latency',
@@ -1588,7 +1601,7 @@ def test_round6_hooks(seeker):
 
     # The witness.
     pre = dict(base, hook_event_name='PreToolUse', tool_name='mcp__ctrlb__done')
-    hook('post-tool', dict(post, tool_name='Bash', tool_input={'command': 'cd /work/dash && python3 -m pytest tests/test_lat.py -q'},
+    hook('post-tool', dict(post, tool_name='Bash', tool_input={'command': 'cd /work/dash && python3 -m pytest tests/test_lat.py 2>&1'},
                            tool_response={'stdout': '..\n2 passed in 0.01s\n', 'stderr': ''}), env)
     ev_in = {'resource': 'task 07 latency', 'run_id': run, 'agent': 'agent-1',
              'evidence': {'command': 'python3 -m pytest tests/test_lat.py', 'exit_code': 0, 'summary': '2 passed in 0.01s'}}
@@ -1607,7 +1620,7 @@ def test_round6_hooks(seeker):
     reason = o.get('permissionDecisionReason', '')
     check('witness: a command this session never ran is denied, naming the last test it did run, even with witnessed set',
           o.get('permissionDecision') == 'deny' and 'never ran it' in reason
-          and '`cd /work/dash && python3 -m pytest tests/test_lat.py -q` (exit code 0)' in reason and 'updatedInput' not in o, reason)
+          and '`cd /work/dash && python3 -m pytest tests/test_lat.py 2>&1` (exit code 0)' in reason and 'updatedInput' not in o, reason)
     wrong = dict(ev_in, evidence={'command': 'python3 -m pytest tests/test_lat.py', 'exit_code': 3})
     hook('post-tool-failure', dict(base, hook_event_name='PostToolUseFailure', tool_name='Bash',
                                    tool_input={'command': 'python3 -m pytest tests/test_lat.py'}, error='Exit code 1\n1 failed'), env)
@@ -2164,7 +2177,9 @@ def test_machine():
     check('machine: every row of the state table has a fixture',
           all(r in rows for r in ('idle SessionStart run', 'idle SubagentStart run', 'idle SessionStart no run', 'idle SessionStart none free',
                                   'holding SessionStart compact', 'edit unheld', 'edit belongs_to_task', 'edit own', 'edit other advisory',
-                                  'edit other enforce', 'edit renew', 'bash test pass', 'done retry', 'session end', 'ended SessionStart')))
+                                  'edit other enforce', 'edit renew', 'bash test pass', 'done retry', 'session end', 'ended SessionStart',
+                                  'bash test piped', 'bash test cd prefix', 'bash test redirect', 'bash test then other', 'edit after own done',
+                                  "edit after other's done", 'codex bash test piped')))
     test_mutants(defs, cases, seeker)
     seeker.httpd.shutdown()
 
@@ -2187,8 +2202,12 @@ MUTANTS = [
     ('brief: the tasks it comes after', 'lib/hooks_shared.py', "    if after:\n        parts.append(f'It comes after", "    if False:\n        parts.append(f'It comes after"),
     ('done: next waits on unfinished tasks, said', 'lib/hooks_shared.py', "if nxt.get('reason') == 'waiting_on':", 'if False:'),
     ('renew near the lease end', 'lib/hooks_shared.py', '        if _now_us() < until - RENEW_AT * lease * 1e6:\n            return', '        if True:\n            return'),
-    ('done on a passing test', 'lib/hooks_shared.py', "if t.get('test') and names_test(command, t['test']):", 'if False:'),
-    ('done only for the registered test', 'lib/hooks_shared.py', "if t.get('test') and names_test(command, t['test']):", "if t.get('test'):"),
+    ('done on a passing test', 'lib/hooks_shared.py', "                elif code == 0:\n                    ev = dict(command=", "                elif False:\n                    ev = dict(command="),
+    ('done only for the registered test', 'lib/hooks_shared.py', "if not (t.get('test') and names_test(command, t['test'])):\n                    continue\n                if not test_alone(",
+     "if not t.get('test'):\n                    continue\n                if False and not test_alone("),
+    ('done only when the test ran alone', 'lib/hooks_shared.py', "                if not test_alone(command, t['test']):\n", "                if False:\n"),
+    ('not alone: said once per task per session', 'lib/hooks_shared.py', "            if name in (d.get('nudged') or []):\n                return False", "            if False:\n                return False"),
+    ('finisher keeps its files', 'lib/hooks_shared.py', "if t.get('finished_by') == self.agent and not t.get('held_by'):", 'if False:'),
     ('done witnessed', 'lib/hooks_shared.py', 'witnessed=True, next_=True, timeout=DONE_S', 'witnessed=False, next_=True, timeout=DONE_S'),
     ('done: next task brief', 'lib/hooks_shared.py', "return brief_text(task, lead=head + ' Next: ')", 'return head'),
     ('failed done kept for the next Bash event', 'lib/hooks_shared.py', 'self.change(lambda d: d.update(pending_done=dict(task=name, evidence=ev)))', 'pass'),
