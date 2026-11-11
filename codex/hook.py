@@ -16,7 +16,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 import common, relay_hooks, rows_codex  # noqa: E402
 from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, context, decide, index_block, parent_line,  # noqa: E402
-                          end_flush, END_FLUSH_S)
+                          end_flush, END_FLUSH_S, compact_index_block)
 
 SYNC_S, ASYNC_S = 5, 90
 HANDOFF_S = 0.8
@@ -105,8 +105,14 @@ def main():
         run, parent = session_run(cfg, sid, inp.get('transcript_path'))
         head = SUBAGENT.format(sid=parent) if parent else RECALL.format(sid=sid)
         cwd = inp.get('cwd') or ''
-        # item 2: a thread starts with the session index under the recall rule; a subagent thread with its parent's line
-        index = parent_line(cfg, cwd, parent) if parent else index_block(cfg, cwd, sid, inp.get('source') or '')
+        # item 2: a thread starts with the session index under the recall rule; a subagent thread with its parent's line.
+        # After a compaction a main thread asks the flush first (followups item 3): Codex ignored PreCompact's output.
+        if parent:
+            index = parent_line(cfg, cwd, parent)
+        elif inp.get('source') == 'compact':
+            index = compact_index_block(cfg, cwd, sid)
+        else:
+            index = index_block(cfg, cwd, sid, inp.get('source') or '')
         head += '\n\n' + index if index else ''
         agent = rows_codex.agent_for(cfg, sid, parent)
         scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
@@ -125,8 +131,12 @@ def main():
         line = parent_line(cfg, inp.get('cwd') or '', sid)
         out = context('SubagentStart', SUBAGENT.format(sid=sid) + ('\n\n' + line if line else '') + '\n\n'
                       + RELAY.format(run=run, agent=agent, scratch=common.scratch_dir(cfg, run)))
-    elif mode == 'flush':
-        upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
+    elif mode == 'flush':      # PreCompact: Codex ignores the output, so nothing is printed
+        upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S - END_FLUSH_S, event, sid)
+        # followups item 3: start the note update now (wait_s 0), so the session start after the compaction finds it
+        # running or done; a subagent thread keeps no note
+        if not session_run(cfg, sid, inp.get('transcript_path'))[1]:
+            end_flush(cfg, sid)
     elif mode == 'session-end':
         try:
             session_end(cfg, inp)

@@ -124,15 +124,86 @@ def _within(fn, budget, what='session index'):
     return box.get('v')
 
 
+# The line that ends the running note wherever the hooks put it in front of the agent (session-store-note-followups.md
+# item 2). Injection text only: the note row Seeker stores stays as the model wrote it.
+ORIENTATION = ("This note is an orientation, not the record. The details are in the session record: before you act on "
+               "anything the note states, search the record for it. The seq numbers above name the records to read.")
+INDEX_NOTE = "Running note of session {sid} (kept by a small model while the session ran; record seq {seq}):\n{text}"
+INDEX_NOTE_MAX = 4000   # Seeker's cut of the note an index carries (sessionIndexNoteMax)
+INDEX_HEAD = 'Session index:'
+
+
+def _cut_words(s, n):
+    """Seeker's cutWords: at most n characters, ending on a word when one ends in the last third."""
+    if len(s) <= n:
+        return s
+    r = s[:n - 1]
+    i = r.rfind(' ')
+    if i > 0 and i >= n * 2 // 3:
+        return r[:i].rstrip(' ,;:') + '\u2026'
+    return r + '\u2026'
+
+
+def _has_text(note):
+    return isinstance(note, dict) and bool(str(note.get('text') or '').strip())
+
+
+def _index_text(ans, note=None):
+    """The index as injected: the session's running note first, ending with ORIENTATION, then the index lines. note,
+    when given, replaces the index's own note (Codex after compaction: the flushed one). ans may be None (the index
+    read failed) when note is given."""
+    ok = isinstance(ans, dict)
+    text = str(ans.get('text') or '') if ok else ''
+    own = ans.get('note') if ok else None
+    i = text.rfind(INDEX_HEAD)
+    index = text[i:] if i >= 0 else ('' if own else text)
+    use = note if _has_text(note) else own if _has_text(own) else None
+    if use is None:
+        return text
+    if use is own and i > 0:        # Seeker's rendering of its own note, the line added after it
+        return text[:i].rstrip() + '\n\n' + ORIENTATION + '\n\n' + index
+    head = INDEX_NOTE.format(sid=use.get('session_id') or '', seq=use.get('seq'),
+                             text=_cut_words(str(use['text']).strip(), INDEX_NOTE_MAX))
+    return head + '\n\n' + ORIENTATION + ('\n\n' + index if index else '')
+
+
 def index_block(cfg, cwd, sid='', source='', budget=INDEX_S):
     """The session index injected under the recall rule at SessionStart: the caller's recent sessions in this project
     (cwd or under it, or a non-default branch), one line each. On a resumed or compacted session it carries the
-    session's running note above the index. '' when there is no earlier session, or on an error or a timeout."""
+    session's running note above the index, ending with ORIENTATION. '' when there is no earlier session, or on an
+    error or a timeout."""
     resumed = sid if source in ('resume', 'compact') else ''
     ans = _within(lambda: common.session_index(cfg, _index_query(cwd, resumed), timeout=budget), budget)
     if not isinstance(ans, dict) or not (ans.get('sessions') or ans.get('note')):
         return ''
-    return str(ans.get('text') or '')
+    return _index_text(ans)
+
+
+# Codex after a compaction: the session start asks the flush (Codex ignores PreCompact output, so its note was the last
+# trigger's) and waits up to COMPACT_FLUSH_S - 1 s for it, beside the index read. Codex's SessionStart timeout is 10 s.
+COMPACT_FLUSH_S = 8.0
+
+
+def compact_index_block(cfg, cwd, sid, budget=COMPACT_FLUSH_S):
+    """index_block for a Codex main thread's session start after a compaction: the index read and the note flush
+    (wait_s budget - 1) at once, and the note the flush answers above the index. On a flush answer with running, a
+    timeout or an error, the index's latest note, as index_block."""
+    import threading
+    box = {}
+    t = threading.Thread(target=lambda: box.update(
+        ans=_within(lambda: common.session_index(cfg, _index_query(cwd, sid), timeout=INDEX_S), INDEX_S)), daemon=True)
+    t.start()
+    flushed = _within(lambda: common.note_flush(cfg, sid, max(0.0, budget - 1.0), timeout=budget), budget, 'note flush')
+    t.join(INDEX_S + 0.5)
+    ans = box.get('ans')
+    note = None
+    if isinstance(flushed, dict) and not flushed.get('running'):
+        note = flushed.get('note') if isinstance(flushed.get('note'), dict) else None
+    elif isinstance(flushed, dict):
+        common.log(f"codex compact {sid}: the note update is still running; the index's note")
+    if note is None and not (isinstance(ans, dict) and (ans.get('sessions') or ans.get('note'))):
+        return ''
+    return _index_text(ans, note)
 
 
 PRECOMPACT_NOTE = ("A running hand-off note for this session was kept by a small model while the session ran (record seq "
@@ -160,7 +231,8 @@ def precompact_budget():
 def _note_text(note):
     if not isinstance(note, dict) or not str(note.get('text') or '').strip():
         return ''
-    return PRECOMPACT_NOTE.format(seq=note.get('seq'), text=str(note['text']).strip())[:NOTE_MAX]
+    tail = '\n\n' + ORIENTATION      # cut the note, never the line
+    return PRECOMPACT_NOTE.format(seq=note.get('seq'), text=str(note['text']).strip())[:NOTE_MAX - len(tail)] + tail
 
 
 def precompact_note(cfg, cwd, sid, deadline=None):

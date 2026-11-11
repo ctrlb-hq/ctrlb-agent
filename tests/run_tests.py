@@ -65,7 +65,8 @@ class Seeker:
                           artifacts='ok', index='ok', note='missing')
         self.notes = {}     # session id -> (seq, text): the running notes the index route answers with
         # the note flush (POST .../note): 'missing' (404) by default, as a Seeker before the flush; 'ok' answers
-        # flushed[sid] (updated) or notes[sid]; 'slow' sleeps NOTE_SLOW_S; 'error' is 500
+        # flushed[sid] (updated) or notes[sid]; 'running' answers notes[sid] with running; 'slow' sleeps NOTE_SLOW_S;
+        # 'error' is 500
         self.flushed = {}
         outer = self
 
@@ -124,6 +125,10 @@ class Seeker:
                     if s == 'missing':
                         return self._answer(404, {'error': 'no route'})
                     sid = (body or {}).get('session_id')
+                    if s == 'running':      # the update goes on past wait_s: the existing note, running
+                        got = outer.notes.get(sid)
+                        note = dict(session_id=sid, seq=got[0], text=got[1]) if got else None
+                        return self._answer(200, dict(note=note, updated=False, pending_chars=900, running=True))
                     got = outer.flushed.get(sid) or outer.notes.get(sid)
                     note = dict(session_id=sid, seq=got[0], text=got[1]) if got else None
                     return self._answer(200, dict(note=note, updated=sid in outer.flushed, pending_chars=0))
@@ -2275,6 +2280,143 @@ def test_note_flush_hooks(seeker):
     seeker.flushed.clear()
 
 
+ORIENTATION = ('This note is an orientation, not the record. The details are in the session record: before you act on '
+               'anything the note states, search the record for it. The seq numbers above name the records to read.')
+
+
+def test_note_followups(seeker):
+    """session-store-note-followups.md items 2 and 3. The orientation line ends the note wherever the hooks put it in
+    front of the agent (Claude Code's PreCompact instructions, the SessionStart on a resumed or compacted session in
+    both harnesses), and is never sent to Seeker. Codex: pre-compaction sends the flush (wait_s 0) after the upload
+    and prints nothing; the session start after a compaction asks the flush (wait_s 7, budget 8 s) and injects the
+    note it answers, falling back to the index's note when the update is still running or the flush fails. A
+    subagent thread does neither."""
+    seeker.reset()
+    seeker.notes.clear()
+    seeker.flushed.clear()
+    sent = []
+
+    def keep():
+        sent.extend(json.dumps(c.get('body')) for c in seeker.calls)
+        sent.extend(json.dumps(r) for r in seeker.rows)
+
+    def note_then_line(ctx, text):
+        i, j, k = ctx.find(text), ctx.find(ORIENTATION), ctx.find('Session index:')
+        return 0 <= i < j < k and ctx.count(ORIENTATION) == 1 and ctx[i + len(text):j].strip() == ''
+
+    env = base_env(seeker.url, os.path.join(WORK, 'home-orient'))
+    sid = '5f0c7a52-0000-4000-8000-0000000000f2'
+    proj = os.path.join(WORK, 'projects', '-work-orient')
+    os.makedirs(proj, exist_ok=True)
+    path = os.path.join(proj, sid + '.jsonl')
+    with open(path, 'w') as fh:
+        fh.write(line('user', 'Orient the agent.', '2026-11-11T10:00:00Z', dict(sessionId=sid, cwd='/work/orient')))
+    stale, fresh = '1. Task: the stale note [seq 100].', '1. Task: the current note [seq 240].'
+    seeker.notes[sid] = (100, stale)
+    seeker.flushed[sid] = (240, fresh)
+    seeker.state['note'] = 'ok'
+    # 1. Claude Code PreCompact: the flushed note, ending with the line
+    p, _ = hook('flush', dict(session_id=sid, transcript_path=path, cwd='/work/orient', hook_event_name='PreCompact',
+                              trigger='auto', custom_instructions=None), env)
+    out = p.stdout.strip()
+    check('orientation: PreCompact\'s instructions end the note with the line, under 10,000 characters',
+          fresh in out and out.endswith(fresh + '\n\n' + ORIENTATION) and len(p.stdout) < 10000, out[-300:])
+    keep()
+    # a note longer than the cap is cut, never the line
+    seeker.reset()
+    seeker.flushed[sid] = (240, 'word ' * 4000)
+    p, _ = hook('flush', dict(session_id=sid, transcript_path=path, cwd='/work/orient', hook_event_name='PreCompact',
+                              trigger='auto', custom_instructions=None), env)
+    check('orientation: a long note is cut before the line, which stays whole',
+          p.stdout.strip().endswith(ORIENTATION) and len(p.stdout) < 10000, len(p.stdout))
+    seeker.flushed[sid] = (240, fresh)
+    keep()
+    # 2. Claude Code SessionStart on compact and resume: the index's note, then the line, then the index
+    for source in ('compact', 'resume'):
+        seeker.reset()
+        p, _ = hook('session-start', dict(session_id=sid, transcript_path=path, cwd='/work/orient',
+                                          hook_event_name='SessionStart', source=source), env)
+        ctx = out_of(p).get('additionalContext', '')
+        check(f'orientation: Claude Code SessionStart ({source}) ends the note with the line, above the index',
+              note_then_line(ctx, stale), ctx[:400])
+        keep()
+    seeker.reset()
+    p, _ = hook('session-start', dict(session_id=sid, transcript_path=path, cwd='/work/orient', hook_event_name='SessionStart',
+                                      source='startup'), env)
+    check('orientation: a new session (startup) has no note and no line',
+          ORIENTATION not in out_of(p).get('additionalContext', ''))
+
+    # 3. Codex
+    chome = os.path.join(WORK, 'codex-home-orient')
+    shutil.rmtree(chome, ignore_errors=True)
+    os.makedirs(os.path.join(chome, 'sessions'))
+    main = os.path.join(chome, 'sessions', f'rollout-2026-09-06T11-58-07-{CSID}.jsonl')
+    shutil.copy(os.path.join(FIX, 'codex-rollout.jsonl'), main)
+    cenv = base_env(seeker.url, os.path.join(WORK, 'home-orient-codex'), CODEX_HOME=chome)
+    cstale, cfresh = '1. Task: the engine PR body [seq 13].', '1. Task: the engine PR body, merged [seq 40].'
+    seeker.notes[CSID] = (13, cstale)
+    seeker.flushed[CSID] = (40, cfresh)
+    start = dict(session_id=CSID, transcript_path=main, cwd='/work/orient', hook_event_name='SessionStart')
+    # pre-compaction: the flush with wait_s 0 after the upload, nothing printed, no wait
+    seeker.reset()
+    seeker.state['note'] = 'slow'
+    p, dt = chook('flush', dict(start, hook_event_name='PreCompact', trigger='auto'), cenv)
+    flushes = [c for c in seeker.calls if c['path'].endswith('/note')]
+    up = [i for i, c in enumerate(seeker.calls) if c['path'].endswith('/records')]
+    fi = [i for i, c in enumerate(seeker.calls) if c['path'].endswith('/note')]
+    check(f'codex flush: pre-compaction sends the flush with wait_s 0 after the upload, prints nothing, does not wait ({dt:.1f}s)',
+          len(flushes) == 1 and flushes[0]['body'] == dict(session_id=CSID, wait_s=0) and up and fi and max(up) < min(fi)
+          and p.stdout.strip() == '' and dt < 3, ([c['path'] for c in seeker.calls], dt, p.stdout[:100]))
+    keep()
+    # session start after compaction: the flush asked with wait_s 7, its note injected above the index, with the line
+    seeker.reset()
+    seeker.state['note'] = 'ok'
+    p, dt = chook('session-start', dict(start, source='compact'), cenv)
+    ctx = out_of(p).get('additionalContext', '')
+    flushes = [c for c in seeker.calls if c['path'].endswith('/note')]
+    check(f'codex flush: session start after compaction asks the flush (wait_s 7) and injects its note with the line ({dt:.1f}s)',
+          len(flushes) == 1 and flushes[0]['body'] == dict(session_id=CSID, wait_s=7) and note_then_line(ctx, cfresh)
+          and cstale not in ctx and 'record seq 40' in ctx and dt < 9.5, (ctx[:400], [c['body'] for c in flushes], dt))
+    keep()
+    for state, why in (('running', 'the update is still running'), ('error', 'the flush fails'), ('missing', 'Seeker has no flush')):
+        seeker.reset()
+        seeker.state['note'] = state
+        p, dt = chook('session-start', dict(start, source='compact'), cenv)
+        ctx = out_of(p).get('additionalContext', '')
+        check(f'codex flush: after compaction, {why}: the index\'s note with the line ({dt:.1f}s)',
+              note_then_line(ctx, cstale) and cfresh not in ctx and dt < 9.5, ctx[:400])
+        keep()
+    seeker.state['note'] = 'ok'
+    # a resumed Codex thread: the index's note with the line, no flush
+    seeker.reset()
+    p, _ = chook('session-start', dict(start, source='resume'), cenv)
+    ctx = out_of(p).get('additionalContext', '')
+    check('orientation (codex): a resumed thread\'s note ends with the line; no flush',
+          note_then_line(ctx, cstale) and not any(c['path'].endswith('/note') for c in seeker.calls), ctx[:400])
+    keep()
+    # a subagent thread: no flush at pre-compaction or at its session start, and no note
+    sub = os.path.join(chome, 'sessions', 'rollout-2026-09-06T11-59-00-orient-sub.jsonl')
+    with open(main) as fh:
+        first = json.loads(fh.readline())
+    first.setdefault('payload', {})['parent_thread_id'] = CSID
+    with open(sub, 'w') as fh:
+        fh.write(json.dumps(first) + '\n')
+    seeker.reset()
+    sstart = dict(session_id='sub-thread-2', transcript_path=sub, cwd='/work/orient', hook_event_name='SessionStart')
+    chook('flush', dict(sstart, hook_event_name='PreCompact', trigger='auto'), cenv)
+    p, _ = chook('session-start', dict(sstart, source='compact'), cenv)
+    check('codex flush: a subagent thread sends no flush at pre-compaction or after compaction, and gets no note',
+          not any(c['path'].endswith('/note') for c in seeker.calls) and ORIENTATION not in out_of(p).get('additionalContext', ''),
+          [c['path'] for c in seeker.calls])
+    keep()
+    # the stored rows: the line is injection text only, never sent to Seeker
+    check('orientation: the line is never sent to Seeker (no row, no request body carries it)',
+          sent and not any(ORIENTATION[:60] in x for x in sent) and seeker.notes[sid] == (100, stale), len(sent))
+    seeker.state['note'] = 'missing'
+    seeker.notes.clear()
+    seeker.flushed.clear()
+
+
 def main():
     seeker = Seeker()
     test_layout()
@@ -2299,6 +2441,7 @@ def main():
     test_session_index(seeker)
     test_running_note_hooks(seeker)
     test_note_flush_hooks(seeker)
+    test_note_followups(seeker)
     test_codex_hooks(seeker)
     test_codex_install()
     test_root_install()
