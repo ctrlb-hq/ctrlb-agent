@@ -182,6 +182,14 @@ def session_index(cfg, query, timeout=2):
     return request(cfg, 'GET', f"/ai/sessions/{_seg(cfg['dataset'])}/index", query=query, timeout=timeout)
 
 
+def note_flush(cfg, sid, wait_s=0, timeout=2):
+    """POST /ai/sessions/{dataset}/note {session_id, wait_s}: brings the session's running note up to date now, even
+    under a part. {note: {session_id, seq, text} | null, updated, pending_chars, running?, skipped?}. wait_s 0 starts
+    the update and answers the existing note at once; Seeker caps wait_s at 55."""
+    body = dict(session_id=sid, wait_s=round(max(0.0, min(float(wait_s), 55.0)), 1))
+    return request(cfg, 'POST', f"/ai/sessions/{_seg(cfg['dataset'])}/note", body, timeout=timeout)
+
+
 def check(cfg, run, agent, paths, cwd='', timeout=2, tokens=None):
     """POST /ai/relay/{dataset}/runs/{run}/check: {mode, allowed, conflicts: [{path, key, held_by, lease_until, reason,
     lapsed_at?, message?}], renewed?}. tokens maps a path (as sent) to the token its claim answered."""

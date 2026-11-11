@@ -62,8 +62,11 @@ class Seeker:
         # Round 8 routes: each answers 'ok', or 'slow' (sleeps SLOW_S, longer than any hook budget), 'error' (500),
         # 'missing' (404, a Seeker without the route); claims also 'held' (another agent holds it).
         self.state.update(briefs='ok', claims='ok', release='ok', posts='ok', tasks='ok', contracts='ok', peers='ok',
-                          artifacts='ok', index='ok')
+                          artifacts='ok', index='ok', note='missing')
         self.notes = {}     # session id -> (seq, text): the running notes the index route answers with
+        # the note flush (POST .../note): 'missing' (404) by default, as a Seeker before the flush; 'ok' answers
+        # flushed[sid] (updated) or notes[sid]; 'slow' sleeps NOTE_SLOW_S; 'error' is 500
+        self.flushed = {}
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -111,6 +114,19 @@ class Seeker:
                     if s == 'missing':
                         return self._answer(404, {'error': 'no route'})
                     return self._answer(200, fake_index(outer.rows, outer.notes, urllib.parse.parse_qs(m.group(2) or '')))
+                m = re.match(r'^/ai/sessions/([A-Za-z0-9_]+)/note$', self.path)
+                if m and method == 'POST':
+                    s = outer.state['note']
+                    if s == 'slow':
+                        time.sleep(NOTE_SLOW_S)
+                    if s == 'error':
+                        return self._answer(500, {'error': 'boom'})
+                    if s == 'missing':
+                        return self._answer(404, {'error': 'no route'})
+                    sid = (body or {}).get('session_id')
+                    got = outer.flushed.get(sid) or outer.notes.get(sid)
+                    note = dict(session_id=sid, seq=got[0], text=got[1]) if got else None
+                    return self._answer(200, dict(note=note, updated=sid in outer.flushed, pending_chars=0))
                 m = re.match(r'^/ai/relay/([A-Za-z0-9_]+)/runs/([^/]+)/check$', self.path)
                 if m and method == 'POST':
                     s = outer.state['check']
@@ -163,6 +179,7 @@ class Seeker:
 
 
 SLOW_S = 5
+NOTE_SLOW_S = 10     # longer than the tests' PreCompact budget (CTRLB_PRECOMPACT_S) and the session end's
 INDEX_EXPAND = 'Expand a line with fetch_records(session_id, seq_from, seq_to).'
 
 
@@ -2175,6 +2192,89 @@ def test_running_note_hooks(seeker):
     seeker.notes.clear()
 
 
+def test_note_flush_hooks(seeker):
+    """The running note's flush (running-note-currency-fix.md, items 4 to 6): PreCompact (Claude Code) flushes the
+    note, waiting until two seconds before its budget, and prints the note the flush answers; on a slow or failing
+    flush it falls back to the index's latest note. Session end (Claude Code and a Codex main thread) sends the flush
+    with wait_s 0 after the upload and does not wait for the update."""
+    seeker.reset()
+    seeker.notes.clear()
+    seeker.flushed.clear()
+    env = base_env(seeker.url, os.path.join(WORK, 'home-flush'))
+    hooks_json = json.load(open(os.path.join(ROOT, 'plugin', 'hooks', 'hooks.json')))
+    pre = [h['timeout'] for e in hooks_json['hooks']['PreCompact'] for h in e['hooks']]
+    check('note flush: the PreCompact timeout in hooks.json is the hook\'s budget (45 s)', pre == [45], pre)
+    sid = '5f0c7a52-0000-4000-8000-0000000000f1'
+    proj = os.path.join(WORK, 'projects', '-work-flush')
+    os.makedirs(proj, exist_ok=True)
+    path = os.path.join(proj, sid + '.jsonl')
+    with open(path, 'w') as fh:
+        fh.write(line('user', 'Flush the note.', '2026-11-11T09:00:00Z', dict(sessionId=sid, cwd='/work/flush')))
+    inp = dict(session_id=sid, transcript_path=path, cwd='/work/flush', hook_event_name='PreCompact', trigger='auto',
+               custom_instructions=None)
+    seeker.notes[sid] = (100, '1. Task: the stale note [seq 100].')
+    seeker.flushed[sid] = (240, '1. Task: the current note [seq 240].')
+    seeker.state['note'] = 'ok'
+    p, dt = hook('flush', inp, env)
+    flushes = [c for c in seeker.calls if c['path'].endswith('/note')]
+    up = [i for i, c in enumerate(seeker.calls) if c['path'].endswith('/records')]
+    fi = [i for i, c in enumerate(seeker.calls) if c['path'].endswith('/note')]
+    w = flushes[0]['body'].get('wait_s') if flushes else None
+    check('note flush: PreCompact injects the note the flush answers, after the upload, waiting up to its budget',
+          'current note [seq 240]' in p.stdout and 'record seq 240' in p.stdout and 'stale note' not in p.stdout
+          and len(flushes) == 1 and flushes[0]['body'].get('session_id') == sid and isinstance(w, (int, float)) and 38 <= w <= 43
+          and up and fi and max(up) < min(fi) and not any('/index?' in c['path'] for c in seeker.calls),
+          (p.stdout[:200], w, [c['path'] for c in seeker.calls]))
+    for state in ('slow', 'error', 'missing'):
+        seeker.reset()
+        seeker.state['note'] = state
+        p, dt = hook('flush', inp, dict(env, CTRLB_PRECOMPACT_S='6'))
+        asked = any('/index?' in c['path'] for c in seeker.calls)
+        check(f'note flush: PreCompact falls back to the index\'s note on a {state} flush, inside its budget ({dt:.1f}s)',
+              'stale note [seq 100]' in p.stdout and asked and dt < 6.5, (p.stdout[:200], dt))
+    seeker.state['note'] = 'ok'
+
+    # Session end: the flush goes after the upload with wait_s 0, and the hook does not wait for the update.
+    with open(path, 'a') as fh:     # new records since the PreCompact upload
+        fh.write(line('user', 'One more step.', '2026-11-11T09:05:00Z', dict(sessionId=sid, cwd='/work/flush')))
+    seeker.reset()
+    seeker.state['note'] = 'slow'
+    p, dt = hook('session-end', dict(session_id=sid, transcript_path=path, cwd='/work/flush', hook_event_name='SessionEnd',
+                                     reason='exit'), env)
+    flushes = [c for c in seeker.calls if c['path'].endswith('/note')]
+    up = [i for i, c in enumerate(seeker.calls) if c['path'].endswith('/records')]
+    fi = [i for i, c in enumerate(seeker.calls) if c['path'].endswith('/note')]
+    check(f'note flush: session end sends the flush with wait_s 0 after the upload and does not wait ({dt:.1f}s)',
+          len(flushes) == 1 and flushes[0]['body'] == dict(session_id=sid, wait_s=0) and up and max(up) < min(fi)
+          and dt < 3 and p.stdout.strip() == '', ([c['path'] for c in seeker.calls], dt))
+    # Codex: a main thread's session end flushes the same way; a subagent thread does not.
+    chome = os.path.join(WORK, 'codex-home-flush')
+    shutil.rmtree(chome, ignore_errors=True)
+    os.makedirs(os.path.join(chome, 'sessions'))
+    main = os.path.join(chome, 'sessions', f'rollout-2026-09-06T11-58-07-{CSID}.jsonl')
+    shutil.copy(os.path.join(FIX, 'codex-rollout.jsonl'), main)
+    cenv = base_env(seeker.url, os.path.join(WORK, 'home-flush-codex'), CODEX_HOME=chome)
+    seeker.reset()
+    p, dt = chook('session-end', dict(session_id=CSID, transcript_path=main, cwd='/work/flush', hook_event_name='SessionEnd'), cenv)
+    flushes = [c for c in seeker.calls if c['path'].endswith('/note')]
+    check(f'note flush (codex): session end sends the flush with wait_s 0 and does not wait ({dt:.1f}s)',
+          len(flushes) == 1 and flushes[0]['body'] == dict(session_id=CSID, wait_s=0) and dt < 3,
+          ([c['path'] for c in seeker.calls], dt))
+    sub = os.path.join(chome, 'sessions', 'rollout-2026-09-06T11-59-00-sub.jsonl')
+    with open(main) as fh:
+        first = json.loads(fh.readline())
+    first.setdefault('payload', {})['parent_thread_id'] = CSID
+    with open(sub, 'w') as fh:
+        fh.write(json.dumps(first) + '\n')
+    seeker.reset()
+    p, dt = chook('session-end', dict(session_id='sub-thread-1', transcript_path=sub, cwd='/work/flush', hook_event_name='SessionEnd'), cenv)
+    check('note flush (codex): a subagent thread\'s session end sends no flush',
+          not any(c['path'].endswith('/note') for c in seeker.calls), [c['path'] for c in seeker.calls])
+    seeker.state['note'] = 'missing'
+    seeker.notes.clear()
+    seeker.flushed.clear()
+
+
 def main():
     seeker = Seeker()
     test_layout()
@@ -2198,6 +2298,7 @@ def main():
     test_private_tags(seeker)
     test_session_index(seeker)
     test_running_note_hooks(seeker)
+    test_note_flush_hooks(seeker)
     test_codex_hooks(seeker)
     test_codex_install()
     test_root_install()

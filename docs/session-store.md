@@ -55,7 +55,7 @@ When the workspace's `sessions.runningNote` setting is on (the default), CtrlB k
 - **After compaction, or when you resume a session** (both harnesses): the session starts with its latest note above the session index.
 - **No note yet**, or CtrlB slow or unreachable: nothing is added.
 
-The note's records lag the session by up to 120,000 characters: the note is updated once that much is new. Search the record for anything after it.
+**When the note is updated.** Seeker updates the note in three cases. First, while the session runs, each time it has 120,000 characters of new records. Second, before a compaction (Claude Code): the PreCompact hook asks Seeker to bring the note up to date now, over the records since the last update even when they are fewer, and waits up to 43 seconds for it, so the note given to the compaction covers the whole session. Third, when a session ends (Claude Code, and a Codex main thread): the hook asks for the same update and does not wait, so the next session starts from a current note. Between these, the note lags the session by up to 120,000 characters. Search the record for anything after it. A Codex session that compacts still starts from the latest note, which can lag the same way, because Codex ignores PreCompact output.
 
 ## The write-first claim
 

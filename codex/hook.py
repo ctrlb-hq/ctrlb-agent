@@ -15,7 +15,8 @@ import json, os, signal, sys, time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 import common, relay_hooks, rows_codex  # noqa: E402
-from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, context, decide, index_block, parent_line  # noqa: E402
+from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, context, decide, index_block, parent_line,  # noqa: E402
+                          end_flush, END_FLUSH_S)
 
 SYNC_S, ASYNC_S = 5, 90
 HANDOFF_S = 0.8
@@ -131,7 +132,10 @@ def main():
             session_end(cfg, inp)
         except Exception as e:
             common.log(f"codex session-end: {type(e).__name__}: {str(e)[:200]}")
-        upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
+        upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S - END_FLUSH_S, event, sid)
+        # item 3: a main thread's next session starts from a current note (subagent threads keep none)
+        if not session_run(cfg, sid, inp.get('transcript_path'))[1]:
+            end_flush(cfg, sid)
     elif mode == 'upload':
         upload(cfg, [inp.get('agent_transcript_path') or inp.get('transcript_path')], ASYNC_S, event, sid)
     elif mode == 'pre-tool':

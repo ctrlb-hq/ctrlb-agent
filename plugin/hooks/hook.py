@@ -4,6 +4,7 @@ pre-agent|post-tool|post-tool-failure>, with the hook's JSON on stdin. A hook ne
 pre-agent (a sub-agent spawn registers a task) never prints anything and gives up after three. docs/relay-hooks.md
 lists each hook's event, fields, output and time budget."""
 import json, os, signal, sys, time
+T0 = time.time()        # the hook's start: PreCompact's budget counts from it
 sys.dont_write_bytecode = True
 _HERE = os.path.dirname(os.path.abspath(__file__))
 for _lib in (os.path.join(_HERE, '..', 'lib'), os.path.join(_HERE, '..', '..', 'lib')):
@@ -13,7 +14,8 @@ for _lib in (os.path.join(_HERE, '..', 'lib'), os.path.join(_HERE, '..', '..', '
 import common, relay_hooks, rows_claude  # noqa: E402
 from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, context as _context, decide, record_tokens, _tool_answer,  # noqa: E402
                           bash_result, evidence_hint, is_test_command, record_test, record_bash, record_edit, record_note,
-                          mark_relay, handoff_text, witness, _deny, index_block, parent_line, precompact_note)
+                          mark_relay, handoff_text, witness, _deny, index_block, parent_line, precompact_note,
+                          end_flush, precompact_budget, END_FLUSH_S)
 from paths import edit_paths as normalise_edit_paths  # noqa: E402
 
 SYNC_S, ASYNC_S = 5, 90
@@ -207,9 +209,10 @@ def main():
     elif mode == 'flush':
         upload(cfg, inp, SYNC_S)
         if inp.get('hook_event_name') == 'PreCompact':
-            # item 3: the running note goes to the compaction summary (Claude Code reads PreCompact stdout as its
-            # instructions); printed as plain text, nothing on no note or no answer in time
-            note = precompact_note(cfg, inp.get('cwd') or '', sid)
+            # item 3: the running note, brought up to date now (the flush), goes to the compaction summary (Claude Code
+            # reads PreCompact stdout as its instructions); printed as plain text. On a flush timeout or error, the
+            # latest note from the index; nothing when there is none.
+            note = precompact_note(cfg, inp.get('cwd') or '', sid, T0 + precompact_budget())
             if note:
                 print(note)
     elif mode == 'session-end':
@@ -217,7 +220,8 @@ def main():
             session_end(cfg, inp)
         except Exception as e:
             common.log(f"session-end: {type(e).__name__}: {str(e)[:200]}")
-        upload(cfg, inp, SYNC_S)
+        upload(cfg, inp, SYNC_S - END_FLUSH_S)
+        end_flush(cfg, sid)     # item 3: the next session starts from a current note; Seeker runs the update
     elif mode == 'upload':
         upload(cfg, inp, ASYNC_S)
     elif mode in ('post-tool', 'post-tool-failure'):

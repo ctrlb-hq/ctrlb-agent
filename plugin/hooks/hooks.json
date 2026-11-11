@@ -4,7 +4,7 @@
       { "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" session-start", "timeout": 10 } ] }
     ],
     "PreCompact": [
-      { "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" flush", "timeout": 10 } ] }
+      { "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" flush", "timeout": 45 } ] }
     ],
     "Stop": [
       { "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" upload", "timeout": 120, "async": true } ] }

@@ -102,7 +102,7 @@ def _index_query(cwd, sid='', limit=INDEX_LIMIT):
     return q
 
 
-def _within(fn, budget):
+def _within(fn, budget, what='session index'):
     """fn() in a daemon thread, or None when it does not answer within budget seconds or raises."""
     import threading
     box = {}
@@ -116,10 +116,10 @@ def _within(fn, budget):
     t.start()
     t.join(budget)
     if t.is_alive():
-        common.log(f"session index: no answer in {budget}s, nothing injected")
+        common.log(f"{what}: no answer in {budget:.1f}s")
         return None
     if 'e' in box:
-        common.log(f"session index: {type(box['e']).__name__}: {str(box['e'])[:200]}")
+        common.log(f"{what}: {type(box['e']).__name__}: {str(box['e'])[:200]}")
         return None
     return box.get('v')
 
@@ -141,16 +141,54 @@ PRECOMPACT_NOTE = ("A running hand-off note for this session was kept by a small
 NOTE_MAX = 9000     # Claude Code takes at most 10,000 characters of a PreCompact hook's stdout
 
 
-def precompact_note(cfg, cwd, sid, budget=INDEX_S):
-    """Item 3: the session's latest running note as instructions for the compaction summary (a PreCompact hook's stdout
-    is used as such), or '' (no note, an error, a timeout)."""
-    if not sid:
-        return ''
-    ans = _within(lambda: common.session_index(cfg, dict(_index_query(cwd, sid), limit=1), timeout=budget), budget)
-    note = ans.get('note') if isinstance(ans, dict) else None
+# PreCompact's timeout in plugin/hooks/hooks.json: the compaction is already a pause, so the hook waits for the flushed
+# note. The flush waits until FLUSH_RESERVE_S before the hook's end, which leaves the fallback its read.
+PRECOMPACT_S = 45
+FLUSH_RESERVE_S = 2.0
+# At session end the flush is sent with wait_s 0 and not waited on beyond this.
+END_FLUSH_S = 1.0
+
+
+def precompact_budget():
+    """PRECOMPACT_S, or less when CTRLB_PRECOMPACT_S says so (the tests' slow Seeker; it never raises the budget)."""
+    try:
+        return min(PRECOMPACT_S, float(os.environ.get('CTRLB_PRECOMPACT_S') or PRECOMPACT_S))
+    except ValueError:
+        return PRECOMPACT_S
+
+
+def _note_text(note):
     if not isinstance(note, dict) or not str(note.get('text') or '').strip():
         return ''
     return PRECOMPACT_NOTE.format(seq=note.get('seq'), text=str(note['text']).strip())[:NOTE_MAX]
+
+
+def precompact_note(cfg, cwd, sid, deadline=None):
+    """Item 3: the session's running note brought up to date now (the flush, waiting until FLUSH_RESERVE_S before the
+    hook's deadline) as instructions for the compaction summary (a PreCompact hook's stdout is used as such). On a
+    flush timeout or error, the latest note from the index, as before the flush existed; '' when there is none."""
+    if not sid:
+        return ''
+    deadline = deadline or time.time() + precompact_budget()
+    wait = deadline - time.time() - FLUSH_RESERVE_S
+    if wait > 0.5:
+        ans = _within(lambda: common.note_flush(cfg, sid, max(0.0, wait - 1.0), timeout=wait), wait, 'note flush')
+        if isinstance(ans, dict):
+            return _note_text(ans.get('note'))
+    budget = min(INDEX_S, deadline - time.time() - 0.2)
+    if budget <= 0.2:
+        return ''
+    ans = _within(lambda: common.session_index(cfg, dict(_index_query(cwd, sid), limit=1), timeout=budget), budget)
+    return _note_text(ans.get('note') if isinstance(ans, dict) else None)
+
+
+def end_flush(cfg, sid, budget=END_FLUSH_S):
+    """Item 3: at session end, ask Seeker to bring the running note up to date in the background (wait_s 0), so the
+    next session's SessionStart finds a current note. Waits at most budget for Seeker to take the request; the update
+    runs on in Seeker. Returns the answer, or None."""
+    if not sid:
+        return None
+    return _within(lambda: common.note_flush(cfg, sid, 0, timeout=budget), budget, 'note flush')
 
 
 def parent_line(cfg, cwd, parent, budget=INDEX_S):
