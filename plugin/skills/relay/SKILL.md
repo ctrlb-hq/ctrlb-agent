@@ -49,7 +49,7 @@ How to read the answers:
   - `contracts` before you build on another agent's interface: before you build on a contract, read it with `contracts`. If it is `stale` (one of its files was edited after its text was written: `stale_since`, `changed_by`), read the file it names and check your assumptions against it. `changed_since` lists those files, and `changed_since_read` says it changed since you last read the contracts.
   - `peers(kind="answer", since=<ts>, wait_s=30)` waits for an answer (or `kind="handoff"` for a handoff) instead of a sleep loop.
 
-  Post a note only for what none of them covers.
+  Post a note only for what none of them covers. A note over 2,000 characters goes as an artefact: write it to a file in the scratch directory and name the file in the note.
 - `REGISTRY.md`, which every task writes and no task owns, is handled by the plugin: its edit hook claims `slot:REGISTRY.md` with the file before your edit and releases it after. Just edit it. If the edit is refused with "held by <agent>, try again in a moment", do other work of your task and try again.
 - A shared thing that is not a file, such as the dev server or a port, is claimed as `slot:<name>` and released when you are done with it: `claim(resource="slot:devserver")` before `npm run dev`, `release(resource="slot:devserver")` after. A slot's claim lasts two minutes; claim it again to keep it longer.
 - Claims are advisory unless the workspace turns on `enforce`. In `enforce` mode an edit to a file another agent holds is refused, with the claim call to make.

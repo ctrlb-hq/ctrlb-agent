@@ -32,7 +32,8 @@ RELAY_HOOKS = ("Relay holds files and tasks for you through the plugin's hooks, 
                "or ask it.")
 RELAY_PEERS = ('To talk to the other agents, pass run_id="{run}" and agent="{agent}" to the ctrlb tools peers (what the '
                'others are doing), post (a note to all), ask (a question to one agent) and answer (with the '
-               "question's id).")
+               "question's id). A note over 2,000 characters goes as an artefact: write it to a file in the scratch "
+               'directory and name the file in the note.')
 RELAY_SCRATCH = 'Put helper scripts and binaries in the scratch directory {scratch}, not in /tmp.'
 RELAY = ' '.join([RELAY_IDS, RELAY_HOOKS, RELAY_PEERS, RELAY_SCRATCH])
 RELAY_NO_RUN = ' '.join([RELAY_IDS, RELAY_PEERS, RELAY_SCRATCH])

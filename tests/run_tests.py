@@ -280,6 +280,7 @@ def task_claim_first(text, name_claim, file_claim):
 
 
 REGISTERED = 'Claim the task by the name your orchestrator registered'
+ARTEFACT_RULE = 'A note over 2,000 characters goes as an artefact: write it to a file in the scratch directory and name the file in the note.'
 
 
 def v10_rule(run='<run>', agent='<agent>'):
@@ -298,6 +299,7 @@ def hooks_rule(text, run, agent):
             and 'Relay holds files and tasks for you through the plugin\'s hooks, so never claim or release anything by hand' in text
             and 'If an edit is blocked, the message names the agent that holds the file' in text
             and f'pass run_id="{run}" and agent="{agent}" to the ctrlb tools peers' in text
+            and ARTEFACT_RULE in text
             and 'post (a note to all), ask (a question to one agent) and answer' in text
             and not any(w in text for w in ('claim(', 'release(', 'done(', 'renew', 'finished=true', 'next=true', 'takeover')))
 
@@ -1957,6 +1959,17 @@ def test_round8_hooks(seeker):
           all(w in doc for w in ('PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'SessionStart', 'SessionEnd', 'scratchpad_dir',
                                  'tool_input.prompt', 'tool_input.description', 'permissionDecision', 'additionalContext',
                                  'autoSlots', 'scratchDir', 'fail open', 'code.claude.com/docs/en/hooks')))
+    import hooks_shared as H
+    tools_md = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
+    peers_doc = tools_md[tools_md.index('### peers'):tools_md.index('### post')]
+    skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+    limits = open(os.path.join(ROOT, 'docs', 'limits.md')).read()
+    check('the artefact rule: the v10 reference text, the relay skill and the hooks text say a note over 2,000 characters '
+          'goes as an artefact; peers reads messages whole and marks a cut',
+          ARTEFACT_RULE in v10_rule('{run}', '{agent}') and ARTEFACT_RULE in skill
+          and ARTEFACT_RULE in H.RELAY and ARTEFACT_RULE in H.RELAY_NO_RUN
+          and 'truncated: true' in peers_doc and 'cut at 300 characters' in peers_doc
+          and '| Post, brief, question and answer text in `peers` | Whole, up to 2,000 characters' in limits)
     tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
     claim_doc = tools[tools.index('### claim'):tools.index('### release')]
     check('relay-tools: claim next and done next documented',

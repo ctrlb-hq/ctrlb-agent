@@ -53,7 +53,7 @@ Even in `enforce` mode:
 | Bytes per records upload | 4 MiB. More is refused with `413`. |
 | `body` of a session row | 64 KiB |
 | Post text | 2,000 characters |
-| Post text in `peers` | 300 characters |
+| Post, brief, question and answer text in `peers` | Whole, up to 2,000 characters; other events cut at 300, marked `truncated: true`. A longer note goes as an artefact the note names |
 | `peers` events | 40 by default, at most 500 |
 | Paths per check | 64 |
 | Run id, agent id, resource | 256 bytes each |
