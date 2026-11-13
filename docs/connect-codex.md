@@ -39,7 +39,28 @@ python3 -I install.py --codex
 
 `--dry-run` prints the change to `~/.codex/config.toml` as a diff and writes nothing. The second command writes it.
 
-Then start Codex and run `/hooks` once. Codex skips new or changed hooks until you trust them.
+Then start Codex and run `/hooks` once. Codex runs no hook until a person approves it with `/hooks`, and it skips a hook again after the hook changes. Until you approve them, sessions are not uploaded, edits are not checked and the session-start rule is not sent.
+
+## 3. Add the CtrlB block to AGENTS.md
+
+Codex reads `AGENTS.md` in your project at the start of every session, with no approval step. Because hooks run only after `/hooks`, the `AGENTS.md` block is what reaches Codex by default. It tells the agent when to search the record: before the first grep, file read or shell command for a question about earlier work, and after a command fails.
+
+Run this in your project:
+
+```sh
+python3 -I ~/ctrlb-agent/install.py init --codex --dry-run
+python3 -I ~/ctrlb-agent/install.py init --codex
+```
+
+`--dry-run` prints the change as a diff and writes nothing. The block sits between `<!-- ctrlb:begin -->` and `<!-- ctrlb:end -->`:
+
+- If `AGENTS.md` does not exist, it is created.
+- If it exists, the block is added at the end. Your text is not changed.
+- If the block is already there, only the text between the markers is replaced. A run that would change nothing writes nothing.
+- Before a change, the old file is copied to `AGENTS.md.ctrlb-backup-<time>` beside it.
+- `--remove` deletes the block and nothing else. `--dir` names another project directory.
+
+Commit `AGENTS.md` so everyone who opens the project in Codex gets the block.
 
 ## What it writes
 
@@ -120,4 +141,4 @@ The agent id is the thread id. Set `CTRLB_AGENT` to use a label instead.
 
 - Upload past sessions: `python3 -I ~/ctrlb-agent/bin/backfill.py --codex`. It lists what it would send and asks first; `--count` only lists.
 - Off for one session: `CTRLB_OFF=1 codex`.
-- Remove: `python3 -I ~/ctrlb-agent/install.py --codex --uninstall`. It backs the file up first, as an install does.
+- Remove: `python3 -I ~/ctrlb-agent/install.py --codex --uninstall`. It backs the file up first, as an install does. To remove the `AGENTS.md` block, run `python3 -I ~/ctrlb-agent/install.py init --codex --remove` in the project.

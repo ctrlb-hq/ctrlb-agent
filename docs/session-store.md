@@ -34,6 +34,15 @@ Claims are advisory unless the workspace sets `enforce` to `enforce`. Relay reco
 - Nothing is updated or deleted. A release is a new row; a claim's state is read from the rows.
 - Both datasets are ordinary logs datasets. Data Explorer, alerts and SQL see them.
 
+## Getting the agent to search
+
+Having the recall tools is not enough: an agent often greps and reads files instead of searching the record. CtrlB gives it a rule that names the moment to search:
+
+- **At session start.** The Claude Code plugin and the Codex hooks add the rule to the session's context, with the session id: before the first grep, file read or shell command for a question about earlier work, call `search_sessions`; after a command fails, call `find_command` or `next_actions` before changing it. Subagents get the parent's session id and the same rule.
+- **In the project's files.** `python3 -I install.py init --codex --claude` writes the same rule, without the session id, into the project's `AGENTS.md` (Codex reads it) and `CLAUDE.md` (Claude Code reads it), between `<!-- ctrlb:begin -->` and `<!-- ctrlb:end -->`. Text outside the markers is never changed. Use it when not every teammate has the hooks installed, and for Codex, which runs no hook until a person approves it. See [Connect Codex](connect-codex.md#3-add-the-ctrlb-block-to-agentsmd).
+
+The rule asks the agent to search. It does not force a search. See [Limits](limits.md#steering).
+
 ## The write-first claim
 
 Two agents can claim the same key at the same moment. If each read the record first and wrote a hold only when it saw none, both would read nothing and both would write: both would think they hold it. A claim in CtrlB writes first and decides on a second read:

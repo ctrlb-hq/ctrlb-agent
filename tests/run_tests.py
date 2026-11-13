@@ -284,6 +284,14 @@ def registered_rule(text, md=False):
             and 'Then claim the file path the task names' not in text and 'Work only while you hold both' not in text)
 
 
+def recall_rule(text, sid):
+    """The session-start recall rule: search before the first grep, file read or shell command about earlier work,
+    find_command or next_actions after a failed command, and the session id to pass on to subagents."""
+    return (f'call `search_sessions` (session_id {sid})' in text and 'Before your first grep, file read or shell command' in text
+            and 'After a command fails, call `find_command` or `next_actions`' in text
+            and 'Pass this session_id to every subagent you start' in text)
+
+
 def test_layout():
     pj = load('../../plugin/.claude-plugin/plugin.json')
     check('plugin.json: name ctrlb-agent, version 0.2.0', pj.get('name') == 'ctrlb-agent' and pj.get('version') == '0.2.0')
@@ -362,6 +370,8 @@ def test_hooks(seeker):
     check('session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {SID}' in ctx and f'run id is {SID}' in ctx and f'agent id is {SID}' in ctx and p.returncode == 0)
     check('session-start: claims the registered task, its files come with it, holds one claim', registered_rule(ctx))
+    check('session-start: the recall rule names its moments (first grep, file read or shell command; a failed command)',
+          recall_rule(ctx, SID))
     check('session-start: refusals, unknown_task, reopen a finished task',
           'held is false with finished_by, the task is done' in ctx and 'held is false with held_by, another agent has it' in ctx
           and 'If reason is unknown_task, claim again with the suggestion' in ctx and 'claim its name with reopen=true' in ctx)
@@ -1036,6 +1046,7 @@ def test_codex_hooks(seeker):
     check('codex session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {CSID}' in ctx and f'run id is {CSID}' in ctx and f'agent id is {CSID}' in ctx and p.returncode == 0, f'{dt:.2f}s')
     check('codex session-start: claims the registered task, its files come with it', registered_rule(ctx))
+    check('codex session-start: the same recall rule as Claude Code', recall_rule(ctx, CSID))
     check('codex session-start: names the relay tools, ask and answer among them',
           'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts)' in ctx
           and 'Use the coordination tools before a prose note: handoff when' in ctx and '; ask when you are blocked' in ctx)
@@ -1159,6 +1170,115 @@ def test_root_install():
     p = run([])
     check('install.py without --codex: usage naming the Claude Code marketplace install, exit 2', p.returncode == 2
           and 'claude plugin marketplace add ctrlb-hq/ctrlb-agent' in p.stdout)
+
+
+def test_init():
+    """install.py init (bin/init.py): the CtrlB block in AGENTS.md and CLAUDE.md, never touching text outside it."""
+    import project_rules
+    import hooks_shared
+    base = os.path.join(WORK, 'init')
+    shutil.rmtree(base, ignore_errors=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('CTRLB_')}
+    env['CTRLB_HOME'] = os.path.join(WORK, 'home-init')
+
+    def run(d, *args, script=os.path.join(ROOT, 'install.py')):
+        pre = ['init'] if script.endswith('install.py') else []
+        return subprocess.run([sys.executable, '-I', script] + pre + list(args) + ['--dir', d], capture_output=True,
+                              text=True, env=env, timeout=30)
+
+    def fresh(name, files=None):
+        d = os.path.join(base, name)
+        os.makedirs(d)
+        for n, data in (files or {}).items():
+            with open(os.path.join(d, n), 'wb') as fh:
+                fh.write(data)
+        return d
+
+    def backups(d):
+        return sorted(n for n in os.listdir(d) if '.ctrlb-backup-' in n)
+
+    rule = hooks_shared.RECALL.format(sid='SID').replace(' (session_id SID)', '')
+    check('init: the block text is the session-start rule without the session id sentence',
+          rule == project_rules.RULE + ' Pass this session_id to every subagent you start and tell it the same rule.')
+
+    d = fresh('new')
+    p = run(d, '--codex')
+    text = read(os.path.join(d, 'AGENTS.md')).decode() if p.returncode == 0 else ''
+    check('init --codex on a new project: AGENTS.md created with the block, no backup', p.returncode == 0
+          and text.startswith('<!-- ctrlb:begin -->\n') and text.endswith('<!-- ctrlb:end -->\n') and '\n## CtrlB\n' in text
+          and project_rules.RULE in text and not backups(d) and not os.path.exists(os.path.join(d, 'CLAUDE.md')), p.stderr[-200:])
+    check('init: the block names the plugin version that wrote it',
+          '<!-- written by ctrlb-agent ' + load('../../plugin/.claude-plugin/plugin.json')['version'] + ';' in text)
+
+    mine = b'# Project rules\n\nUse tabs.\n'
+    d = fresh('existing', {'AGENTS.md': mine, 'CLAUDE.md': mine})
+    p = run(d, '--codex', '--claude')
+    a, c = read(os.path.join(d, 'AGENTS.md')), read(os.path.join(d, 'CLAUDE.md'))
+    check('init --codex --claude on existing files: block appended after one blank line, the old text kept byte for byte',
+          p.returncode == 0 and a == c and a.startswith(mine + b'\n<!-- ctrlb:begin -->\n') and a.count(b'ctrlb:begin') == 1)
+    bk = backups(d)
+    check('init: one backup per changed file, holding the old text', len(bk) == 2
+          and all(read(os.path.join(d, n)) == mine for n in bk), ', '.join(bk))
+    p = run(d, '--codex', '--claude')
+    check('init run twice: nothing written, no second backup', p.returncode == 0 and 'already up to date' in p.stdout
+          and read(os.path.join(d, 'AGENTS.md')) == a and backups(d) == bk)
+    p = run(d, '--codex', '--claude', script=os.path.join(ROOT, 'bin', 'init.py'))
+    check('bin/init.py is the same command', p.returncode == 0 and 'already up to date' in p.stdout and backups(d) == bk)
+
+    old = (b'# Rules\n\n<!-- ctrlb:begin -->\n## CtrlB\n\nan older text\n<!-- ctrlb:end -->\n\n## After\n\nkept\n')
+    d = fresh('markers', {'AGENTS.md': old})
+    p = run(d, '--codex')
+    new = read(os.path.join(d, 'AGENTS.md'))
+    check('init on a file with the markers: only the text between them is replaced', p.returncode == 0
+          and new.startswith(b'# Rules\n\n<!-- ctrlb:begin -->\n') and new.endswith(b'<!-- ctrlb:end -->\n\n## After\n\nkept\n')
+          and b'an older text' not in new and project_rules.RULE.encode() in new and len(backups(d)) == 1)
+
+    for name, body, line in (('begin-only', b'# Rules\n\n<!-- ctrlb:begin -->\nhalf\n', 3),
+                             ('end-only', b'# Rules\nx\ny\n<!-- ctrlb:end -->\n', 4),
+                             ('two-blocks', b'<!-- ctrlb:begin -->\n<!-- ctrlb:end -->\n<!-- ctrlb:begin -->\n<!-- ctrlb:end -->\n', 1)):
+        d = fresh(name, {'AGENTS.md': body})
+        p = run(d, '--codex', '--claude')
+        check(f'init refuses a broken block ({name}): exit 2, names line {line}, writes nothing in either file',
+              p.returncode == 2 and f'line {line} ' in p.stderr and read(os.path.join(d, 'AGENTS.md')) == body
+              and not backups(d) and not os.path.exists(os.path.join(d, 'CLAUDE.md')), p.stderr[-200:])
+
+    d = fresh('remove', {'AGENTS.md': mine})
+    run(d, '--codex')
+    p = run(d, '--codex', '--remove')
+    check('init --remove: the block and the blank line before it go, the old text comes back byte for byte',
+          p.returncode == 0 and read(os.path.join(d, 'AGENTS.md')) == mine and len(backups(d)) == 2, p.stdout[-200:])
+    p = run(d, '--codex', '--remove')
+    check('init --remove with no block: nothing written', p.returncode == 0 and 'nothing to remove' in p.stdout and len(backups(d)) == 2)
+    old = b'# Rules\n\n<!-- ctrlb:begin -->\n## CtrlB\n\nold\n<!-- ctrlb:end -->\n\n## After\n'
+    d = fresh('remove-middle', {'CLAUDE.md': old})
+    p = run(d, '--claude', '--remove')
+    check('init --remove of a block in the middle keeps the text after it',
+          p.returncode == 0 and read(os.path.join(d, 'CLAUDE.md')) == b'# Rules\n\n## After\n')
+
+    d = fresh('dry', {'AGENTS.md': mine})
+    p = run(d, '--codex', '--claude', '--dry-run')
+    check('init --dry-run: prints the diff, writes nothing, creates nothing', p.returncode == 0 and '+<!-- ctrlb:begin -->' in p.stdout
+          and 'dry run, nothing written' in p.stdout and os.listdir(d) == ['AGENTS.md'] and read(os.path.join(d, 'AGENTS.md')) == mine)
+
+    crlf = b'# Rules\r\n\r\nUse tabs.\r\n'
+    d = fresh('crlf', {'AGENTS.md': crlf})
+    p = run(d, '--codex')
+    new = read(os.path.join(d, 'AGENTS.md'))
+    check('init on a CRLF file: CRLF kept, no bare LF added', p.returncode == 0 and new.startswith(crlf + b'\r\n<!-- ctrlb:begin -->\r\n')
+          and new.count(b'\n') == new.count(b'\r\n'))
+    run(d, '--codex', '--remove')
+    check('init --remove on a CRLF file: the old bytes come back', read(os.path.join(d, 'AGENTS.md')) == crlf)
+
+    d = fresh('linked', {'AGENTS.md': mine})
+    os.symlink('AGENTS.md', os.path.join(d, 'CLAUDE.md'))
+    p = run(d, '--codex', '--claude')
+    check('init with CLAUDE.md linked to AGENTS.md: the link stays a link, one block written once',
+          p.returncode == 0 and os.path.islink(os.path.join(d, 'CLAUDE.md'))
+          and read(os.path.join(d, 'AGENTS.md')).count(b'ctrlb:begin') == 1 and len(backups(d)) == 1, p.stdout[-200:])
+
+    d = fresh('noflag')
+    p = run(d)
+    check('init without --codex or --claude: usage error, exit 2, nothing written', p.returncode == 2 and not os.listdir(d))
 
 
 def test_codex_install():
@@ -1950,6 +2070,7 @@ def main():
     test_codex_hooks(seeker)
     test_codex_install()
     test_root_install()
+    test_init()
     test_codex_backfill(seeker)
     test_validate()
     seeker.httpd.shutdown()
