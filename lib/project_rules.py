@@ -1,7 +1,8 @@
 """The CtrlB block for a project's AGENTS.md (Codex) and CLAUDE.md (Claude Code), and how bin/init.py writes it.
 
 The block is the session-start rule (hooks_shared.RECALL) without the session id, under a `## CtrlB` heading, between
-two marker comments. Writing it never touches text outside the markers:
+two marker comments. A marker is the whole line, trimmed: `<!-- ctrlb:begin -->` or `<!-- ctrlb:end -->`; markers
+inside ``` or ~~~ fenced code blocks are examples and are ignored. Writing it never touches text outside the markers:
 
 - no file: the file is created with the block;
 - a file without markers: the block is appended at the end, after one blank line;
@@ -9,8 +10,9 @@ two marker comments. Writing it never touches text outside the markers:
 - one marker, or more than one block: refused, naming the line, and nothing is written.
 
 A write that changes an existing file first copies it to <name>.ctrlb-backup-<time>. A write that would change
-nothing writes nothing. Removal deletes the block and the blank line written before it. Line endings are kept: a CRLF
-file stays CRLF. A symlinked file is written through the link."""
+nothing writes nothing. Removal deletes the block and the blank line written before it, and gives back a file without
+a final newline as it was. Line endings outside the block are kept; the block takes the file's most common ending, so
+a CRLF file stays CRLF. Files are read and written as UTF-8. A symlinked file is written through the link."""
 import datetime
 import json
 import os
@@ -19,8 +21,6 @@ import shutil
 
 BEGIN = '<!-- ctrlb:begin -->'
 END = '<!-- ctrlb:end -->'
-BEGIN_RE = re.compile(r'^\s*<!--\s*ctrlb:begin\b.*-->\s*$')
-END_RE = re.compile(r'^\s*<!--\s*ctrlb:end\b.*-->\s*$')
 FILES = {'codex': 'AGENTS.md', 'claude': 'CLAUDE.md'}
 
 RULE = ("Earlier work is in the CtrlB record, not in your context: this session's turns before compaction, and this "
@@ -52,12 +52,45 @@ def block_lines():
             '## CtrlB', '', RULE, END]
 
 
+def split_lines(text):
+    """Each line with its ending; only \\n ends a line, and ''.join(split_lines(t)) == t."""
+    return re.findall(r'[^\n]*\n|[^\n]+$', text) if text else []
+
+
+def _ending(line):
+    return '\r\n' if line.endswith('\r\n') else '\n' if line.endswith('\n') else ''
+
+
+def _markers(lines):
+    """Indexes of the begin and end marker lines, skipping lines inside ``` or ~~~ fenced code blocks. A marker is
+    the whole line, trimmed: <!-- ctrlb:begin --> or <!-- ctrlb:end -->."""
+    begins, ends, fence = [], [], None
+    for i, ln in enumerate(lines):
+        body = ln[:len(ln) - len(_ending(ln))]
+        m = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', body)
+        if fence:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+                fence = None
+            continue
+        if m and not (m.group(1)[0] == '`' and '`' in m.group(2)):
+            fence = m.group(1)
+            continue
+        if body.strip() == BEGIN:
+            begins.append(i)
+        elif body.strip() == END:
+            ends.append(i)
+    return begins, ends
+
+
 def render(old, remove=False):
-    """The file's text after the change. old is None when the file does not exist. Raises Refused on broken markers."""
-    nl = '\r\n' if old and '\r\n' in old else '\n'
-    lines = old.split(nl) if old else []
-    begins = [i for i, ln in enumerate(lines) if BEGIN_RE.match(ln)]
-    ends = [i for i, ln in enumerate(lines) if END_RE.match(ln)]
+    """The file's text after the change. old is None when the file does not exist. Raises Refused on broken markers.
+    The block's lines take the file's most common line ending. A file without a newline at its end gets the block
+    without one too, so --remove gives back the same bytes."""
+    lines = split_lines(old)
+    crlf = sum(1 for ln in lines if _ending(ln) == '\r\n')
+    lf = sum(1 for ln in lines if _ending(ln) == '\n')
+    nl = '\r\n' if crlf > lf else '\n'
+    begins, ends = _markers(lines)
     if begins or ends:
         if len(begins) != 1 or len(ends) != 1 or ends[0] < begins[0]:
             first = min(begins + ends)
@@ -66,21 +99,27 @@ def render(old, remove=False):
                           f'one CtrlB block; fix the markers by hand and run again')
         b, e = begins[0], ends[0]
         if remove:
-            start = b - 1 if b > 0 and lines[b - 1] == '' else b
-            return nl.join(lines[:start] + lines[e + 1:])
-        return nl.join(lines[:b] + block_lines() + lines[e + 1:])
+            start = b - 1 if b > 0 and lines[b - 1] in ('\n', '\r\n') else b
+            kept = lines[:start] + lines[e + 1:]
+            if not _ending(lines[e]) and e == len(lines) - 1 and kept and start == b - 1:
+                kept[-1] = kept[-1][:len(kept[-1]) - len(_ending(kept[-1]))]   # the file had no newline at its end
+            return ''.join(kept)
+        blk = [ln + nl for ln in block_lines()]
+        blk[-1] = blk[-1][:-len(nl)] + _ending(lines[e])
+        return ''.join(lines[:b] + blk + lines[e + 1:])
     if remove:
         return old
     if not old:
         return nl.join(block_lines()) + nl
-    body = old[:-len(nl)] if old.endswith(nl) else old
-    return body + nl + nl + nl.join(block_lines()) + nl
+    last = _ending(lines[-1])
+    body = old if last else old + nl
+    return body + nl + nl.join(block_lines()) + last
 
 
 def read(path):
     if not os.path.exists(path):
         return None
-    with open(path, newline='') as fh:
+    with open(path, encoding='utf-8', newline='') as fh:
         return fh.read()
 
 
@@ -101,7 +140,7 @@ def write(path, text):
         shutil.copy2(path, backup)
         mode = os.stat(path).st_mode & 0o777
     tmp = path + '.ctrlb-tmp'
-    with open(tmp, 'w', newline='') as fh:
+    with open(tmp, 'w', encoding='utf-8', newline='') as fh:
         fh.write(text)
     os.chmod(tmp, mode)
     os.replace(tmp, path)

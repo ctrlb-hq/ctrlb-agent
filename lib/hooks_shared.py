@@ -21,7 +21,8 @@ RECALL = ("Earlier work is in the CtrlB record, not in your context: this sessio
 
 SUBAGENT = ("You are a subagent of session {sid}. That session's full record, including what it already read, ran and "
             "decided, is searchable with the ctrlb tools (search_sessions with session_id {sid}, fetch_records, "
-            "next_actions). Call `search_sessions` before your first grep or file read, and before you rerun a command.")
+            "next_actions). Call `search_sessions` before your first grep or file read, and before you rerun a command. "
+            "After a command fails, call `find_command` or `next_actions` with the command before changing it.")
 
 # Rule text v10 (round 8): claim(next=true) first, done with next=true, peers only to wait; the REGISTRY.md sentence
 # is gone (the hooks claim autoSlots files, decision 47); helper files go to the run's scratch directory (decision D).

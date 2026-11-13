@@ -114,7 +114,9 @@ It asks for the URL, the sessions dataset, an optional name and run id, and the 
 
 At session start the plugin tells the agent when to search the record: before the first grep, file read or shell command for a question about earlier work, and after a command fails. Every session with the plugin gets this rule.
 
-To give the same rule to teammates who open the project without the plugin, write it into the project's `CLAUDE.md` from a clone of the repository:
+To keep the rule in the project itself, for example for sessions where the hooks are off, write it into the project's `CLAUDE.md` from a clone of the repository. The block names the CtrlB tools, and only the plugin gives a session those tools, so every teammate still needs the plugin installed.
+
+Run the last two commands from your project's root directory:
 
 ```sh
 git clone https://github.com/ctrlb-hq/ctrlb-agent.git ~/ctrlb-agent

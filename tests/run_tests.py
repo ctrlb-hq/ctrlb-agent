@@ -1280,6 +1280,75 @@ def test_init():
     p = run(d)
     check('init without --codex or --claude: usage error, exit 2, nothing written', p.returncode == 2 and not os.listdir(d))
 
+    check('init: the subagent rule carries the same after-failure sentence as the session rule',
+          'After a command fails, call `find_command` or `next_actions` with the command before changing it.' in hooks_shared.SUBAGENT)
+
+    ex = b'# Rules\n\n```md\n<!-- ctrlb:begin -->\nan example\n<!-- ctrlb:end -->\n```\n\n~~~\n<!-- ctrlb:end -->\n~~~\n'
+    d = fresh('fenced', {'AGENTS.md': ex})
+    p = run(d, '--codex')
+    new = read(os.path.join(d, 'AGENTS.md'))
+    p2 = run(d, '--codex')
+    check('init: markers inside ``` or ~~~ fences are examples; the block is appended after them, and a second run changes nothing',
+          p.returncode == 0 and new.startswith(ex + b'\n<!-- ctrlb:begin -->\n') and new.count(b'<!-- ctrlb:begin -->') == 2
+          and p2.returncode == 0 and read(os.path.join(d, 'AGENTS.md')) == new, p.stderr[-200:])
+    real = ex + b'\n<!-- ctrlb:begin -->\n## CtrlB\n\nold text\n<!-- ctrlb:end -->\n'
+    d = fresh('fenced-real', {'AGENTS.md': real})
+    p = run(d, '--codex')
+    new = read(os.path.join(d, 'AGENTS.md'))
+    check('init: with a fenced example and a real block, only the real block is replaced',
+          p.returncode == 0 and new.startswith(ex + b'\n<!-- ctrlb:begin -->\n') and b'an example' in new and b'old text' not in new
+          and new.count(b'<!-- ctrlb:begin -->') == 2, p.stderr[-200:])
+
+    mixed = b'a\r\nb\n\n<!-- ctrlb:begin -->\nold\n<!-- ctrlb:end -->\n'
+    d = fresh('mixed', {'AGENTS.md': mixed})
+    p = run(d, '--codex')
+    new = read(os.path.join(d, 'AGENTS.md'))
+    check('init on mixed line endings: the existing block is replaced, never a second one, in the file\'s main ending (LF)',
+          p.returncode == 0 and new.startswith(b'a\r\nb\n\n<!-- ctrlb:begin -->\n') and new.count(b'ctrlb:begin') == 1
+          and b'old' not in new and new.count(b'\r\n') == 1, repr(new[:80]))
+    mixed_crlf = b'a\r\nb\r\nc\n<!-- ctrlb:begin -->\r\nold\r\n<!-- ctrlb:end -->\r\n'
+    d = fresh('mixed-crlf', {'AGENTS.md': mixed_crlf})
+    p = run(d, '--codex')
+    new = read(os.path.join(d, 'AGENTS.md'))
+    check('init on a mostly-CRLF file with one LF line: the block is replaced in CRLF', p.returncode == 0
+          and new.count(b'ctrlb:begin') == 1 and b'old' not in new and new.count(b'\n') - new.count(b'\r\n') == 1, repr(new[:80]))
+
+    notes = b'<!-- ctrlb:begin-notes -->\nmine\n<!-- ctrlb:end-notes -->\n'
+    d = fresh('lookalike', {'CLAUDE.md': notes})
+    p = run(d, '--claude')
+    new = read(os.path.join(d, 'CLAUDE.md'))
+    check('init: only the whole line <!-- ctrlb:begin --> is a marker; <!-- ctrlb:begin-notes --> is kept and the block appended',
+          p.returncode == 0 and new.startswith(notes + b'\n<!-- ctrlb:begin -->\n'), p.stderr[-200:])
+
+    bare = b'# Rules\n\nno newline at the end'
+    d = fresh('no-eol', {'AGENTS.md': bare})
+    p = run(d, '--codex', '--dry-run')
+    check('init --dry-run on a file without a final newline: the diff says so', p.returncode == 0
+          and '-no newline at the end\n\\ No newline at end of file\n+no newline at the end\n' in p.stdout
+          and read(os.path.join(d, 'AGENTS.md')) == bare, p.stdout[-300:])
+    run(d, '--codex')
+    added = read(os.path.join(d, 'AGENTS.md'))
+    p2 = run(d, '--codex')
+    run(d, '--codex', '--remove')
+    check('init on a file without a final newline: a second run changes nothing; --remove gives back the same bytes',
+          added.startswith(bare + b'\n\n<!-- ctrlb:begin -->') and 'already up to date' in p2.stdout
+          and read(os.path.join(d, 'AGENTS.md')) == bare)
+
+    d = fresh('latin1', {'AGENTS.md': b'# R\xe8gles\n'})
+    p = run(d, '--codex', '--claude')
+    check('init on a file that is not UTF-8: one line naming the file, exit 1, no traceback, nothing written in either file',
+          p.returncode == 1 and 'AGENTS.md: not UTF-8 text' in p.stderr and 'Traceback' not in p.stderr
+          and len(p.stderr.strip().splitlines()) == 1 and os.listdir(d) == ['AGENTS.md'], p.stderr[-200:])
+    d = fresh('unreadable')
+    os.makedirs(os.path.join(d, 'AGENTS.md'))
+    p = run(d, '--codex')
+    check('init when AGENTS.md cannot be read: one line naming it, exit 1, no traceback', p.returncode == 1
+          and 'AGENTS.md: cannot read it' in p.stderr and 'Traceback' not in p.stderr, p.stderr[-200:])
+    d = fresh('second-broken', {'AGENTS.md': mine, 'CLAUDE.md': b'<!-- ctrlb:end -->\n'})
+    p = run(d, '--codex', '--claude')
+    check('init --codex --claude: a broken CLAUDE.md stops the run before AGENTS.md is written', p.returncode == 2
+          and 'CLAUDE.md' in p.stderr and read(os.path.join(d, 'AGENTS.md')) == mine and not backups(d), p.stderr[-200:])
+
 
 def test_codex_install():
     real = os.path.expanduser('~/.codex/config.toml')

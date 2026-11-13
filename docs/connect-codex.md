@@ -45,9 +45,10 @@ Then start Codex and run `/hooks` once. Codex runs no hook until a person approv
 
 Codex reads `AGENTS.md` in your project at the start of every session, with no approval step. Because hooks run only after `/hooks`, the `AGENTS.md` block is what reaches Codex by default. It tells the agent when to search the record: before the first grep, file read or shell command for a question about earlier work, and after a command fails.
 
-Run this in your project:
+Run this from your project's root directory:
 
 ```sh
+cd your-project
 python3 -I ~/ctrlb-agent/install.py init --codex --dry-run
 python3 -I ~/ctrlb-agent/install.py init --codex
 ```
@@ -60,7 +61,7 @@ python3 -I ~/ctrlb-agent/install.py init --codex
 - Before a change, the old file is copied to `AGENTS.md.ctrlb-backup-<time>` beside it.
 - `--remove` deletes the block and nothing else. `--dir` names another project directory.
 
-Commit `AGENTS.md` so everyone who opens the project in Codex gets the block.
+Commit `AGENTS.md` so everyone who opens the project in Codex gets the block. The block names the CtrlB tools, which come from the MCP server that `install.py --codex` adds, so every teammate still runs `install.py --codex` once.
 
 ## What it writes
 
