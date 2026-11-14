@@ -16,7 +16,7 @@ The MCP URL defaults to CTRLB_MCP_URL, or CTRLB_URL + /mcp, or the url in ~/.ctr
 The block sits between two marker comments. A run replaces the block, so running it twice changes nothing; a run
 that would change nothing writes nothing. Before writing, the old file is copied to config.toml.ctrlb-backup-<time>.
 --dry-run prints the diff and writes nothing. Codex skips new or changed hooks until you trust them with /hooks."""
-import argparse, datetime, difflib, json, os, re, shutil, sys
+import argparse, datetime, difflib, json, os, re, shutil, sys, tempfile
 sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'lib'))
@@ -47,6 +47,13 @@ def q(s):
     return json.dumps(s)
 
 
+def sh_dq(s):
+    """s as one double-quoted shell word: $, `, \\ and " are escaped, so a checkout path such as
+    /work/a $(cmd)/ctrlb-agent is passed as written and nothing in it runs. A plain path gives the same "path" as
+    before, so existing hooks keep their trusted command."""
+    return '"' + re.sub(r'([$`"\\])', r'\\\1', s) + '"'
+
+
 def _name(dotted):
     return '.'.join(part.strip().strip('"\'') for part in dotted.split('.'))
 
@@ -62,7 +69,7 @@ def block(mcp_url, otel_endpoint='', otel_headers=None):
         lines.append(f'[[hooks.{event}]]')
         if matcher:
             lines.append(f'matcher = {q(matcher)}')
-        lines += [f'[[hooks.{event}.hooks]]', 'type = "command"', f'command = {q(f"python3 -I {q(HOOK)} {mode}")}',
+        lines += [f'[[hooks.{event}.hooks]]', 'type = "command"', f'command = {q(f"python3 -I {sh_dq(HOOK)} {mode}")}',
                   f'timeout = {timeout}']
         if run_async:
             lines.append('async = true')
@@ -160,12 +167,38 @@ def write(path, text):
         backup = backup_path(path)
         shutil.copy2(path, backup)
         mode = os.stat(path).st_mode & 0o777
-    tmp = path + '.ctrlb-tmp'
-    with open(tmp, 'w') as fh:
-        fh.write(text)
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
+    # a new temporary file each time, created 0600 (mkstemp), so nothing is written through an existing file or link
+    # and the new text (which can hold OTEL headers) is never readable by others; the old mode is applied before the
+    # replace
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or '.', prefix='.config.toml.', suffix='.ctrlb-tmp')
+    try:
+        with os.fdopen(fd, 'w') as fh:
+            fh.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return backup
+
+
+HEADERS_LINE = re.compile(r'^([ +\-]\s*headers\s*=\s*\{)(.*)(\}\s*)$')
+
+
+def hide_header_values(diff):
+    """The diff with every value in a `headers = { ... }` line replaced by "<hidden>": the OTEL headers usually carry
+    a credential, and a dry run prints to a terminal or an agent's transcript."""
+    out = []
+    for line in diff.splitlines(keepends=True):
+        m = HEADERS_LINE.match(line.rstrip('\n'))
+        if m:
+            body = re.sub(r'(=\s*)"(?:[^"\\]|\\.)*"', r'\1"<hidden>"', m.group(2))
+            line = m.group(1) + body + m.group(3) + ('\n' if line.endswith('\n') else '')
+        out.append(line)
+    return ''.join(out)
 
 
 def parse_headers(items):
@@ -230,6 +263,7 @@ def main(argv=None):
     diff = ''.join(difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
                                         fromfile=path, tofile=path + ' (new)'))
     if a.dry_run:
+        diff = hide_header_values(diff)
         print(diff, end='' if diff.endswith('\n') else '\n')
         print('dry run: nothing written')
         return 0

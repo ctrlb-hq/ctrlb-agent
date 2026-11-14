@@ -1,5 +1,5 @@
 {
-  "synthetic": "Built by hand from relay-plan section 4 (Relay, check), not recorded from a running Seeker. Replace with a recording once Seeker Task 4 serves the route. The lapsed, unheld and stale_round answers follow Seeker decision 21 (feat/relay-coordination); their shapes match Seeker's CheckConflict.",
+  "synthetic": "Written by hand, not recorded from a running Seeker. The lapsed, unheld and stale_round answers follow Seeker decision 21 (feat/relay-coordination); their shapes match Seeker's CheckConflict.",
   "route": "POST /ai/relay/{dataset}/runs/{run}/check",
   "request": {"agent": "5f0c7a52-0000-4000-8000-000000000001", "paths": ["src/panels/Latency.tsx"], "cwd": "/work/dash"},
   "responses": {

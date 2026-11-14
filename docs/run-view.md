@@ -4,7 +4,6 @@ description: The Runs and Connect pages in CtrlB, the run timeline, the resource
 slug: run-view
 ---
 
-<!-- Written from the Relay plan, section 7 (Orion target layout), before the Orion pages were built. Check names and layout against the shipped pages. -->
 
 # Run view
 

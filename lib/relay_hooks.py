@@ -18,6 +18,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -265,11 +266,38 @@ def _safe_rel(rel):
 
 
 def _write(path, text):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + '.ctrlb-tmp'
-    with open(tmp, 'w') as fh:
-        fh.write(text)
-    os.replace(tmp, path)
+    """Write text to path through a new temporary file in the same directory (mode 0600, a fresh name each time, so
+    no existing file or link is written through), then replace path with it."""
+    d = os.path.dirname(path)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix='.' + os.path.basename(path) + '.', suffix='.ctrlb-tmp')
+    try:
+        with os.fdopen(fd, 'w') as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _confined(root, rel):
+    """root/rel when every directory between root and the file is a real directory (not a link) and the result
+    resolves inside root; '' otherwise. A link named by rel itself is replaced by the write, never followed."""
+    parts = rel.split('/')
+    cur = root
+    for p in parts[:-1]:
+        cur = os.path.join(cur, p)
+        if os.path.islink(cur) or (os.path.exists(cur) and not os.path.isdir(cur)):
+            return ''
+    dest = os.path.join(root, *parts)
+    base = os.path.realpath(root)
+    parent = os.path.realpath(os.path.dirname(dest))
+    if parent != base and not parent.startswith(base + os.sep):
+        return ''
+    return dest
 
 
 def post_artifact(cfg, run, agent, path, inp):
@@ -289,7 +317,10 @@ def post_artifact(cfg, run, agent, path, inp):
     if not common.RunState(run, agent, 'artifacts').change(put):
         return 'same'
     try:
-        _write(os.path.join(_copy_dir(run, agent), rel), text)
+        common.private_dir(os.path.join(common.HOME, 'state'))
+        dest = _confined(_copy_dir(run, agent), rel)
+        if dest:
+            _write(dest, text)
     except OSError:
         pass
     detach('post-artifact', dict(run=run, agent=agent, rel=rel, text=text, hash=h))
@@ -450,9 +481,12 @@ def restore_artifacts(parts, run, agent, scratch):
                     except (OSError, UnicodeDecodeError):
                         pass
     for rel, text in sorted(texts.items()):
-        dest = os.path.join(scratch, rel)
+        dest = _confined(scratch, rel)
+        if not dest:
+            common.log(f"artifact not restored: {rel}: a directory on its path is a link or leaves the scratch directory")
+            continue
         try:
-            if not os.path.exists(dest):
+            if not os.path.lexists(dest):
                 if redact.redact(text)[1]:
                     common.log(f"artifact not restored: {rel}: matches a secret pattern")
                     continue
@@ -526,6 +560,10 @@ def record_block(parts, stale, run, agent, scratch, artefacts):
 def make_scratch(cfg, run):
     """Create the run's scratch directory (decision D); returns its path ('' when it cannot be made)."""
     d = common.scratch_dir(cfg, run)
+    try:
+        common.private_dir(common.HOME)
+    except OSError:
+        pass
     try:
         os.makedirs(d, mode=0o700, exist_ok=True)
         return d

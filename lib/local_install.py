@@ -79,8 +79,11 @@ def install_binary(base, home, port=None):
     base = base.rstrip('/')
     validate_url(base)
     expected = _checksum(base, filename)
+    os.makedirs(home, mode=0o700, exist_ok=True)
+    os.chmod(home, os.stat(home).st_mode & 0o700)
     bindir = os.path.join(home, 'bin')
     os.makedirs(bindir, mode=0o700, exist_ok=True)
+    os.chmod(bindir, os.stat(bindir).st_mode & 0o700)
     destination = os.path.join(bindir, 'ctrlb')
     temporary = None
     try:

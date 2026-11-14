@@ -1,6 +1,6 @@
 """Tests for ctrlb-agent. Run: python3 -I tests/run_tests.py
 
-Seeker is a local fake that answers with the synthetic responses in tests/fixtures/seeker/ (relay-plan section 4).
+Seeker is a local fake that answers with the synthetic responses in tests/fixtures/seeker/.
 Nothing is sent anywhere else, Claude is never called, and no real config is read: every CTRLB_* variable from the
 calling environment is dropped and CTRLB_HOME points into tests/work/."""
 import base64, glob, hashlib, http.server, json, os, re, shutil, signal, socket, stat, subprocess, sys, threading, time
@@ -15,7 +15,7 @@ HOOK = os.path.join(ROOT, 'plugin', 'hooks', 'hook.py')
 CODEX_HOOK = os.path.join(ROOT, 'codex', 'hook.py')
 INSTALL = os.path.join(ROOT, 'codex', 'install.py')
 SID = '5f0c7a52-0000-4000-8000-000000000001'
-CSID = '01a07695-3fee-7191-bd75-a4df7b3baa7e'        # the thread id of tests/fixtures/codex-rollout.jsonl
+CSID = '0190f0a0-1111-7000-8000-000000000001'        # the thread id of tests/fixtures/codex-rollout.jsonl
 CSUB = '01a0aaaa-0000-7000-8000-000000000002'        # a subagent thread of it, written by the tests
 KEY = 'test-key-not-a-real-key'
 
@@ -472,6 +472,34 @@ def test_hooks(seeker):
                                           'the access key rotation doc')]
     check('prefixed lower-case secret assignments are redacted (round 8: aws_secret_access_key = "...")', pre == [1, 1, 0, 0, 0], str(pre))
 
+    # credential headers and flags, through the upload path: the Bash command field and the text body
+    seeker.reset()
+    v = ['hdrkey' + 'value0001', 'authtok' + 'value0002', 'cookie' + 'value0003', 'flagtok' + 'value0004',
+         'apiflag' + 'value0005', 'pwflag' + 'value0006', 'digest' + 'value0007', 'proxy' + 'value0008']
+    cmds = [f'curl -H "X-API-Key: {v[0]}" https://api.example.com/v1',
+            f'http GET api.example.com X-Auth-Token:{v[1]}',
+            f'curl --header "Cookie: session={v[2]}; theme=dark" https://app.example.com',
+            f'gh auth login --token {v[3]} --hostname example.com',
+            f'tool --api-key={v[4]} sync',
+            f'mysql --password "{v[5]}" -u root',
+            f'curl -H "Authorization: Digest {v[6]}" -H "Proxy-Authorization: Basic {v[7]}" https://example.com']
+    with open(main, 'a') as fh:
+        for i, c in enumerate(cmds):
+            fh.write(line('assistant', [dict(type='tool_use', id=f't3{i}', name='Bash', input=dict(command=c))],
+                          f'2026-11-03T10:33:{i:02d}Z'))
+        fh.write(line('assistant', [dict(type='text', text='Ran: ' + ' ; '.join(cmds))], '2026-11-03T10:33:30Z'))
+    hook('upload', I['stop'], env)
+    sent = json.dumps(seeker.rows)
+    leaked = [x for x in v if x in sent]
+    rc = [r['command'] for r in seeker.rows if r.get('command')]
+    check('credential headers (X-API-Key, X-Auth-Token, Cookie, Authorization with any scheme, Proxy-Authorization) and flags '
+          '(--token, --api-key=, --password "...") never reach Seeker, in the command field or the body',
+          not leaked and len(rc) == len(cmds) and all('[REDACTED]' in c for c in rc), f'leaked {leaked}' if leaked else str(rc)[:300])
+    keep = ['The cookie: it was tasty.', 'Set the api-key header in the request', 'grep -n token src/x.py',
+            'cli --password=$PW', 'cli --token <your token>', 'docker login --password-stdin -u me', 'Authorization header missing']
+    check('credential header and flag patterns leave ordinary text, variables, placeholders and -stdin flags alone',
+          all(_redact.redact(t) == (t, 0) for t in keep), str([_redact.redact(t) for t in keep]))
+
     # user_name comes only from the key's own user (its email claim); CTRLB_USER is the agent label
     seeker.reset()
     hook('upload', I['stop'], dict(env, CTRLB_HOME=os.path.join(WORK, 'home-user'), CTRLB_KEY=JWT_KEY))
@@ -774,7 +802,7 @@ def test_edit_keys_across_harnesses(seeker):
     """The same file edited from Claude Code (absolute file_path) and from Codex (a patch path relative to cwd) is sent
     under one key, also for a file name with no extension."""
     import paths, rows_codex
-    cwd = '/work/engine'
+    cwd = '/work/garden'
     claude = paths.edit_paths(rows_claude.edit_paths('Write', {'file_path': cwd + '/Makefile'}), cwd)
     codex = paths.edit_paths(rows_codex.input_paths({'command': '*** Begin Patch\n*** Update File: Makefile\n@@\n-a\n+b\n*** End Patch\n'}), cwd)
     check('Claude Code and Codex send one key for one file (Makefile)', claude == codex == ['./Makefile']
@@ -904,7 +932,7 @@ def setup_codex():
     sub = os.path.join(day, f'rollout-2026-09-06T12-02-00-{CSUB}.jsonl')
     shutil.copy(os.path.join(FIX, 'codex-rollout.jsonl'), main)
     with open(sub, 'w') as fh:
-        fh.write(crec('session_meta', dict(id=CSUB, session_id=CSUB, cwd='/work/engine', parent_thread_id=CSID, cli_version='0.166.0',
+        fh.write(crec('session_meta', dict(id=CSUB, session_id=CSUB, cwd='/work/garden', parent_thread_id=CSID, cli_version='0.166.0',
                                            source={'subagent': {'other': 'worker'}}), '2026-09-06T12:02:00.000Z'))
         fh.write(citem(dict(type='message', role='user', content=[dict(type='input_text', text='Check the bucket math.')]), '2026-09-06T12:02:00.100Z'))
         fh.write(citem(dict(type='message', role='assistant', content=[dict(type='output_text', text='The bucket math is right.')]), '2026-09-06T12:02:09.000Z'))
@@ -932,7 +960,7 @@ def test_codex_rows(seeker):
           all(r['harness'] == 'codex' and r['session_id'] == CSID and r['run_id'] == CSID and r['agent'] == CSID
               and r['parent_session'] == '' and r['agent_id'] == '' for r in rows))
     check('codex rows: cwd from session_meta and turn_context, branch from session_meta git',
-          all(r['cwd'] == '/work/engine' and r['git_branch'] == 'new-rti-design' for r in rows))
+          all(r['cwd'] == '/work/garden' and r['git_branch'] == 'feat/watering-schedule' for r in rows))
     check('codex rows: no user_name when the key carries no user', all('user_name' not in r for r in rows))
     seeker.reset()
     chook('upload', I['stop'], dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-user'), CTRLB_KEY=JWT_KEY,
@@ -948,12 +976,12 @@ def test_codex_rows(seeker):
           and by[(5, 0)]['role'] == 'assistant' and 'inspect the changes' in by[(5, 0)]['body'])
     t6 = by[(6, 0)]
     check('codex exec call: tool_use with the call id and its shell commands', t6['block_type'] == 'tool_use' and t6['tool_name'] == 'exec'
-          and t6['tool_use_id'] == 'call_q3vwniym1SlF48fk0rdhN7C7' and t6['command'].split('\n')[:3] == [
-              'pwd', "rg --files -g AGENTS.md -g '!indexing/**' -g '!.git/**' -g '!target/**' -g '!vendor/**' .",
+          and t6['tool_use_id'] == 'call_syntheticcall02' and t6['command'].split('\n')[:3] == [
+              'pwd', "rg --files -g AGENTS.md -g '!.git/**' .",
               'git status --short --branch'], repr(t6['command'][:120]))
     check('codex exec output: tool_result with the tool name', by[(8, 0)]['block_type'] == 'tool_result' and by[(8, 0)]['tool_name'] == 'exec'
-          and by[(8, 0)]['tool_use_id'] == 'call_q3vwniym1SlF48fk0rdhN7C7' and by[(8, 0)]['is_error'] is False)
-    check('codex apply_patch inside exec: paths from the *** Add File line', by[(13, 0)]['paths'] == '["/tmp/engine-rti-pr-body.md"]',
+          and by[(8, 0)]['tool_use_id'] == 'call_syntheticcall02' and by[(8, 0)]['is_error'] is False)
+    check('codex apply_patch inside exec: paths from the *** Add File line', by[(13, 0)]['paths'] == '["/tmp/garden-pr-body.md"]',
           by[(13, 0)]['paths'])
     check('codex paths empty on rows without a patch', all(r['paths'] == '' for r in rows if r['seq'] != 13))
     res = [r for r in rows if r['block_type'] == 'result']
@@ -973,19 +1001,19 @@ def test_codex_rows(seeker):
     s = planted()
     patch = '*** Begin Patch\n*** Update File: src/a.rs\n@@\n-x\n+y\n*** Update File: src/b.rs\n*** Move to: src/c.rs\n*** Delete File: src/d.rs\n*** End Patch\n'
     with open(main, 'a') as fh:
-        fh.write(citem(dict(type='reasoning', summary=[dict(type='summary_text', text='**Checking the histogram buckets**')],
+        fh.write(citem(dict(type='reasoning', summary=[dict(type='summary_text', text='**Checking the frost dates**')],
                             content=None, encrypted_content='x'), '2026-09-06T12:05:00.000Z'))
         fh.write(citem(dict(type='function_call', name='shell', call_id='call_f1',
-                            arguments=json.dumps({'command': ['bash', '-lc', 'cargo test -p engine'], 'workdir': '/work/engine'})),
+                            arguments=json.dumps({'command': ['bash', '-lc', 'cargo test -p garden'], 'workdir': '/work/garden'})),
                        '2026-09-06T12:05:01.000Z'))
         fh.write(citem(dict(type='function_call_output', call_id='call_f1',
                             output=json.dumps({'output': 'test failed', 'metadata': {'exit_code': 101}})), '2026-09-06T12:05:09.000Z'))
         fh.write(citem(dict(type='custom_tool_call', name='apply_patch', call_id='call_f2', status='completed', input=patch),
                        '2026-09-06T12:05:10.000Z'))
         fh.write(citem(dict(type='custom_tool_call_output', call_id='call_f2', output='Script failed\nboom'), '2026-09-06T12:05:11.000Z'))
-        fh.write(crec('token_usage_record', dict(response_id='resp_02751da85fb3796d016a9d56ab184487d08429826177051e8e',
+        fh.write(crec('token_usage_record', dict(response_id='resp_syntheticresp03',
                                                   usage=dict(input_tokens=1, output_tokens=1)), '2026-09-06T12:05:12.000Z'))
-        fh.write(crec('compacted', dict(message='Summary: PR 235 drafted; three review comments posted.'), '2026-09-06T12:05:13.000Z'))
+        fh.write(crec('compacted', dict(message='Summary: PR 12 drafted; two review comments posted.'), '2026-09-06T12:05:13.000Z'))
         fh.write(citem(dict(type='message', role='assistant', content=[dict(type='output_text', text=f'keys {s[1]} {s[2]} PASSWORD={s[4]}')]),
                        '2026-09-06T12:05:14.000Z'))
         fh.write(citem(dict(type='function_call', name='exec_command', call_id='call_f3',
@@ -998,8 +1026,8 @@ def test_codex_rows(seeker):
     check('codex appended lines upload alone; partial line waits; repeated response_id skipped', len(new) == 8
           and sorted(nb) == [20, 21, 22, 23, 24, 26, 27, 28], str(sorted((r['seq'], r['block_type']) for r in new)))
     check('codex reasoning summary is a thinking row', nb.get(20, {}).get('block_type') == 'thinking'
-          and 'histogram buckets' in nb.get(20, {}).get('body', ''))
-    check('codex shell function_call: command from argv, error from exit code', nb.get(21, {}).get('command') == 'cargo test -p engine'
+          and 'frost dates' in nb.get(20, {}).get('body', ''))
+    check('codex shell function_call: command from argv, error from exit code', nb.get(21, {}).get('command') == 'cargo test -p garden'
           and nb.get(22, {}).get('is_error') is True and nb.get(22, {}).get('tool_name') == 'shell')
     check('codex apply_patch tool: Update, Move to and Delete paths in order', nb.get(23, {}).get('paths') ==
           '["src/a.rs", "src/b.rs", "src/c.rs", "src/d.rs"]' and nb.get(23, {}).get('tool_name') == 'apply_patch',
@@ -1077,7 +1105,7 @@ def test_codex_hooks(seeker):
     check('codex pre-tool allow: exit 0, no output', p.returncode == 0 and not p.stdout.strip(), f'{dt:.2f}s')
     check('codex pre-tool posts the patch paths, cwd and agent to /ai/relay/{dataset}/runs/{run}/check',
           c.get('path') == f'/ai/relay/agent_sessions/runs/{CSID}/check'
-          and c.get('body') == {'agent': CSID, 'paths': ['src/service/rti_ab.rs'], 'cwd': '/work/engine'}, json.dumps(c.get('body')))
+          and c.get('body') == {'agent': CSID, 'paths': ['src/schedule/watering.py'], 'cwd': '/work/garden'}, json.dumps(c.get('body')))
     p, _ = run('advisory')
     o = out_of(p)
     ctx = o.get('additionalContext', '')
@@ -1110,11 +1138,11 @@ def test_codex_hooks(seeker):
     check('codex pre-tool CTRLB_ENFORCE=off: no call, no output', not seeker.calls and not p.stdout.strip())
     p, _ = run('enforce', 'pre_tool_patch_many')
     check('codex pre-tool: every path of a patch is checked, in order', seeker.calls and seeker.calls[0]['body']['paths'] ==
-          ['docs/rti.md', 'src/old_name.rs', 'src/new_name.rs', 'src/unused.rs'] and out_of(p).get('permissionDecision') == 'deny',
+          ['docs/watering.md', 'src/old_name.rs', 'src/new_name.rs', 'src/unused.rs'] and out_of(p).get('permissionDecision') == 'deny',
           json.dumps(seeker.calls[0]['body'] if seeker.calls else {}))
     p, _ = run('enforce', 'pre_tool_bash_patch')
     check('codex pre-tool: a patch piped to apply_patch from a shell command is checked',
-          seeker.calls and seeker.calls[0]['body']['paths'] == ['src/service/rti_ab.rs'] and out_of(p).get('permissionDecision') == 'deny')
+          seeker.calls and seeker.calls[0]['body']['paths'] == ['src/schedule/watering.py'] and out_of(p).get('permissionDecision') == 'deny')
     p, _ = run('enforce', 'pre_tool_bash')
     check('codex pre-tool: a shell command without a patch makes no call', not seeker.calls and not p.stdout.strip())
     p, _ = run('enforce', 'pre_tool_subagent_patch', dict(env, CTRLB_RUN='relay-run-8'))
@@ -1265,7 +1293,7 @@ def test_codex_backfill(seeker):
                        text=True, env=env, timeout=30)
     check('backfill.py --codex --count lists the rollouts', p.returncode == 0 and '2 Codex rollout files' in p.stdout, p.stdout.strip()[:200])
     seeker.reset()
-    p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'backfill.py'), '--codex', '--project', 'engine', '--yes'],
+    p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'backfill.py'), '--codex', '--project', 'garden', '--yes'],
                        capture_output=True, text=True, env=env, timeout=60)
     check('backfill.py --codex --yes uploads codex rows', p.returncode == 0 and seeker.rows
           and all(r['harness'] == 'codex' for r in seeker.rows) and {r['session_id'] for r in seeker.rows} == {CSID, CSUB},
@@ -2034,8 +2062,11 @@ def test_local_startup(seeker):
         marker = os.path.join(home, 'invoked.json')
         inp = dict(session_id=sid, hook_event_name='SessionStart')
         env = base_env(seeker.url, home, CTRLB_MODE='local', CTRLB_BIN=binary)
+        os.chmod(home, 0o755)
         p, dt = call('session-start', inp, env)
         check(f'{label} startup: healthy server is not started', p.returncode == 0 and not os.path.exists(marker) and dt < 1.5)
+        check(f'{label} startup: existing CTRLB_HOME is private even with a healthy server',
+              stat.S_IMODE(os.stat(home).st_mode) == 0o700)
         port = closed_port()
         env.update(CTRLB_URL=f'http://127.0.0.1:{port}', STUB_PORT=str(port))
         try:
@@ -2147,12 +2178,14 @@ def test_local_configure_status(seeker):
     configure = os.path.join(ROOT, 'bin', 'configure.py')
     status = os.path.join(ROOT, 'bin', 'status.py')
     for flags in ([], ['--port', '8753']):
+        os.chmod(home, 0o755)
         p = subprocess.run([sys.executable, '-I', configure, '--local'] + flags, input='', capture_output=True,
                            text=True, env=env, timeout=5)
         invoked = os.path.join(home, 'invoked.json')
         args = json.loads(read(invoked)).get('argv') if os.path.exists(invoked) else []
         check('configure --local ' + ' '.join(flags) + ': invokes init without prompting or showing key',
               p.returncode == 0 and args == ['init'] + flags and KEY not in p.stdout + p.stderr)
+        check('configure --local: existing CTRLB_HOME is private', stat.S_IMODE(os.stat(home).st_mode) == 0o700)
         path = os.path.join(home, 'config.json')
         cfg = json.loads(read(path)) if os.path.isfile(path) else {}
         check('configure --local: export reads key from config; MCP URL from config',
@@ -2221,6 +2254,8 @@ def test_local_install():
         check('local install: file base with spaces installs the verified bytes with mode 0755',
               p.returncode == 0 and installed.is_file() and installed.read_bytes() == stub
               and stat.S_IMODE(installed.stat().st_mode) == 0o755, p.stderr[-200:])
+        check('local install: new CTRLB_HOME and bin are private',
+              all(stat.S_IMODE(d.stat().st_mode) == 0o700 for d in (home, home / 'bin')))
         check('local install: the installed binary initializes the requested port',
               (home / 'init-args').is_file() and (home / 'init-args').read_text() == 'init\n--port\n7654\n')
         check('local install: next steps include both agents and two config-reading exports, init output suppressed',
@@ -2231,6 +2266,18 @@ def test_local_install():
         exports = '\n'.join(line.strip() for line in p.stdout.splitlines() if line.lstrip().startswith('export '))
         syntax = subprocess.run(['/bin/sh', '-n'], input=exports, capture_output=True, text=True, timeout=5)
         check('local install: printed exports have valid shell syntax', syntax.returncode == 0)
+        victim = pathlib.Path(temporary, 'untouched.txt')
+        victim.write_text('keep me\n')
+        stale = home / 'bin' / '.ctrlb-download-stale'
+        stale.symlink_to(victim)
+        os.chmod(home, 0o755)
+        os.chmod(home / 'bin', 0o755)
+        p, home = run('success', ['--download-url', base])
+        check('local install: existing CTRLB_HOME and bin are tightened', p.returncode == 0
+              and all(stat.S_IMODE(d.stat().st_mode) == 0o700 for d in (home, home / 'bin')))
+        check('local install: a stale download link is untouched and fresh temporary files are removed',
+              p.returncode == 0 and victim.read_text() == 'keep me\n' and stale.is_symlink()
+              and list((home / 'bin').glob('.ctrlb-download-*')) == [stale] and installed.read_bytes() == stub)
         p, home = run('env-base', [], CTRLB_DOWNLOAD_URL=base)
         check('local install: CTRLB_DOWNLOAD_URL is a full base and init receives no default port flag',
               p.returncode == 0 and (home / 'init-args').read_text() == 'init\n', p.stderr[-200:])
@@ -2292,6 +2339,157 @@ def test_local_install():
         check('local install: URL templates substitute the requested version or latest', all(versions))
 
 
+def test_hardening(seeker):
+    """Install and hook hardening: shell quoting of the hook path, OTEL header values hidden in a dry run, a new
+    temporary file for every write, an atomic config.json with a backup, private CTRLB_HOME files, and artefact
+    restore confined to the scratch directory."""
+    import relay_hooks
+    base = os.path.join(WORK, 'hardening')
+    shutil.rmtree(base, ignore_errors=True)
+    os.makedirs(base)
+
+    # a checkout path with shell syntax in it: the hook command passes it as written and runs nothing from it
+    odd = os.path.join(base, 'repo $(touch PWNED) `touch TICK` "q" \\b')
+    for d in ('codex', 'lib'):
+        shutil.copytree(os.path.join(ROOT, d), os.path.join(odd, d), ignore=shutil.ignore_patterns('__pycache__'))
+    chome = os.path.join(base, 'codex-odd')
+    os.makedirs(chome)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('CTRLB_') and k != 'CODEX_HOME'}
+    env.update(CTRLB_HOME=os.path.join(base, 'home-install'), CODEX_HOME=chome)
+    p = subprocess.run([sys.executable, '-I', os.path.join(odd, 'codex', 'install.py'), '--mcp-url', 'http://127.0.0.1:8095/mcp'],
+                       capture_output=True, text=True, env=env, timeout=30)
+    cmds = [json.loads(l.split('=', 1)[1]) for l in read(os.path.join(chome, 'config.toml')).decode().splitlines()
+            if l.startswith('command = ')]
+    run_dir = os.path.join(base, 'run')
+    os.makedirs(run_dir)
+    hook_env = dict(env, CTRLB_OFF='1')
+    for c in cmds[:1]:
+        subprocess.run(['sh', '-c', c], cwd=run_dir, input='', capture_output=True, text=True, env=hook_env, timeout=30)
+    # what sh makes of the path word: printf it in place of python3 -I
+    words = [subprocess.run(['sh', '-c', "printf '%s' " + c[len('python3 -I '):].rsplit(' ', 1)[0]], cwd=run_dir,
+                            capture_output=True, text=True, timeout=10).stdout for c in cmds]
+    check('codex install: a checkout path with $(...), backquotes, quotes and a backslash is one shell word; nothing in it runs',
+          p.returncode == 0 and len(cmds) == 7 and not os.listdir(run_dir)
+          and all(c.startswith('python3 -I ') for c in cmds)
+          and all(w == os.path.realpath(os.path.join(odd, 'codex', 'hook.py')) for w in words),
+          f'{os.listdir(run_dir)} {cmds[:1]} {p.stderr[-200:]}')
+
+    # --dry-run never prints an OTEL header value; the file written without --dry-run holds it, as documented
+    chome = os.path.join(base, 'codex-otel')
+    os.makedirs(chome)
+    hv = 'otelhdr' + 'value0001'
+    args = ['--mcp-url', 'http://127.0.0.1:8095/mcp', '--otel', '--otel-endpoint', 'http://127.0.0.1:8095/api/o/s/_otel/v1/logs',
+            '--otel-header', f'Authorization=Bearer {hv}', '--otel-header', 'X-Org=org1']
+    p = install(args + ['--dry-run'], chome)
+    check('codex install --dry-run: OTEL header values are shown as "<hidden>", never printed',
+          p.returncode == 0 and hv not in p.stdout + p.stderr and 'org1' not in p.stdout
+          and '+headers = { "Authorization" = "<hidden>", "X-Org" = "<hidden>" }' in p.stdout, p.stdout[-300:])
+    p = install(args, chome)
+    p2 = install(['--mcp-url', 'http://127.0.0.1:8095/mcp', '--otel', '--otel-endpoint', 'http://127.0.0.1:8095/api/o/s/_otel/v1/logs',
+                  '--dry-run'], chome)
+    check('codex install --dry-run: a header value already in config.toml is hidden on the removed line too',
+          hv in read(os.path.join(chome, 'config.toml')).decode() and hv not in p2.stdout and '-headers = {' in p2.stdout,
+          p2.stdout[-300:])
+
+    # a file or link named like the old fixed temporary file is never written through
+    chome = os.path.join(base, 'codex-tmp')
+    os.makedirs(chome)
+    victim = os.path.join(base, 'victim.txt')
+    with open(victim, 'w') as fh:
+        fh.write('keep me\n')
+    os.symlink(victim, os.path.join(chome, 'config.toml.ctrlb-tmp'))
+    p = install(['--mcp-url', 'http://127.0.0.1:8095/mcp'], chome)
+    cfgp = os.path.join(chome, 'config.toml')
+    check('codex install: a link named config.toml.ctrlb-tmp is not followed; config.toml is a new 0600 file; no temporary '
+          'file is left', p.returncode == 0 and read(victim) == b'keep me\n' and not os.path.islink(cfgp)
+          and stat.S_IMODE(os.stat(cfgp).st_mode) == 0o600
+          and sorted(os.listdir(chome)) == ['config.toml', 'config.toml.ctrlb-tmp'], str(sorted(os.listdir(chome))))
+
+    # configure.py: atomic write, a 0600 backup of the old file, and a link kept and said
+    home = os.path.join(base, 'home-cfg')
+    cenv = {k: v for k, v in os.environ.items() if not k.startswith('CTRLB_')}
+    cenv['CTRLB_HOME'] = home
+    k1, k2 = 'cfgkey' + '-first-0001', 'cfgkey' + '-second-0002'
+
+    def configure(key, url):
+        return subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'configure.py'), '--url', url, '--dataset',
+                               'agent_sessions', '--run', '', '--key-stdin'], input=key + '\n', capture_output=True, text=True,
+                              env=cenv, timeout=30)
+    configure(k1, seeker.url)
+    p = configure(k2, seeker.url)
+    names = sorted(os.listdir(home))
+    bk = [n for n in names if n.startswith('config.json.ctrlb-backup-')]
+    cfg_path = os.path.join(home, 'config.json')
+    check('configure.py: a second run backs up the old config.json (0600) and replaces it whole (0600); no temporary file',
+          p.returncode == 0 and len(bk) == 1 and k1 in read(os.path.join(home, bk[0])).decode()
+          and stat.S_IMODE(os.stat(os.path.join(home, bk[0])).st_mode) == 0o600
+          and k2 in read(cfg_path).decode() and stat.S_IMODE(os.stat(cfg_path).st_mode) == 0o600
+          and not [n for n in names if 'ctrlb-tmp' in n] and k1 not in p.stdout + p.stderr and k2 not in p.stdout + p.stderr,
+          str(names))
+    real_cfg = os.path.join(base, 'dotfiles-config.json')
+    shutil.copy(cfg_path, real_cfg)
+    os.chmod(real_cfg, 0o600)
+    os.unlink(cfg_path)
+    os.symlink(real_cfg, cfg_path)
+    p = configure(k1, seeker.url)
+    check('configure.py: when config.json is a link, the file it points to is written, the link is kept, and it says so',
+          p.returncode == 0 and os.path.islink(cfg_path) and k1 in read(real_cfg).decode()
+          and 'is a link to' in p.stdout, p.stdout[-300:])
+
+    # CTRLB_HOME, its state directory and every file the hooks write are private, also under umask 022, and an
+    # existing world-readable log is tightened
+    home = os.path.join(base, 'home-hooks')
+    os.makedirs(home, mode=0o755)
+    os.chmod(home, 0o755)
+    with open(os.path.join(home, 'hooks.log'), 'w') as fh:
+        fh.write('old line\n')
+    os.chmod(os.path.join(home, 'hooks.log'), 0o644)
+    tr = os.path.join(base, 'session.jsonl')
+    shutil.copy(os.path.join(FIX, 'claude', 'session.jsonl'), tr)
+    henv = base_env('http://127.0.0.1:9', home)
+    old_umask = os.umask(0o022)
+    try:
+        for mode, ev in (('upload', 'Stop'), ('post-tool', 'PostToolUse')):
+            hook(mode, {'session_id': SID, 'transcript_path': tr, 'cwd': '/work/dash', 'hook_event_name': ev, 'tool_name': 'Bash',
+                        'tool_input': {'command': 'pytest -q'}, 'tool_response': {'stdout': 'ok', 'exit_code': 0}}, henv)
+    finally:
+        os.umask(old_umask)
+    loose = []
+    for d, ds, fs in os.walk(home):
+        if os.path.relpath(d, home).split(os.sep)[0] == 'relay':
+            continue
+        for n in fs:
+            m = stat.S_IMODE(os.stat(os.path.join(d, n)).st_mode)
+            if m & 0o077:
+                loose.append(f'{os.path.relpath(os.path.join(d, n), home)} {oct(m)}')
+        m = stat.S_IMODE(os.stat(d).st_mode)
+        if m & 0o077:
+            loose.append(f'{os.path.relpath(d, home)}/ {oct(m)}')
+    state = os.path.join(home, 'state')
+    check('hooks: CTRLB_HOME and state are 0700 and every state, mutex and log file is 0600 (umask 022; an old 0644 log '
+          'is tightened)', not loose and os.path.isdir(state) and os.listdir(state), ', '.join(loose))
+
+    # artefact restore never writes through a link in the scratch directory, or outside it
+    scratch = os.path.join(base, 'scratch')
+    outside = os.path.join(base, 'outside')
+    os.makedirs(scratch)
+    os.makedirs(outside)
+    os.symlink(outside, os.path.join(scratch, 'link'))
+    arts = {'artifacts': {'artifacts': [{'path': 'link/settings.json', 'agent': 'a1', 'text': '{"x": 1}'},
+                                        {'path': 'notes/plan.md', 'agent': 'a1', 'text': 'plan'}]}}
+    old_home = common.HOME
+    common.HOME = os.path.join(base, 'home-restore')
+    try:
+        have = relay_hooks.restore_artifacts(arts, 'run-h', 'a1', scratch)
+        logtext = read(os.path.join(common.HOME, 'hooks.log')).decode() if os.path.exists(os.path.join(common.HOME, 'hooks.log')) else ''
+    finally:
+        common.HOME = old_home
+    check('artefact restore: a path through a link in the scratch directory is refused and logged; a plain path is restored',
+          have == ['notes/plan.md'] and not os.listdir(outside) and read(os.path.join(scratch, 'notes', 'plan.md')) == b'plan'
+          and 'artifact not restored: link/settings.json' in logtext
+          and not [n for n in os.listdir(os.path.join(scratch, 'notes')) if 'ctrlb-tmp' in n], f'{have} {os.listdir(outside)} {logtext[-200:]}')
+
+
 def main():
     seeker = Seeker()
     test_layout()
@@ -2323,6 +2521,7 @@ def main():
     test_local_install()
     test_codex_backfill(seeker)
     test_validate()
+    test_hardening(seeker)
     seeker.httpd.shutdown()
     fails = [r for r in results if not r[1]]
     print(f'\n{len(results) - len(fails)}/{len(results)} passed (Seeker: synthetic fixtures in tests/fixtures/seeker)')
