@@ -83,7 +83,7 @@ CTRLB_RUN=parser-fix CTRLB_AGENT=review codex
 
 The agents share Relay tasks, claims, notes, questions, contracts and handoffs through the local server. Their session rules name the run and agent, their edit hooks check claims, and session end hands off remaining holds. Claude Code also registers tasks from subagent prompts and records tool evidence. Recall and session uploads continue to use the same local database.
 
-The Relay tools are listed only when the MCP session connects with a run. To join or change a local run, set `CTRLB_RUN` and `CTRLB_AGENT` in each agent's environment and restart the agents. `/ctrlb-agent:relay <run>` explains this setup in local mode. A run saved only in `config.json` does not enable local Relay; an empty value or an unresolved `${...}` placeholder does not enable it either.
+The Relay tools are listed only when the MCP session connects with a run. To join or change a local run, set `CTRLB_RUN` and `CTRLB_AGENT` in each agent's environment and restart the agents. Local session context says "CtrlB is local on this machine; the run is fixed when the session starts." If the session has no run or a different run, `/ctrlb-agent:relay <run>` gives restart instructions and stops before calling Relay tools for that run. If the run already matches, it continues normally. A run saved only in `config.json` does not enable local Relay; an empty value or an unresolved `${...}` placeholder does not enable it either.
 
 This setup is for several agents on one machine, used by one user.
 

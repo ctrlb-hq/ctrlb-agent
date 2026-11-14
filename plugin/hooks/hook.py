@@ -11,7 +11,7 @@ for _lib in (os.path.join(_HERE, '..', 'lib'), os.path.join(_HERE, '..', '..', '
         sys.path.insert(0, _lib)
         break
 import common, relay_hooks, rows_claude  # noqa: E402
-from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, context as _context, decide, record_tokens, _tool_answer,  # noqa: E402
+from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, start_context, decide, record_tokens, _tool_answer,  # noqa: E402
                           bash_result, evidence_hint, is_test_command, record_test, record_bash, record_edit, record_note,
                           mark_relay, handoff_text, witness, _deny)
 from paths import edit_paths as normalise_edit_paths  # noqa: E402
@@ -194,7 +194,7 @@ def main():
     if mode == 'session-start':
         common.start_local_server(cfg)
         if common.relay_off(cfg):
-            print(json.dumps(_context('SessionStart', RECALL.format(sid=sid))))
+            print(json.dumps(start_context(cfg, 'SessionStart', RECALL.format(sid=sid))))
             return
         run, agent = common.run_id(cfg, sid), common.agent_name(cfg, sid)
         scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
@@ -204,16 +204,16 @@ def main():
         except Exception as e:
             common.log(f"session-start record: {type(e).__name__}: {str(e)[:200]}")
             block = ''
-        out = _context('SessionStart', text + ('\n\n' + block if block else ''))
+        out = start_context(cfg, 'SessionStart', text + ('\n\n' + block if block else ''))
     elif mode == 'subagent-start':
         upload(cfg, dict(inp, agent_transcript_path=None), SYNC_S - 1)
         if common.relay_off(cfg):
-            print(json.dumps(_context('SubagentStart', SUBAGENT.format(sid=sid))))
+            print(json.dumps(start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid))))
             return
         run = common.run_id(cfg, sid)
         relay = RELAY.format(run=run, agent=common.agent_name(cfg, sid, inp.get('agent_id') or ''),
                              scratch=common.scratch_dir(cfg, run))
-        out = _context('SubagentStart', SUBAGENT.format(sid=sid) + '\n\n' + relay)
+        out = start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid) + '\n\n' + relay)
     elif mode == 'flush':
         upload(cfg, inp, SYNC_S)
     elif mode == 'session-end':

@@ -63,6 +63,12 @@ def context(event, text):
     return {'hookSpecificOutput': {'hookEventName': event, 'additionalContext': text}}
 
 
+def start_context(cfg, event, text):
+    if common.local_mode(cfg):
+        text += '\n\nCtrlB is local on this machine; the run is fixed when the session starts.'
+    return context(event, text)
+
+
 def _resource(c):
     """What to name in the claim call: the conflict's path without the key prefix when claiming that names the same key
     ("src/app.py"), else the key itself ("path:Makefile", since a bare "Makefile" is keyed as a name)."""

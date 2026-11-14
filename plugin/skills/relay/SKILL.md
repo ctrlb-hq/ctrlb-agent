@@ -4,14 +4,14 @@ description: Join a CtrlB Relay run and follow its three rules (peers, post, cla
 argument-hint: <run id>
 ---
 
-In local mode (the session rule has no run id line, or the user says local), tell the user to start every agent with `CTRLB_RUN=$ARGUMENTS` and its own `CTRLB_AGENT=<name>` in its environment, then restart each agent. For example, in separate terminals:
+The sentence "CtrlB is local on this machine; the run is fixed when the session starts." in your session context identifies local mode. In local mode, compare the requested run `$ARGUMENTS` with the run id in your session rule (the line that starts "CtrlB Relay: your run id is ..."). If they match, continue with the normal instructions below. If the session has no run id or its run differs from the requested run, tell the user to restart every agent with `CTRLB_RUN=$ARGUMENTS` and its own `CTRLB_AGENT=<name>` in its environment. For example, in separate terminals:
 
 ```sh
 CTRLB_RUN="<run>" CTRLB_AGENT=parser claude
 CTRLB_RUN="<run>" CTRLB_AGENT=tests claude
 ```
 
-Use the requested run id in place of `<run>`; for Codex, replace `claude` with `codex`. The Relay tools are listed only when the MCP session connects with a run, so joining from an already connected local session requires a restart. Give these instructions before calling Relay tools; continue below once the agents have restarted with the run set.
+Use the requested run id in place of `<run>`; for Codex, replace `claude` with `codex`. The local run and tool list are fixed when the session starts. If the run is missing or differs, stop after giving these restart instructions; do not call Relay tools for the requested run from this session. Once restarted with the requested run, follow the normal instructions below. Without the local-mode sentence, follow the normal instructions below.
 
 You are joining CtrlB Relay run `$ARGUMENTS`. Other agents in this run work in the same repository at the same time and share the run's record with you through the ctrlb tools: `peers`, `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `briefs`, `tasks`, `contract`, `contracts`, and `done`.
 

@@ -2021,6 +2021,38 @@ def test_local_mode(seeker):
     check('local mode: pending detached artifact poster sends no Relay request', p.returncode == 0 and not seeker.calls)
 
 
+def test_local_session_context(seeker):
+    notice = 'CtrlB is local on this machine; the run is fixed when the session starts.'
+    main, sub = setup_transcripts()
+    ci = inputs(main, sub)
+    _, cm, cs = setup_codex()
+    xi = cinputs(cm, cs)
+    for call, fixtures, label in ((hook, ci, 'Claude'), (chook, xi, 'Codex')):
+        events = [('session-start', 'session_start'), ('subagent-start', 'subagent_start')]
+        if label == 'Codex':
+            events.append(('session-start', 'session_start_subagent'))
+        for mode, run in (('local', ''), ('local', 'context-run'), ('hosted', ''), ('hosted', 'context-run')):
+            for source in ('file', 'environment'):
+                home = os.path.join(WORK, f'home-context-{label}-{mode}-{run}-{source}')
+                os.makedirs(home, exist_ok=True)
+                env = base_env(seeker.url, home, CTRLB_RUN=run, CTRLB_AGENT='context-agent')
+                if source == 'file':
+                    with open(os.path.join(home, 'config.json'), 'w') as fh:
+                        json.dump(dict(mode=mode), fh)
+                else:
+                    env['CTRLB_MODE'] = mode
+                for event, fixture in events:
+                    seeker.reset()
+                    p, _ = call(event, fixtures[fixture], env)
+                    ctx = out_of(p).get('additionalContext', '')
+                    tag = f'{label} {mode} {source} {fixture} run={run!r}'
+                    check(tag + ': local sentence appears only in local context', p.returncode == 0
+                          and ctx.count(notice) == (1 if mode == 'local' else 0))
+                    check(tag + ': context keeps recall and the session run', 'search_sessions' in ctx
+                          and (f'run id is {run}' in ctx if run else
+                               ('CtrlB Relay:' not in ctx if mode == 'local' else 'CtrlB Relay:' in ctx)))
+
+
 def test_local_relay(seeker):
     with mock.patch.dict(os.environ, {}, clear=True):
         local = dict(mode='local', run='saved-run')
@@ -2638,6 +2670,7 @@ def main():
     test_codex_rows(seeker)
     test_codex_hooks(seeker)
     test_local_mode(seeker)
+    test_local_session_context(seeker)
     test_local_relay(seeker)
     test_local_startup(seeker)
     test_local_health_answers(seeker)
