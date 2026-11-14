@@ -87,10 +87,11 @@ def local_mode(cfg):
 
 
 def ctrlb_binary():
-    """First executable in CTRLB_BIN, <CTRLB_HOME>/bin/ctrlb, then PATH."""
+    """First executable in CTRLB_BIN, <CTRLB_HOME>/bin/ctrlb, then absolute PATH entries."""
+    path = os.pathsep.join(p for p in os.environ.get('PATH', os.defpath).split(os.pathsep) if os.path.isabs(p))
     for candidate in (os.environ.get('CTRLB_BIN'), os.path.join(HOME, 'bin', 'ctrlb'), 'ctrlb'):
         if candidate:
-            found = shutil.which(os.path.expanduser(candidate))
+            found = shutil.which(os.path.expanduser(candidate), path=path)
             if found:
                 return os.path.abspath(found)
     return None
@@ -113,8 +114,15 @@ def local_health(cfg, timeout=0.25):
     """The health HTTP status; never follow redirects, use proxies, or read response text."""
     req = urllib.request.Request(cfg['url'] + '/healthz', headers={'Authorization': 'Bearer ' + cfg['key']})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoHealthRedirect())
-    with opener.open(req, timeout=timeout) as resp:
-        return resp.status
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            status = resp.status
+    except urllib.error.HTTPError as resp:
+        with resp:
+            status = resp.code
+    if not 200 <= status < 300:
+        log(f'local server: health HTTP {status}')
+    return status
 
 
 def start_local_server(cfg):

@@ -2082,6 +2082,62 @@ def test_local_startup(seeker):
                                                                'file://localhost', 'http://[bad')))
 
 
+def test_local_health_answers(seeker):
+    for call, label, sid in ((hook, 'Claude', SID), (chook, 'Codex', CSID)):
+        for status in (401, 503):
+            home = os.path.join(WORK, f'home-health-{label}-{status}')
+            binary = local_stub(home)
+            env = base_env(seeker.url, home, CTRLB_MODE='local', CTRLB_BIN=binary)
+            if status == 401:
+                env['CTRLB_KEY'] = 'invalid-test-key'
+            seeker.state['health'] = 'down'
+            try:
+                p, dt = call('session-start', dict(session_id=sid, hook_event_name='SessionStart'), env)
+                check(f'{label} startup: HTTP {status} does not spawn and returns quickly',
+                      p.returncode == 0 and dt < 1.5 and not os.path.exists(os.path.join(home, 'invoked.json')))
+                lines = _log(home).splitlines()
+                check(f'{label} startup: HTTP {status} logs only the status once',
+                      len(lines) == 1 and lines[0].endswith(f'local server: health HTTP {status}'))
+            finally:
+                seeker.state.pop('health', None)
+
+    for status in (401, 503):
+        # A connection refusal followed by an HTTP error exercises the post-spawn poll without a process.
+        import io
+        response = io.BytesIO(b'response body must not be read or logged')
+        error = common.urllib.error.HTTPError('http://localhost/healthz', status, 'unused reason', {}, response)
+        opener = mock.Mock()
+        opener.open.side_effect = [ConnectionRefusedError(), error]
+        with mock.patch.object(common.urllib.request, 'build_opener', return_value=opener), \
+                mock.patch.object(common, 'ctrlb_binary', return_value='/synthetic/ctrlb'), \
+                mock.patch.object(common.subprocess, 'Popen') as spawn, \
+                mock.patch.object(common.time, 'sleep') as sleep, mock.patch.object(common, 'log') as log:
+            common.start_local_server(dict(mode='local', url='http://localhost', key=KEY))
+        check(f'startup poll: HTTP {status} ends polling after one spawn',
+              spawn.call_count == 1 and opener.open.call_count == 2 and not sleep.called and response.closed
+              and log.call_args_list == [mock.call(f'local server: health HTTP {status}')])
+
+
+def test_local_binary_path():
+    project = os.path.join(WORK, 'binary-project')
+    relative_binary = local_stub(project)
+    shutil.copy(relative_binary, os.path.join(project, 'ctrlb'))
+    absolute_binary = local_stub(os.path.join(WORK, 'binary-absolute'))
+    previous = os.getcwd()
+    try:
+        os.chdir(project)
+        with mock.patch.object(common, 'HOME', os.path.join(WORK, 'binary-no-home')), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            for relative in ('', '.', 'bin', os.pathsep.join(('', '.', 'bin'))):
+                with mock.patch.dict(os.environ, PATH=relative + os.pathsep + os.path.dirname(absolute_binary)):
+                    check(f'binary lookup: skips relative PATH {relative!r} for absolute entry',
+                          common.ctrlb_binary() == absolute_binary)
+                with mock.patch.dict(os.environ, PATH=relative):
+                    check(f'binary lookup: relative PATH {relative!r} alone finds nothing', common.ctrlb_binary() is None)
+    finally:
+        os.chdir(previous)
+
+
 def test_local_configure_status(seeker):
     home = os.path.join(WORK, "home-configure local's")
     binary = local_stub(home)
@@ -2259,6 +2315,8 @@ def main():
     test_codex_hooks(seeker)
     test_local_mode(seeker)
     test_local_startup(seeker)
+    test_local_health_answers(seeker)
+    test_local_binary_path()
     test_local_configure_status(seeker)
     test_codex_install()
     test_root_install()
