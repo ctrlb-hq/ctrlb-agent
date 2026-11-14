@@ -9,7 +9,7 @@ import common  # noqa: E402
 
 def main():
     cfg = common.config()
-    shown = {k: cfg[k] for k in ('url', 'mcp_url', 'dataset', 'user', 'run', 'agent', 'enforce', 'off')}
+    shown = {k: cfg[k] for k in ('url', 'mcp_url', 'dataset', 'user', 'run', 'agent', 'enforce', 'mode', 'off')}
     shown['key'] = f"set ({len(cfg['key'])} characters)" if cfg['key'] else '(none)'
     print('config:', json.dumps(shown))
     print(f"key's user (written as user_name): {cfg['user'] or '(none in the key; CtrlB fills user_name from the key)'}")
@@ -28,15 +28,22 @@ def main():
     if cfg['off']:
         print('ctrlb-agent is OFF (CTRLB_OFF=1, or the URL or key is missing, or a bad dataset name): run bin/configure.py')
         return
-    try:
-        t0 = time.time()
-        r = common.runs(cfg, limit=5, timeout=15)
-        ms = (time.time() - t0) * 1000
-        print(f"Seeker answered: OK ({ms:.0f} ms); latest runs in {cfg['dataset']}:")
-        for x in r.get('runs') or []:
-            print(f"  {x.get('run_id')}  agents {x.get('agents')}  live {x.get('live')}  done {x.get('done')}")
-    except Exception as e:
-        print(f'Seeker check failed: {str(e)[:300]}')
+    if common.local_mode(cfg):
+        print('local binary:', common.ctrlb_binary() or '(not found)')
+        try:
+            print(f'Local health answer: HTTP {common.local_health(cfg)}')
+        except Exception:
+            print('Local health check failed (server unavailable)')
+    else:
+        try:
+            t0 = time.time()
+            r = common.runs(cfg, limit=5, timeout=15)
+            ms = (time.time() - t0) * 1000
+            print(f"Seeker answered: OK ({ms:.0f} ms); latest runs in {cfg['dataset']}:")
+            for x in r.get('runs') or []:
+                print(f"  {x.get('run_id')}  agents {x.get('agents')}  live {x.get('live')}  done {x.get('done')}")
+        except Exception as e:
+            print(f'Seeker check failed: {str(e)[:300]}')
     states = os.path.join(common.HOME, 'state')
     n = len([f for f in os.listdir(states) if f.endswith('.json')]) if os.path.isdir(states) else 0
     print(f'transcript files tracked: {n}')

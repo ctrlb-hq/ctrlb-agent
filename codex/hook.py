@@ -15,7 +15,7 @@ import json, os, signal, sys, time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 import common, relay_hooks, rows_codex  # noqa: E402
-from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, context, decide  # noqa: E402
+from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, start_context, decide  # noqa: E402
 
 SYNC_S, ASYNC_S = 5, 90
 HANDOFF_S = 0.8
@@ -26,7 +26,7 @@ CODEX_HANDOFF_TEXT = 'Session ended (Codex: the hook keeps no record of edits or
 def session_end(cfg, inp):
     """Seeker decision 36 for Codex: in a relay run (CTRLB_RUN set), hand off every hold the agent still has, in one
     write (common.handoff_all). Seeker unreachable or an error: nothing is written."""
-    if not cfg.get('run'):
+    if common.relay_off(cfg) or not cfg.get('run'):
         return None
     sid = inp.get('session_id') or ''
     run, parent = session_run(cfg, sid, inp.get('transcript_path'))
@@ -67,7 +67,7 @@ def session_run(cfg, sid, transcript):
 
 def pre_tool(cfg, inp):
     """Decision 7 for apply_patch: the paths come from the patch's *** Update File / Add File / Delete File lines."""
-    if cfg['enforce'] == 'off':
+    if common.relay_off(cfg) or cfg['enforce'] == 'off':
         return None
     paths = rows_codex.input_paths(inp.get('tool_input'))
     if not paths:
@@ -101,8 +101,12 @@ def main():
     event = inp.get('hook_event_name') or mode
     out = None
     if mode == 'session-start':
+        common.start_local_server(cfg)
         run, parent = session_run(cfg, sid, inp.get('transcript_path'))
         head = SUBAGENT.format(sid=parent) if parent else RECALL.format(sid=sid)
+        if common.relay_off(cfg):
+            print(json.dumps(start_context(cfg, 'SessionStart', head)))
+            return
         agent = rows_codex.agent_for(cfg, sid, parent)
         scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
         text = head + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
@@ -111,13 +115,16 @@ def main():
         except Exception as e:
             common.log(f"codex session-start record: {type(e).__name__}: {str(e)[:200]}")
             block = ''
-        out = context('SessionStart', text + ('\n\n' + block if block else ''))
+        out = start_context(cfg, 'SessionStart', text + ('\n\n' + block if block else ''))
     elif mode == 'subagent-start':
         upload(cfg, [inp.get('transcript_path')], SYNC_S - 1, event, sid)
+        if common.relay_off(cfg):
+            print(json.dumps(start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid))))
+            return
         run, _ = session_run(cfg, sid, inp.get('transcript_path'))
         sub = inp.get('agent_id') or ''
         agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid)
-        out = context('SubagentStart', SUBAGENT.format(sid=sid) + '\n\n'
+        out = start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid) + '\n\n'
                       + RELAY.format(run=run, agent=agent, scratch=common.scratch_dir(cfg, run)))
     elif mode == 'flush':
         upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)

@@ -341,7 +341,7 @@ def detach(mode, payload):
 
 def _poster(payload):
     cfg = common.config()
-    if cfg['off']:
+    if cfg['off'] or common.relay_off(cfg):
         return
     run, agent, rel, h = payload['run'], payload['agent'], payload['rel'], payload['hash']
     try:

@@ -13,6 +13,8 @@ Config comes from environment variables, falling back to ~/.ctrlb/config.json (w
   CTRLB_ENFORCE  "off" skips the edit check without calling Seeker; anything else lets Seeker's mode decide
                                                                  file key "enforce"
   CTRLB_MCP_URL  Seeker's /mcp URL, read by plugin/.mcp.json     file key "mcp_url" (shown by status only)
+  CTRLB_MODE     "local" runs Relay hooks only with CTRLB_RUN   file key "mode"
+  CTRLB_BIN      optional path to the local ctrlb executable
   CTRLB_SCRATCH_DIR  the run's durable scratch directory; {run} is replaced by the run id
                  (default <CTRLB_HOME>/relay/<run id>/scratch)          file key "scratchDir"
   CTRLB_AUTO_SLOTS   files the hooks claim as slot:<path> around each edit (relative paths, comma-separated;
@@ -21,7 +23,7 @@ Config comes from environment variables, falling back to ~/.ctrlb/config.json (w
   CTRLB_HOME     where config.json, hooks.log and upload state live (default ~/.ctrlb)
 
 Everything is off when the URL or the key is missing or the dataset name is not letters, digits and _."""
-import base64, fcntl, hashlib, json, os, re, socket, time, urllib.error, urllib.parse, urllib.request
+import base64, fcntl, hashlib, json, os, re, shutil, socket, subprocess, time, urllib.error, urllib.parse, urllib.request
 
 VERSION = '0.2.0'
 HOME = os.environ.get('CTRLB_HOME') or os.path.expanduser('~/.ctrlb')
@@ -68,6 +70,8 @@ def config():
              agent=(env('CTRLB_AGENT') or env('CTRLB_USER') or '').strip(),
              dataset=pick('CTRLB_DATASET', 'dataset', DEFAULT_DATASET),
              enforce=pick('CTRLB_ENFORCE', 'enforce').lower())
+    mode = env('CTRLB_MODE') or f.get('mode')
+    c['mode'] = 'local' if mode == 'local' else 'hosted'
     # user_name only ever comes from the key in effect (CTRLB_KEY or the file's key), decoded now, so a key from the
     # environment and an old config.json "user" written as a label can never put another name on the rows.
     c['user'] = key_user(c['key'])
@@ -76,6 +80,92 @@ def config():
     c['auto_slots'] = _auto_slots(env('CTRLB_AUTO_SLOTS'), f.get('autoSlots'))
     c['off'] = env('CTRLB_OFF') == '1' or not c['url'] or not c['key'] or not NAME_RE.match(c['dataset'])
     return c
+
+
+def local_mode(cfg):
+    """Whether the session uses the local server."""
+    return cfg.get('mode') == 'local'
+
+
+def relay_off(cfg):
+    """Local Relay needs a run in the environment, matching the MCP connection's run header."""
+    run = (os.environ.get('CTRLB_RUN') or '').strip()
+    return local_mode(cfg) and (not run or re.fullmatch(r'\$\{[^}]*\}', run) is not None)
+
+
+def ctrlb_binary():
+    """First executable in CTRLB_BIN, <CTRLB_HOME>/bin/ctrlb, then absolute PATH entries."""
+    path = os.pathsep.join(p for p in os.environ.get('PATH', os.defpath).split(os.pathsep) if os.path.isabs(p))
+    for candidate in (os.environ.get('CTRLB_BIN'), os.path.join(HOME, 'bin', 'ctrlb'), 'ctrlb'):
+        if candidate:
+            found = shutil.which(os.path.expanduser(candidate), path=path)
+            if found:
+                return os.path.abspath(found)
+    return None
+
+
+def loopback_url(cfg):
+    try:
+        url = urllib.parse.urlsplit(cfg.get('url') or '')
+        return url.scheme in ('http', 'https') and url.hostname in ('127.0.0.1', 'localhost')
+    except ValueError:
+        return False
+
+
+class _NoHealthRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def local_health(cfg, timeout=0.25):
+    """The health HTTP status; never follow redirects, use proxies, or read response text."""
+    req = urllib.request.Request(cfg['url'] + '/healthz', headers={'Authorization': 'Bearer ' + cfg['key']})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoHealthRedirect())
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            status = resp.status
+    except urllib.error.HTTPError as resp:
+        with resp:
+            status = resp.code
+    if not 200 <= status < 300:
+        log(f'local server: health HTTP {status}')
+    return status
+
+
+def start_local_server(cfg):
+    """Best effort SessionStart: short probe, detached serve, then at most three seconds of polling."""
+    if not local_mode(cfg) or not loopback_url(cfg):
+        return
+    try:
+        private_dir(HOME)
+    except OSError:
+        log('local server: could not prepare CTRLB_HOME')
+        return
+    try:
+        with private_open(os.path.join(HOME, 'serve.lo' + 'ck'), 'a') as mutex:
+            fcntl.flock(mutex, fcntl.LOCK_EX)
+            try:
+                local_health(cfg)
+                return
+            except Exception:
+                pass
+            binary = ctrlb_binary()
+            if not binary:
+                log('local server: ctrlb executable not found')
+                return
+            subprocess.Popen([binary, 'serve'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True, cwd=HOME)
+            # Keep exclusive access until health answers so the next session re-probes before spawning.
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                try:
+                    local_health(cfg, timeout=min(0.25, max(0.001, deadline - time.monotonic())))
+                    return
+                except Exception:
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+            log('local server: health check did not answer in time')
+    except Exception:
+        log('local server: could not start ctrlb serve')
 
 
 DEFAULT_AUTO_SLOTS = ('REGISTRY.md',)
@@ -190,7 +280,10 @@ def request(cfg, method, path, body=None, query=None, timeout=10):
         'Content-Type': 'application/json', 'Accept': 'application/json',
         'Authorization': 'Bearer ' + cfg['key'], 'User-Agent': 'ctrlb-agent/' + VERSION})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        open_request = urllib.request.urlopen
+        if local_mode(cfg) and loopback_url(cfg):
+            open_request = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+        with open_request(req, timeout=timeout) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as e:
         raise SeekerError(e.code, e.read()[:300].decode(errors='replace')) from None

@@ -14,6 +14,8 @@ The `ctrlb-agent` plugin does three things in Claude Code:
 
 Everything goes to CtrlB with your MCP key. Nothing else is installed: the hooks are standard-library Python 3.9 or newer.
 
+For local setup, see [Local mode](local-mode.md).
+
 Do steps 1 and 2 yourself, or save the key in a file and let Claude Code do them: see [Set up with a prompt](#set-up-with-a-prompt).
 
 ## 1. Set the environment

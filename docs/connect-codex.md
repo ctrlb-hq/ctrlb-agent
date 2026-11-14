@@ -14,6 +14,8 @@ The installer writes CtrlB into Codex's `config.toml`. After that, Codex does wh
 
 It needs Codex CLI 0.166 or newer and Python 3.9 or newer. Nothing else is installed.
 
+For local setup, see [Local mode](local-mode.md).
+
 ## 1. Set the environment
 
 Mint a key on the Connect page in CtrlB. Add these lines to your shell profile and open a new terminal:

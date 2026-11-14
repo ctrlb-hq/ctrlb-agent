@@ -3,8 +3,9 @@ Asks for Seeker's URL, the sessions dataset, an optional run id, and your key (h
 from the key (its "email" claim, the one Seeker reads), writes ~/.ctrlb/config.json (mode 0600, readable only by you)
 and checks that Seeker answers. Environment variables CTRLB_* override the file. Flags (for scripts): --url,
 --dataset, --run, --key-stdin (read the key from one line of stdin instead of a hidden prompt; the key is never taken
-from the command line). --user is accepted and ignored: the name on the rows is the key's user."""
-import argparse, datetime, getpass, json, os, shutil, sys, tempfile
+from the command line). --user is accepted and ignored: the name on the rows is the key's user.
+--local [--port N] runs ctrlb init without prompts and prints exports that read the key from config.json."""
+import argparse, datetime, getpass, json, os, shlex, shutil, subprocess, sys, tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 import common  # noqa: E402
@@ -15,6 +16,32 @@ def ask(label, default='', given=None):
         return given.strip()
     v = input(f'{label}' + (f' [{default}]' if default else '') + ': ').strip()
     return v or default
+
+
+def configure_local(port):
+    binary = common.ctrlb_binary()
+    if not binary:
+        sys.exit('ctrlb executable not found; install ctrlb or set CTRLB_BIN')
+    args = [binary, 'init']
+    if port is not None:
+        args += ['--port', str(port)]
+    try:
+        common.private_dir(common.HOME)
+        # init may display the local key. Neither its output nor an error is echoed here.
+        p = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        sys.exit('ctrlb init failed; check the binary and CTRLB_HOME')
+    if p.returncode:
+        sys.exit('ctrlb init failed; check the binary and CTRLB_HOME')
+    c = common._file_config()
+    if c.get('mode') != 'local' or not c.get('mcp_url') or not c.get('key'):
+        sys.exit('ctrlb init did not write a local config.json')
+    print('Local mode configured. Add these to your shell profile for Claude Code:')
+    for variable, field in [('CTRLB_MCP_URL', 'mcp_url'), ('CTRLB_KEY', 'key')]:
+        code = ('import json, os; print(json.load(open(os.path.join(os.environ.get("CTRLB_HOME") '
+                'or os.path.expanduser("~/.ctrlb"), "config.json")))["' + field + '"])')
+        print('  export ' + variable + '="$(python3 -I -c ' + shlex.quote(code) + ')"')
 
 
 def save(path, c):
@@ -62,7 +89,16 @@ def main():
     for f in ('url', 'dataset', 'user', 'run'):
         ap.add_argument('--' + f)
     ap.add_argument('--key-stdin', action='store_true')
+    ap.add_argument('--local', action='store_true')
+    ap.add_argument('--port', type=int)
     a = ap.parse_args()
+    if a.port is not None and (not a.local or not 1 <= a.port <= 65535):
+        ap.error('--port requires --local and a number from 1 to 65535')
+    if a.local:
+        if any(getattr(a, f) is not None for f in ('url', 'dataset', 'user', 'run')) or a.key_stdin:
+            ap.error('--local accepts only --port')
+        configure_local(a.port)
+        return
     path = os.path.join(common.HOME, 'config.json')
     try:
         with open(path) as fh:

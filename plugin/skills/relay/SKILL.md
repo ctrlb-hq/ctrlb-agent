@@ -4,6 +4,17 @@ description: Join a CtrlB Relay run and follow its three rules (peers, post, cla
 argument-hint: <run id>
 ---
 
+Local mode has five recall tools: `search_sessions`, `find_command`, `next_actions`, `fetch_records` and `session_index`. `session_index` lists the caller's recent sessions. All five read only stored records and make no model call, and are listed with or without `CTRLB_RUN`. Local mode writes no running notes or memories; those need a model.
+
+The sentence "CtrlB is local on this machine; the run is fixed when the session starts." in your session context identifies local mode. In local mode, compare the requested run `$ARGUMENTS` with the run id in your session rule (the line that starts "CtrlB Relay: your run id is ..."). If they match, continue with the normal instructions below. If the session has no run id or its run differs from the requested run, tell the user to restart every agent with `CTRLB_RUN=$ARGUMENTS` and its own `CTRLB_AGENT=<name>` in its environment. For example, in separate terminals:
+
+```sh
+CTRLB_RUN="<run>" CTRLB_AGENT=parser claude
+CTRLB_RUN="<run>" CTRLB_AGENT=tests claude
+```
+
+Use the requested run id in place of `<run>`; for Codex, replace `claude` with `codex`. The local run and tool list are fixed when the session starts. If the run is missing or differs, stop after giving these restart instructions; do not call Relay tools for the requested run from this session. Once restarted with the requested run, follow the normal instructions below. Without the local-mode sentence, follow the normal instructions below.
+
 You are joining CtrlB Relay run `$ARGUMENTS`. Other agents in this run work in the same repository at the same time and share the run's record with you through the ctrlb tools: `peers`, `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `briefs`, `tasks`, `contract`, `contracts`, and `done`.
 
 Pass `run_id="$ARGUMENTS"` on every one of those calls. Pass `agent` as the agent id your session rule gives you (the line that starts "CtrlB Relay: your run id is ..."). If you have no such line, use your session id.
