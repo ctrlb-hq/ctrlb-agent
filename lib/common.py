@@ -13,7 +13,7 @@ Config comes from environment variables, falling back to ~/.ctrlb/config.json (w
   CTRLB_ENFORCE  "off" skips the edit check without calling Seeker; anything else lets Seeker's mode decide
                                                                  file key "enforce"
   CTRLB_MCP_URL  Seeker's /mcp URL, read by plugin/.mcp.json     file key "mcp_url" (shown by status only)
-  CTRLB_MODE     "local" disables Relay hooks                   file key "mode"
+  CTRLB_MODE     "local" runs Relay hooks only with CTRLB_RUN   file key "mode"
   CTRLB_BIN      optional path to the local ctrlb executable
   CTRLB_SCRATCH_DIR  the run's durable scratch directory; {run} is replaced by the run id
                  (default <CTRLB_HOME>/relay/<run id>/scratch)          file key "scratchDir"
@@ -82,8 +82,14 @@ def config():
 
 
 def local_mode(cfg):
-    """Local Recall has no Relay tools or hooks."""
+    """Whether the session uses the local server."""
     return cfg.get('mode') == 'local' or os.environ.get('CTRLB_MODE') == 'local'
+
+
+def relay_off(cfg):
+    """Local Relay needs a run in the environment, matching the MCP connection's run header."""
+    run = (os.environ.get('CTRLB_RUN') or '').strip()
+    return local_mode(cfg) and (not run or re.fullmatch(r'\$\{[^}]*\}', run) is not None)
 
 
 def ctrlb_binary():

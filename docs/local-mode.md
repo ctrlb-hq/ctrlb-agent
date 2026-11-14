@@ -1,6 +1,6 @@
 # Local mode
 
-Local mode runs Recall with one `ctrlb` binary and a SQLite database on this machine. It needs no CtrlB account or other service. Once installed, session uploads and recall work without a network connection.
+Local mode runs Recall and Relay with one `ctrlb` binary and a SQLite database on this machine. It needs no CtrlB account or other service. Once installed, session uploads, recall and coordination work without a network connection.
 
 The agent gets four recall tools:
 
@@ -9,7 +9,7 @@ The agent gets four recall tools:
 - `next_actions`: read what happened after a matching action.
 - `fetch_records`: read a range of records from a session.
 
-Relay is available in hosted CtrlB only. Local mode turns the plugin's Relay hooks off.
+With no `CTRLB_RUN` in the agent's environment, local mode lists only these four tools and leaves Relay hooks off. Set `CTRLB_RUN` before starting agents to coordinate them in one run.
 
 ## Install
 
@@ -63,9 +63,33 @@ ctrlb status
 
 Status shows the version, database size, datasets, row and session counts, and newest record time. You can also start the server yourself with `ctrlb serve`.
 
+## Several agents on one laptop
+
+After connecting your agent above, start two or three agents from the same repository in separate terminals. Give them the same `CTRLB_RUN` and a different `CTRLB_AGENT` each. For Claude Code:
+
+```sh
+CTRLB_RUN=parser-fix CTRLB_AGENT=parser claude
+CTRLB_RUN=parser-fix CTRLB_AGENT=tests claude
+CTRLB_RUN=parser-fix CTRLB_AGENT=review claude
+```
+
+For Codex, use the same environment variables:
+
+```sh
+CTRLB_RUN=parser-fix CTRLB_AGENT=parser codex
+CTRLB_RUN=parser-fix CTRLB_AGENT=tests codex
+CTRLB_RUN=parser-fix CTRLB_AGENT=review codex
+```
+
+The agents share Relay tasks, claims, notes, questions, contracts and handoffs through the local server. Their session rules name the run and agent, their edit hooks check claims, and session end hands off remaining holds. Claude Code also registers tasks from subagent prompts and records tool evidence. Recall and session uploads continue to use the same local database.
+
+The Relay tools are listed only when the MCP session connects with a run. To join or change a local run, set `CTRLB_RUN` and `CTRLB_AGENT` in each agent's environment and restart the agents. `/ctrlb-agent:relay <run>` explains this setup in local mode. A run saved only in `config.json` does not enable local Relay; an empty value or an unresolved `${...}` placeholder does not enable it either.
+
+This setup is for several agents on one machine, used by one user.
+
 ## Limits
 
-Local mode is for one machine and one user. It has no Relay, team search, search by meaning, or continuous sync with hosted CtrlB.
+Local mode is for one machine and one user. It has no team search, search by meaning, or continuous sync with hosted CtrlB.
 
 ## Move to hosted CtrlB
 

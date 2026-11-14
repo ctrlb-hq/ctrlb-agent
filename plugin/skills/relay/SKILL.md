@@ -4,6 +4,15 @@ description: Join a CtrlB Relay run and follow its three rules (peers, post, cla
 argument-hint: <run id>
 ---
 
+In local mode (the session rule has no run id line, or the user says local), tell the user to start every agent with `CTRLB_RUN=$ARGUMENTS` and its own `CTRLB_AGENT=<name>` in its environment, then restart each agent. For example, in separate terminals:
+
+```sh
+CTRLB_RUN="<run>" CTRLB_AGENT=parser claude
+CTRLB_RUN="<run>" CTRLB_AGENT=tests claude
+```
+
+Use the requested run id in place of `<run>`; for Codex, replace `claude` with `codex`. The Relay tools are listed only when the MCP session connects with a run, so joining from an already connected local session requires a restart. Give these instructions before calling Relay tools; continue below once the agents have restarted with the run set.
+
 You are joining CtrlB Relay run `$ARGUMENTS`. Other agents in this run work in the same repository at the same time and share the run's record with you through the ctrlb tools: `peers`, `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `briefs`, `tasks`, `contract`, `contracts`, and `done`.
 
 Pass `run_id="$ARGUMENTS"` on every one of those calls. Pass `agent` as the agent id your session rule gives you (the line that starts "CtrlB Relay: your run id is ..."). If you have no such line, use your session id.

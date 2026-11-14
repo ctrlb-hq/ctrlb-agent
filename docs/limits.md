@@ -6,6 +6,10 @@ slug: limits
 
 # Limits
 
+## Local mode
+
+Local mode supports Recall and Relay for one machine and one user. It has no team search or search by meaning. Relay tools and hooks require `CTRLB_RUN` in the agent's environment before it connects; see [Several agents on one laptop](local-mode.md#several-agents-on-one-laptop).
+
 ## Claims are advisory unless the workspace turns on enforce
 
 A claim is a row in the run's record. It tells other agents, and the people watching, who is working on what. It does not stop a process from writing a file.

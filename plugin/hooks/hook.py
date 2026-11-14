@@ -52,7 +52,7 @@ def session_end(cfg, inp):
     still has, in one write: each task openly (to nobody) with a text built from this session's record, each path
     and slot released. Sent only in a relay run (CTRLB_RUN set, or a ctrlb relay tool was called in this session).
     Seeker unreachable or answering an error: nothing is written (a takeover covers the rest)."""
-    if common.local_mode(cfg):
+    if common.relay_off(cfg):
         return None
     run, agent, sid = _who(cfg, inp)
     if not run or not agent:
@@ -77,7 +77,7 @@ def session_end(cfg, inp):
 def pre_tool(cfg, inp):
     """Decision 7 on an edit; decision 38 (the witness) on a done call. Returns the hook output, or None for no output
     (allowed, off, or nothing to check)."""
-    if common.local_mode(cfg):
+    if common.relay_off(cfg):
         return None
     if (inp.get('tool_name') or '') in DONE_TOOLS:
         run, agent, sid = _who(cfg, inp)
@@ -109,7 +109,7 @@ def pre_tool(cfg, inp):
 def pre_agent(cfg, inp):
     """Decision 43: a sub-agent spawn registers a task (and a contract), in a relay run. Prints nothing: the spawn
     goes ahead as it was asked for, whatever Seeker answers."""
-    if common.local_mode(cfg) or (inp.get('tool_name') or '') not in AGENT_TOOLS:
+    if common.relay_off(cfg) or (inp.get('tool_name') or '') not in AGENT_TOOLS:
         return None
     run, agent, sid = _who(cfg, inp)
     if not relay_hooks.in_relay(cfg, run, agent, sid):
@@ -122,7 +122,7 @@ def post_tool(cfg, inp):
     Decision 30: after a test-looking Bash command, remember it, its exit code and last output line; after a done (or
     a finished release) refused for evidence, return the context that quotes that command so the agent can call done
     with it. Returns the hook output, or None (nothing printed)."""
-    if common.local_mode(cfg):
+    if common.relay_off(cfg):
         return None
     tool = inp.get('tool_name') or ''
     args = inp.get('tool_input') if isinstance(inp.get('tool_input'), dict) else {}
@@ -193,7 +193,7 @@ def main():
     out = None
     if mode == 'session-start':
         common.start_local_server(cfg)
-        if common.local_mode(cfg):
+        if common.relay_off(cfg):
             print(json.dumps(_context('SessionStart', RECALL.format(sid=sid))))
             return
         run, agent = common.run_id(cfg, sid), common.agent_name(cfg, sid)
@@ -207,7 +207,7 @@ def main():
         out = _context('SessionStart', text + ('\n\n' + block if block else ''))
     elif mode == 'subagent-start':
         upload(cfg, dict(inp, agent_transcript_path=None), SYNC_S - 1)
-        if common.local_mode(cfg):
+        if common.relay_off(cfg):
             print(json.dumps(_context('SubagentStart', SUBAGENT.format(sid=sid))))
             return
         run = common.run_id(cfg, sid)

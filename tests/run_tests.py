@@ -1984,7 +1984,7 @@ def test_local_mode(seeker):
     for call, fixtures, label in ((hook, ci, 'Claude'), (chook, xi, 'Codex')):
         for source in ('file', 'environment'):
             h = home if source == 'file' else os.path.join(WORK, 'home-local-' + label)
-            env = base_env(seeker.url, h, CTRLB_RUN='local-run')
+            env = base_env(seeker.url, h)
             if source == 'environment':
                 env['CTRLB_MODE'] = 'local'
             seeker.reset()
@@ -2019,6 +2019,132 @@ def test_local_mode(seeker):
                        input=json.dumps(dict(run='local-run', agent='test-agent', rel='test.txt', text='test', hash='test')),
                        capture_output=True, text=True, env=env, timeout=5)
     check('local mode: pending detached artifact poster sends no Relay request', p.returncode == 0 and not seeker.calls)
+
+
+def test_local_relay(seeker):
+    with mock.patch.dict(os.environ, {}, clear=True):
+        local = dict(mode='local', run='saved-run')
+        for value in (None, '', '   ', '${CTRLB_RUN}', ' ${CTRLB_RUN} '):
+            env = {} if value is None else {'CTRLB_RUN': value}
+            with mock.patch.dict(os.environ, env, clear=True):
+                check(f'local Relay: unusable environment run {value!r} keeps Relay off despite saved run',
+                      common.relay_off(local))
+                check(f'hosted Relay: environment run {value!r} does not disable Relay',
+                      not common.relay_off(dict(mode='hosted')))
+        with mock.patch.dict(os.environ, CTRLB_RUN=' shared-run '):
+            check('local Relay: trimmed environment run enables Relay', not common.relay_off(local))
+
+    main, sub = setup_transcripts()
+    ci = inputs(main, sub)
+    _, cm, cs = setup_codex()
+    xi = cinputs(cm, cs)
+    run, agent = 'shared-run', 'builder-1'
+    prefix = f'/ai/relay/{common.DEFAULT_DATASET}/runs/{run}/'
+    for call, fixtures, label in ((hook, ci, 'Claude'), (chook, xi, 'Codex')):
+        for source in ('file', 'environment'):
+            home = os.path.join(WORK, 'home-relay-' + label + '-' + source)
+            os.makedirs(home, exist_ok=True)
+            if source == 'file':
+                with open(os.path.join(home, 'config.json'), 'w') as fh:
+                    json.dump(dict(mode='local', run='saved-run'), fh)
+            env = base_env(seeker.url, home, CTRLB_RUN=run, CTRLB_AGENT=agent)
+            if source == 'environment':
+                env['CTRLB_MODE'] = 'local'
+            tag = f'{label} local Relay {source}'
+            seeker.reset()
+            p, _ = call('session-start', fixtures['session_start'], env)
+            ctx = out_of(p).get('additionalContext', '')
+            check(tag + ': session rule names environment run and agent with recall', p.returncode == 0
+                  and f'run id is {run}' in ctx and f'agent id is {agent}' in ctx
+                  and 'search_sessions' in ctx and registered_rule(ctx))
+            reads = sorted(c['path'].split('?')[0].rsplit('/', 1)[-1] for c in seeker.calls
+                           if c['path'].startswith(prefix) and c['method'] == 'GET')
+            check(tag + ': starts local server probe and reads Relay record',
+                  any(c['path'] == '/healthz' for c in seeker.calls)
+                  and reads == ['artifacts', 'contracts', 'peers', 'peers', 'tasks']
+                  and f'CtrlB Relay record of run {run}' in ctx)
+            p, _ = call('subagent-start', fixtures['subagent_start'], env)
+            ctx = out_of(p).get('additionalContext', '')
+            subagent = agent + (':agent-' + fixtures['subagent_start']['agent_id'] if label == 'Claude' else ':' + CSUB)
+            check(tag + ': subagent gets Relay rule and own agent id', p.returncode == 0
+                  and f'run id is {run}' in ctx and f'agent id is {subagent}' in ctx)
+
+            workspace = os.path.join(home, 'workspace')
+            os.makedirs(os.path.join(workspace, 'src'), exist_ok=True)
+            with open(os.path.join(workspace, 'src', 'parse.py'), 'w') as fh:
+                fh.write('test\n')
+            base = dict(fixtures['session_start'], cwd=workspace)
+            edit = dict(base, tool_name='Write', tool_input={'file_path': 'src/parse.py', 'content': 'test'})
+            if label == 'Codex':
+                edit.update(tool_name='apply_patch', tool_input='*** Begin Patch\n*** Update File: src/parse.py\n@@\n-a\n+b\n*** End Patch')
+            seeker.reset()
+            seeker.state['check'] = 'enforce'
+            try:
+                p, _ = call('pre-tool', edit, env)
+            finally:
+                seeker.state['check'] = 'allow'
+            checks = [c for c in seeker.calls if c['path'] == prefix + 'check']
+            check(tag + ': edit checks local Relay endpoint with run, agent and path', len(checks) == 1
+                  and checks[0]['body'].get('agent') == agent and checks[0]['body'].get('paths') == ['src/parse.py'])
+            check(tag + ': edit obeys enforcement answer', p.returncode == 0
+                  and out_of(p).get('permissionDecision') == 'deny')
+
+            if label == 'Claude':
+                seeker.reset()
+                spawn = dict(base, tool_name='Agent', tool_input={'description': 'Fix parser',
+                             'prompt': 'Fix src/parse.py. Test: `python3 -m unittest`.\n\nInterface:\nparse(text) -> list[str]'})
+                p, _ = call('pre-agent', spawn, env)
+                briefs = [c for c in seeker.calls if c['path'] == prefix + 'briefs']
+                check(tag + ': pre-agent registers task and contract', p.returncode == 0 and not p.stdout.strip()
+                      and len(briefs) == 2 and briefs[0]['body'].get('paths') == ['src/parse.py']
+                      and briefs[1]['body'].get('resource', '').startswith('contract:'))
+                p, _ = call('post-tool', dict(base, tool_name='Bash', tool_input={'command': 'python3 -m unittest'},
+                                            tool_response={'exit_code': 0, 'stdout': 'OK'}), env)
+                with mock.patch.object(common, 'HOME', home):
+                    last = common.LastTest(run, agent).get()
+                check(tag + ': post-tool keeps test evidence', p.returncode == 0 and last
+                      and last.get('command') == 'python3 -m unittest' and last.get('exit_code') == 0)
+                call('post-tool', edit, env)
+
+            with open(base['transcript_path'], 'a') as fh:
+                if label == 'Claude':
+                    fh.write(line('assistant', 'Finished this turn.', '2026-09-06T12:10:00.000Z'))
+                else:
+                    fh.write(citem(dict(type='message', role='assistant', content=[
+                        dict(type='output_text', text='Finished this turn.')]), '2026-09-06T12:10:00.000Z'))
+            seeker.reset()
+            p, _ = call('session-end', dict(base, hook_event_name='SessionEnd'), env)
+            handoffs = [c for c in seeker.calls if c['path'] == prefix + 'handoffs']
+            check(tag + ': session end hands off all holds and still uploads', p.returncode == 0 and len(handoffs) == 1
+                  and handoffs[0]['body'].get('agent') == agent and handoffs[0]['body'].get('all') is True
+                  and handoffs[0]['body'].get('to') == '' and bool(seeker.rows))
+            if label == 'Claude':
+                text = handoffs[0]['body'].get('text', '') if handoffs else ''
+                check(tag + ': handoff includes edit and test evidence',
+                      'src/parse.py' in text and 'python3 -m unittest' in text)
+
+            # An environment run is required even when the config has a saved run.
+            for value in (None, '', '   ', '${CTRLB_RUN}'):
+                offenv = dict(env)
+                offenv.pop('CTRLB_RUN')
+                if value is not None:
+                    offenv['CTRLB_RUN'] = value
+                seeker.reset()
+                p, _ = call('session-start', base, offenv)
+                ctx = out_of(p).get('additionalContext', '')
+                call('pre-tool', edit, offenv)
+                call('session-end', dict(base, hook_event_name='SessionEnd'), offenv)
+                check(tag + f': unusable run {value!r} preserves recall and zero Relay calls', p.returncode == 0
+                      and 'search_sessions' in ctx and 'Relay' not in ctx
+                      and not any('/ai/relay/' in c['path'] for c in seeker.calls))
+
+    seeker.reset()
+    env = base_env(seeker.url, os.path.join(WORK, 'home-local-poster'), CTRLB_MODE='local', CTRLB_RUN=run)
+    p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'lib', 'relay_hooks.py'), 'post-artifact'],
+                       input=json.dumps(dict(run=run, agent=agent, rel='test.txt', text='test', hash='test')),
+                       capture_output=True, text=True, env=env, timeout=5)
+    check('local Relay: detached artifact poster sends to local run', p.returncode == 0 and len(seeker.calls) == 1
+          and seeker.calls[0]['path'] == prefix + 'posts' and seeker.calls[0]['body'].get('agent') == agent)
 
 
 def local_stub(home):
@@ -2512,6 +2638,7 @@ def main():
     test_codex_rows(seeker)
     test_codex_hooks(seeker)
     test_local_mode(seeker)
+    test_local_relay(seeker)
     test_local_startup(seeker)
     test_local_health_answers(seeker)
     test_local_binary_path()
