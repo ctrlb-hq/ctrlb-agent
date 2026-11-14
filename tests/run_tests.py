@@ -2345,11 +2345,15 @@ def test_local_mode(seeker):
     with mock.patch.object(common, 'HOME', home), mock.patch.dict(os.environ, {}, clear=True):
         check('local mode: config file enables local mode', common.local_mode(common.config()))
         with mock.patch.dict(os.environ, CTRLB_MODE='hosted'):
-            check('local mode: file local mode keeps Relay off despite environment hosted', common.local_mode(common.config()))
+            cfg = common.config()
+            check('local mode: environment hosted overrides file local and keeps Relay enabled',
+                  cfg['mode'] == 'hosted' and not common.local_mode(cfg) and not common.relay_off(cfg))
         with mock.patch.object(common, '_file_config', return_value={}):
             check('local mode: defaults to hosted', not common.local_mode(common.config()))
             with mock.patch.dict(os.environ, CTRLB_MODE='local'):
                 check('local mode: environment enables local mode', common.local_mode(common.config()))
+                check('local mode: resolved config controls mode without re-reading the environment',
+                      not common.local_mode(dict(mode='hosted')))
 
     ci = inputs(main, sub)
     _, cm, cs = setup_codex()
@@ -2386,6 +2390,46 @@ def test_local_mode(seeker):
                       p.returncode == 0 and not p.stdout.strip())
             check(f'{label} local {source}: no Relay HTTP calls', not any('/ai/relay/' in c['path'] for c in seeker.calls))
             check(f'{label} local {source}: session upload still runs', bool(seeker.rows))
+        with open(config_path) as fh:
+            hosted_override = dict(json.load(fh), run='saved-hosted-run')
+        with open(config_path, 'w') as fh:
+            json.dump(hosted_override, fh)
+        env = base_env(seeker.url, home, CTRLB_MODE='hosted')
+        seeker.reset()
+        p, _ = call('session-start', fixtures['session_start'], env)
+        check(f'{label} hosted override: local config retains hosted Relay session rules',
+              p.returncode == 0 and registered_rule(out_of(p).get('additionalContext', '')))
+        edit = dict(fixtures['session_start'], tool_name='Write',
+                    tool_input={'file_path': 'src/parse.py', 'content': 'test'})
+        if label == 'Codex':
+            edit.update(tool_name='apply_patch', tool_input='*** Begin Patch\n*** Update File: src/parse.py\n@@\n-a\n+b\n*** End Patch')
+        seeker.state['check'] = 'enforce'
+        try:
+            p, _ = call('pre-tool', edit, env)
+        finally:
+            seeker.state['check'] = 'allow'
+        check(f'{label} hosted override: local config retains hosted edit enforcement',
+              any(c['path'].endswith('/check') for c in seeker.calls)
+              and out_of(p).get('permissionDecision') == 'deny')
+        if label == 'Claude':
+            # Spawn registration requires a prompt path that exists under the session's cwd.
+            workspace = os.path.join(home, 'workspace')
+            os.makedirs(os.path.join(workspace, 'src'), exist_ok=True)
+            with open(os.path.join(workspace, 'src', 'parse.py'), 'w') as fh:
+                fh.write('test\n')
+            spawn = dict(edit, cwd=workspace, tool_name='Agent', tool_input={'description': 'Fix parser',
+                         'prompt': 'Fix src/parse.py. Test: `python3 -m unittest`.'})
+            seeker.reset()
+            p, _ = call('pre-agent', spawn, env)
+            briefs = [c for c in seeker.calls
+                      if c['path'] == f'/ai/relay/{common.DEFAULT_DATASET}/runs/saved-hosted-run/briefs']
+            check('Claude hosted override: local config retains hosted spawn registration',
+                  p.returncode == 0 and len(briefs) == 1 and briefs[0]['method'] == 'POST'
+                  and briefs[0]['body'].get('paths') == ['src/parse.py']
+                  and briefs[0]['body'].get('cwd') == workspace)
+        p, _ = call('session-end', dict(fixtures['session_start'], hook_event_name='SessionEnd'), env)
+        check(f'{label} hosted override: local config retains hosted session-end handoff',
+              p.returncode == 0 and any(c['path'].endswith('/handoffs') for c in seeker.calls))
     seeker.reset()
     env = base_env(seeker.url, home, CTRLB_MODE='local')
     p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'lib', 'relay_hooks.py'), 'post-artifact'],
@@ -2556,11 +2600,14 @@ def local_stub(home):
     """Synthetic ctrlb executable; writes only test state and serves health until the test stops it."""
     path = os.path.join(home, 'bin', 'ctrlb')
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    source = '''import http.server, json, os, sys
+    source = '''import http.server, json, os, sys, time
 home = os.environ['CTRLB_HOME']
+if sys.argv[1] == 'serve':
+    with open(os.path.join(home, 'serve-invocations.jsonl'), 'a') as fh:
+        fh.write(json.dumps(dict(pid=os.getpid(), cwd=os.getcwd())) + '\\n')
 with open(os.path.join(home, 'invoked.json'), 'w') as fh:
     json.dump(dict(argv=sys.argv[1:], pid=os.getpid(), detached=os.getsid(0) == os.getpid(),
-                   stdin=os.read(0, 1).decode()), fh)
+                   stdin=os.read(0, 1).decode(), cwd=os.getcwd()), fh)
 if sys.argv[1] == 'init':
     print('test-key-not-a-real-key')
     print('test-key-not-a-real-key', file=sys.stderr)
@@ -2573,6 +2620,7 @@ if sys.argv[1] == 'init':
                        dataset='agent_sessions', mode='local'), fh)
     os.chmod(os.path.join(home, 'config.json'), 0o600)
 elif sys.argv[1] == 'serve' and not os.environ.get('STUB_NO_HEALTH'):
+    time.sleep(float(os.environ.get('STUB_START_DELAY', '0')))
     class H(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args): pass
         def do_GET(self):
@@ -2606,6 +2654,7 @@ def test_local_startup(seeker):
             check(f'{label} startup: detached serve retains CTRLB_HOME, null stdin, becomes healthy',
                   p.returncode == 0 and info.get('argv') == ['serve'] and info.get('detached') and info.get('stdin') == ''
                   and dt < 3.5 and common.local_health(dict(url=env['CTRLB_URL'], key=KEY)) == 200)
+            check(f'{label} startup: detached serve uses CtrlB home as its working directory', info.get('cwd') == home)
         finally:
             if os.path.exists(marker):
                 os.kill(json.loads(read(marker))['pid'], signal.SIGTERM)
@@ -2642,6 +2691,90 @@ def test_local_startup(seeker):
           all(common.loopback_url({'url': u}) for u in ('http://127.0.0.1:7531', 'http://localhost:7531'))
           and not any(common.loopback_url({'url': u}) for u in ('http://localhost.example.test', 'http://127.0.0.2',
                                                                'file://localhost', 'http://[bad')))
+
+
+def test_local_startup_concurrent():
+    home = os.path.join(WORK, 'home-start-concurrent')
+    binary = local_stub(home)
+    port = closed_port()
+    env = base_env(f'http://127.0.0.1:{port}', home, CTRLB_MODE='local', CTRLB_BIN=binary,
+                   STUB_PORT=str(port), STUB_START_DELAY='0.4')
+    project = os.path.join(WORK, 'startup-project')
+    os.makedirs(project, exist_ok=True)
+    launcher = ('import sys; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib')) + '); '
+                'import common; common.start_local_server(common.config())')
+    processes = []
+    marker = os.path.join(home, 'serve-invocations.jsonl')
+    try:
+        for _ in range(2):
+            processes.append(subprocess.Popen([sys.executable, '-I', '-c', launcher], cwd=project, env=env,
+                                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+        answers = [p.communicate(timeout=8) for p in processes]
+        invocations = [json.loads(line) for line in read(marker).decode().splitlines()] if os.path.exists(marker) else []
+        check('local startup concurrent: two processes spawn one healthy server from CtrlB home',
+              all(p.returncode == 0 for p in processes) and all(a == (b'', b'') for a in answers)
+              and len(invocations) == 1 and invocations[0]['cwd'] == home
+              and common.local_health(dict(url=env['CTRLB_URL'], key=KEY)) == 200)
+        mutex = os.path.join(home, 'serve.lo' + 'ck')
+        check('local startup concurrent: spawn mutex is private', os.path.isfile(mutex)
+              and stat.S_IMODE(os.stat(mutex).st_mode) == 0o600)
+    finally:
+        for p in processes:
+            if p.poll() is None:
+                p.kill()
+                p.communicate()
+        if os.path.exists(marker):
+            for line in read(marker).decode().splitlines():
+                try:
+                    os.kill(json.loads(line)['pid'], signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+
+
+def test_local_request_proxy():
+    def server(calls):
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                calls.append((self.command, self.path, self.headers.get('Authorization')))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"ok": true}')
+
+            do_POST = do_DELETE = do_GET
+
+        httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        return httpd
+
+    direct, proxied = [], []
+    target, proxy = server(direct), server(proxied)
+    proxy_url = f'http://127.0.0.1:{proxy.server_address[1]}'
+    env = dict(http_proxy=proxy_url, HTTP_PROXY=proxy_url, https_proxy=proxy_url, HTTPS_PROXY=proxy_url,
+               no_proxy='', NO_PROXY='')
+    try:
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(common.urllib.request, '_opener', None):
+            answers = []
+            for host in ('127.0.0.1', 'localhost'):
+                cfg = dict(mode='local', url=f'http://{host}:{target.server_address[1]}', key=KEY)
+                for method, path in (('POST', '/upload'), ('POST', '/check'), ('POST', '/relay'),
+                                     ('DELETE', '/handoff'), ('GET', '/healthz')):
+                    answers.append(common.request(cfg, method, path, body={} if method != 'GET' else None))
+            check('local request proxy: all loopback requests reach the server and the proxy receives nothing',
+                  len(direct) == 10 and not proxied and all(a == {'ok': True} for a in answers)
+                  and all(c[2] == 'Bearer ' + KEY for c in direct))
+            common.request(dict(mode='hosted', url=f'http://127.0.0.1:{target.server_address[1]}', key=KEY),
+                           'GET', '/hosted')
+            common.request(dict(mode='local', url='http://example.test', key=KEY), 'GET', '/remote')
+            check('local request proxy: hosted and non-loopback requests retain proxy behavior',
+                  len(proxied) == 2 and proxied[0][1].endswith('/hosted') and proxied[1][1].endswith('/remote'))
+    finally:
+        for httpd in (target, proxy):
+            httpd.shutdown()
+            httpd.server_close()
 
 
 def test_local_health_answers(seeker):
@@ -2719,8 +2852,8 @@ def test_local_configure_status(seeker):
         check('configure --local: existing CTRLB_HOME is private', stat.S_IMODE(os.stat(home).st_mode) == 0o700)
         path = os.path.join(home, 'config.json')
         cfg = json.loads(read(path)) if os.path.isfile(path) else {}
-        check('configure --local: export reads key from config; MCP URL from config',
-              cfg.get('mcp_url') and cfg['mcp_url'] in p.stdout and 'export CTRLB_KEY="$(' in p.stdout
+        check('configure --local: both exports read config when loaded',
+              cfg.get('mcp_url') and 'export CTRLB_MCP_URL="$(' in p.stdout and 'export CTRLB_KEY="$(' in p.stdout
               and 'python3 -I -c' in p.stdout and 'config.json' in p.stdout)
         exports = '\n'.join(s.strip() for s in p.stdout.splitlines() if s.strip().startswith('export '))
         if exports:
@@ -2728,6 +2861,15 @@ def test_local_configure_status(seeker):
             script = exports + '\n' + 'test "$CTRLB_KEY" = ' + KEY
             q = subprocess.run(['/bin/sh', '-c', script], capture_output=True, text=True, env=env, timeout=5)
             check('configure --local: printed export is executable', q.returncode == 0 and not q.stdout and not q.stderr)
+            hosted = dict(mode='hosted', mcp_url='https://example.test/mcp', key='hosted-test-key')
+            with open(path, 'w') as fh:
+                json.dump(hosted, fh)
+            script = exports + '\ntest "$CTRLB_MCP_URL" = https://example.test/mcp && test "$CTRLB_KEY" = hosted-test-key'
+            q = subprocess.run(['/bin/sh', '-c', script], capture_output=True, text=True, env=env, timeout=5)
+            check('configure --local: saved exports reload hosted URL and key after config switches',
+                  q.returncode == 0 and not q.stdout and not q.stderr)
+            with open(path, 'w') as fh:
+                json.dump(cfg, fh)
     p = subprocess.run([sys.executable, '-I', configure, '--local'], input='', capture_output=True, text=True,
                        env=dict(env, STUB_FAIL='1'), timeout=5)
     check('configure --local: failed init does not reveal output or key', p.returncode != 0 and KEY not in p.stdout + p.stderr)
@@ -2868,6 +3010,137 @@ def test_local_install():
                 code = local_install.main(args)
             versions.append(code == 0 and download.call_args.args[0] == base + '/' + version)
         check('local install: URL templates substitute the requested version or latest', all(versions))
+
+
+def test_local_install_streams():
+    import http.client
+    import io
+    import pathlib
+    import tempfile
+    from contextlib import redirect_stderr
+    import local_install
+
+    filename = 'ctrlb-linux-amd64'
+    base = 'https://example.test/release'
+    with tempfile.TemporaryDirectory(prefix='install-streams-', dir=WORK) as temporary:
+        home = pathlib.Path(temporary)
+        (home / 'bin').mkdir()
+        destination = home / 'bin' / 'ctrlb'
+        destination.write_bytes(b'previous installation')
+        for name, error in (('incomplete', http.client.IncompleteRead(b'partial')),
+                            ('bad-status', http.client.BadStatusLine('invalid status'))):
+            for stage in ('manifest', 'binary'):
+                response = mock.MagicMock()
+                response.__enter__.return_value = response
+                response.read.side_effect = error
+                manifest = io.BytesIO(('0' * 64 + '  ' + filename + '\n').encode())
+                responses = [response] if stage == 'manifest' else [manifest, response]
+                stderr = io.StringIO()
+                with mock.patch.object(local_install, 'target_name', return_value=filename), \
+                        mock.patch.object(local_install, '_open', side_effect=responses), \
+                        mock.patch.dict(os.environ, CTRLB_HOME=str(home)), redirect_stderr(stderr):
+                    try:
+                        code = local_install.main(['--download-url', base])
+                    except http.client.HTTPException:
+                        code = None
+                check(f'local install stream {stage} {name}: protocol errors become install errors and preserve binary',
+                      code == 1 and 'could not download' in stderr.getvalue()
+                      and 'nothing installed' in stderr.getvalue()
+                      and destination.read_bytes() == b'previous installation'
+                      and not list((home / 'bin').glob('.ctrlb-download-*')))
+
+        chunk = b'x' * 8
+        stream = mock.MagicMock()
+        stream.__enter__.return_value = stream
+        stream.read.side_effect = [chunk, chunk, chunk, AssertionError('read beyond size cap')]
+        stderr = io.StringIO()
+        manifest = io.BytesIO(('0' * 64 + '  ' + filename + '\n').encode())
+        with mock.patch.object(local_install, 'target_name', return_value=filename), \
+                mock.patch.object(local_install, 'MAX_BINARY_BYTES', 16, create=True), \
+                mock.patch.object(local_install, '_open', side_effect=[manifest, stream]), \
+                mock.patch.dict(os.environ, CTRLB_HOME=str(home)), redirect_stderr(stderr):
+            try:
+                code = local_install.main(['--download-url', base])
+            except AssertionError:
+                code = None
+        check('local install stream size: stops reading at cap, removes temporary file and preserves binary',
+              code == 1 and stream.read.call_count == 3 and 'download too large; nothing installed' in stderr.getvalue()
+              and destination.read_bytes() == b'previous installation'
+              and not list((home / 'bin').glob('.ctrlb-download-*')))
+
+        manifest = io.BytesIO((hashlib.sha256(chunk).hexdigest() + '  ' + filename + '\n').encode())
+        with mock.patch.object(local_install, 'target_name', return_value=filename), \
+                mock.patch.object(local_install, 'MAX_BINARY_BYTES', len(chunk), create=True), \
+                mock.patch.object(local_install, '_open', side_effect=[manifest, io.BytesIO(chunk)]), \
+                mock.patch.object(local_install.subprocess, 'run', return_value=mock.Mock(returncode=0)):
+            local_install.install_binary(base, str(home))
+        check('local install stream size: binary exactly at the cap is accepted', destination.read_bytes() == chunk)
+
+
+def test_local_install_download_errors():
+    import pathlib
+    import tempfile
+
+    filename = 'ctrlb-linux-amd64'
+    body = b'x' * (64 * 1024 + 1)
+    manifest = (hashlib.sha256(body).hexdigest() + '  ' + filename + '\n').encode()
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            case, name = self.path.strip('/').split('/')
+            is_manifest = name == 'SHA256SUMS'
+            if case == ('manifest-status' if is_manifest else 'binary-status'):
+                self.connection.sendall(b'garbage status line\r\n\r\n')
+            elif case == ('manifest-chunk' if is_manifest else 'binary-chunk'):
+                self.connection.sendall(b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10\r\ncut')
+            else:
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(manifest if is_manifest else body)
+            self.close_connection = True
+
+    httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        with tempfile.TemporaryDirectory(prefix='download-errors-', dir=WORK) as temporary:
+            for case in ('manifest-status', 'manifest-chunk', 'binary-status', 'binary-chunk', 'oversized'):
+                home = pathlib.Path(temporary, case)
+                (home / 'bin').mkdir(parents=True)
+                destination = home / 'bin' / 'ctrlb'
+                destination.write_bytes(b'previous installation')
+                env = base_env('', str(home))
+                # A smaller cap exercises the boundary without a large fixture.
+                launcher = ('import sys, platform, runpy; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib')) + '); '
+                            'import local_install; local_install.MAX_BINARY_BYTES = 64 * 1024; '
+                            'platform.system = lambda: "Linux"; platform.machine = lambda: "x86_64"; '
+                            'runpy.run_path(' + repr(os.path.join(ROOT, 'install.py')) + ', run_name="__main__")')
+                base = f'http://127.0.0.1:{httpd.server_address[1]}/{case}'
+                p = subprocess.run([sys.executable, '-I', '-c', launcher, '--local', '--download-url', base],
+                                   capture_output=True, text=True, env=env, timeout=10)
+                message = ('download too large' if case == 'oversized' else
+                           'could not download or read SHA256SUMS' if case.startswith('manifest') else
+                           'could not download the CtrlB binary')
+                check(f'local install download {case}: clear error, no traceback or partial replacement',
+                      p.returncode != 0 and message in p.stderr and 'nothing installed' in p.stderr
+                      and 'Traceback' not in p.stderr and destination.read_bytes() == b'previous installation'
+                      and not list((home / 'bin').glob('.ctrlb-download-*')))
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_local_documentation():
+    doc = read(os.path.join(ROOT, 'docs', 'local-mode.md')).decode()
+    commands = [line for line in doc.splitlines() if line.startswith('ctrlb push ')]
+    check('local docs: push uses hosted environment key or private key file without a key argument',
+          commands and not any(re.search(r'--key(?:\s|=)', c) for c in commands)
+          and 'CTRLB_HOSTED_KEY' in doc and '--key-file' in doc and 'group/world readable' in doc
+          and 'getpass' in doc)
+    check('local docs: existing binary setup documents configure local, port and binary override',
+          'python3 -I bin/configure.py --local' in doc and 'CTRLB_BIN' in doc and '--port N' in doc)
 
 
 def test_hardening(seeker):
@@ -3046,12 +3319,17 @@ def main():
     test_local_session_context(seeker)
     test_local_relay(seeker)
     test_local_startup(seeker)
+    test_local_startup_concurrent()
+    test_local_request_proxy()
     test_local_health_answers(seeker)
     test_local_binary_path()
     test_local_configure_status(seeker)
     test_codex_install()
     test_root_install()
     test_local_install()
+    test_local_install_streams()
+    test_local_install_download_errors()
+    test_local_documentation()
     test_recall_search_scope()
     test_project_backup_exclusive()
     test_project_list_fences()

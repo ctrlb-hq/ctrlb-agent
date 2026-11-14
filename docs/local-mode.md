@@ -27,6 +27,8 @@ The installer verifies the binary's SHA-256 before replacing anything, installs 
 
 `CTRLB_HOME` changes the location of the binary, config and database. `--port N` chooses the local server port (default 7531). Add the `bin` folder under your CtrlB home to your shell's `PATH` to run `ctrlb` directly. Initialization saves the local config with mode 0600; an existing config is backed up before it is replaced.
 
+Already have the binary? Run `python3 -I bin/configure.py --local` from this clone to initialize it and print the same config-reading exports shown below. Add `--port N` to choose the port. Set `CTRLB_BIN` to the executable's path to override binary discovery for configuration, session start and `bin/status.py`; otherwise they look in `<CTRLB_HOME>/bin/ctrlb`, then absolute entries in `PATH`.
+
 ## Connect your agent
 
 For Claude Code, install the plugin:
@@ -93,10 +95,18 @@ Local mode is for one machine and one user. It has no team search, search by mea
 
 ## Move to hosted CtrlB
 
-When you have a hosted CtrlB URL and key, run this in your terminal:
+When you have a hosted CtrlB URL and key, read the key with a hidden prompt, then run this in your terminal. The key stays out of command arguments and shell history:
 
 ```sh
-ctrlb push --url "<hosted>" --key "<hosted key>" --dataset "<name>"
+export CTRLB_HOSTED_KEY="$(python3 -I -c 'import getpass; print(getpass.getpass("Hosted CtrlB key: "))')"
+ctrlb push --url "<hosted>" --dataset "<name>"
+unset CTRLB_HOSTED_KEY
+```
+
+`ctrlb push` reads `CTRLB_HOSTED_KEY`, or you can supply `--key-file PATH` instead. The file must not be group/world readable (use mode 0600). For a key already saved in such a file:
+
+```sh
+ctrlb push --url "<hosted>" --key-file "$HOME/.ctrlb/hosted-key" --dataset "<name>"
 ```
 
 This copies the stored session rows, keeping their timestamps, then backs up the local config and switches it to hosted CtrlB. The local SQLite file stays on this machine. Interrupted uploads can be resumed by running the same command again. `--dry-run` shows the tables and counts without uploading.

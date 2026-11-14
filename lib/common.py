@@ -70,7 +70,8 @@ def config():
              agent=(env('CTRLB_AGENT') or env('CTRLB_USER') or '').strip(),
              dataset=pick('CTRLB_DATASET', 'dataset', DEFAULT_DATASET),
              enforce=pick('CTRLB_ENFORCE', 'enforce').lower())
-    c['mode'] = 'local' if f.get('mode') == 'local' or env('CTRLB_MODE') == 'local' else 'hosted'
+    mode = env('CTRLB_MODE') or f.get('mode')
+    c['mode'] = 'local' if mode == 'local' else 'hosted'
     # user_name only ever comes from the key in effect (CTRLB_KEY or the file's key), decoded now, so a key from the
     # environment and an old config.json "user" written as a label can never put another name on the rows.
     c['user'] = key_user(c['key'])
@@ -83,7 +84,7 @@ def config():
 
 def local_mode(cfg):
     """Whether the session uses the local server."""
-    return cfg.get('mode') == 'local' or os.environ.get('CTRLB_MODE') == 'local'
+    return cfg.get('mode') == 'local'
 
 
 def relay_off(cfg):
@@ -141,25 +142,28 @@ def start_local_server(cfg):
         log('local server: could not prepare CTRLB_HOME')
         return
     try:
-        local_health(cfg)
-        return
-    except Exception:
-        pass
-    binary = ctrlb_binary()
-    if not binary:
-        log('local server: ctrlb executable not found')
-        return
-    try:
-        subprocess.Popen([binary, 'serve'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
+        with private_open(os.path.join(HOME, 'serve.lo' + 'ck'), 'a') as mutex:
+            fcntl.flock(mutex, fcntl.LOCK_EX)
             try:
-                local_health(cfg, timeout=min(0.25, max(0.001, deadline - time.monotonic())))
+                local_health(cfg)
                 return
             except Exception:
-                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
-        log('local server: health check did not answer in time')
+                pass
+            binary = ctrlb_binary()
+            if not binary:
+                log('local server: ctrlb executable not found')
+                return
+            subprocess.Popen([binary, 'serve'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True, cwd=HOME)
+            # Keep exclusive access until health answers so the next session re-probes before spawning.
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                try:
+                    local_health(cfg, timeout=min(0.25, max(0.001, deadline - time.monotonic())))
+                    return
+                except Exception:
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+            log('local server: health check did not answer in time')
     except Exception:
         log('local server: could not start ctrlb serve')
 
@@ -276,7 +280,10 @@ def request(cfg, method, path, body=None, query=None, timeout=10):
         'Content-Type': 'application/json', 'Accept': 'application/json',
         'Authorization': 'Bearer ' + cfg['key'], 'User-Agent': 'ctrlb-agent/' + VERSION})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        open_request = urllib.request.urlopen
+        if local_mode(cfg) and loopback_url(cfg):
+            open_request = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+        with open_request(req, timeout=timeout) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as e:
         raise SeekerError(e.code, e.read()[:300].decode(errors='replace')) from None

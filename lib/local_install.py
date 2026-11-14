@@ -1,6 +1,7 @@
 """Download and verify the standalone CtrlB binary using the standard library."""
 import argparse
 import hashlib
+import http.client
 import os
 import platform
 import re
@@ -9,6 +10,8 @@ import sys
 import tempfile
 import urllib.parse
 import urllib.request
+
+MAX_BINARY_BYTES = 512 * 1024 * 1024
 
 
 class InstallError(Exception):
@@ -59,7 +62,7 @@ def _checksum(base, filename):
         if len(manifest) > 1024 * 1024:
             raise InstallError('SHA256SUMS is too large; nothing installed')
         lines = manifest.decode('ascii').splitlines()
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, http.client.HTTPException):
         raise InstallError('could not download or read SHA256SUMS; nothing installed') from None
     matches = []
     for line in lines:
@@ -90,15 +93,19 @@ def install_binary(base, home, port=None):
         with tempfile.NamedTemporaryFile(prefix='.ctrlb-download-', dir=bindir, delete=False) as output:
             temporary = output.name
             digest = hashlib.sha256()
+            downloaded = 0
             try:
                 with _open(base + '/' + filename) as response:
                     while True:
                         chunk = response.read(64 * 1024)
                         if not chunk:
                             break
+                        downloaded += len(chunk)
+                        if downloaded > MAX_BINARY_BYTES:
+                            raise InstallError('download too large; nothing installed')
                         output.write(chunk)
                         digest.update(chunk)
-            except (OSError, ValueError):
+            except (OSError, ValueError, http.client.HTTPException):
                 raise InstallError('could not download the CtrlB binary; nothing installed') from None
         if digest.hexdigest() != expected:
             raise InstallError('SHA-256 checksum mismatch; download deleted, nothing installed')

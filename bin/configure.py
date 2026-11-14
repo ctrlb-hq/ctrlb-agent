@@ -34,14 +34,14 @@ def configure_local(port):
         sys.exit('ctrlb init failed; check the binary and CTRLB_HOME')
     if p.returncode:
         sys.exit('ctrlb init failed; check the binary and CTRLB_HOME')
-    path = os.path.join(common.HOME, 'config.json')
     c = common._file_config()
     if c.get('mode') != 'local' or not c.get('mcp_url') or not c.get('key'):
         sys.exit('ctrlb init did not write a local config.json')
     print('Local mode configured. Add these to your shell profile for Claude Code:')
-    print('  export CTRLB_MCP_URL=' + shlex.quote(c['mcp_url']))
-    code = 'import json; print(json.load(open(' + repr(os.path.abspath(path)) + '))["key"])'
-    print('  export CTRLB_KEY="$(python3 -I -c ' + shlex.quote(code) + ')"')
+    for variable, field in [('CTRLB_MCP_URL', 'mcp_url'), ('CTRLB_KEY', 'key')]:
+        code = ('import json, os; print(json.load(open(os.path.join(os.environ.get("CTRLB_HOME") '
+                'or os.path.expanduser("~/.ctrlb"), "config.json")))["' + field + '"])')
+        print('  export ' + variable + '="$(python3 -I -c ' + shlex.quote(code) + ')"')
 
 
 def save(path, c):
