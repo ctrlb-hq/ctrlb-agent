@@ -1,5 +1,5 @@
 {
-  "synthetic": "Built by hand from relay-plan section 4 (Sessions), not recorded from a running Seeker. Replace with a recording once Seeker Task 4 serves the route.",
+  "synthetic": "Written by hand, not recorded from a running Seeker.",
   "route": "POST /ai/sessions/{dataset}/records",
   "limits": {"max_rows": 500, "max_bytes": 4000000},
   "responses": {

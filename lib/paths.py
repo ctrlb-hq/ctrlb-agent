@@ -1,4 +1,4 @@
-"""Resource keys of CtrlB Relay (relay-plan section 3, decision 6), identical to Seeker's internal/pkg/relay Key. Both
+"""Resource keys of CtrlB Relay, identical to Seeker's internal/pkg/relay Key. Both
 sides pass the same table, tests/fixtures/keys.json (copied from Seeker's tests/fixtures/keys.json).
 
 key(resource, cwd) -> (key, kind). The resource is trimmed of surrounding whitespace. One that already carries a prefix

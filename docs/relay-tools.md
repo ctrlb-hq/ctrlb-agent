@@ -181,7 +181,7 @@ Answer when another agent holds a registered task, or it is finished: the answer
 
 When no task is free, `free_tasks` is `[]` and the message says `there is no free task in this run`: post a note saying you have no task and stop. The run view counts such agents as `idle_agents`.
 
-Claims do not wait. A claim that sends `wait_s` is refused (HTTP 400): `wait_s is no longer accepted on claim: a refused claim lists free_tasks to claim instead; to wait for news use peers with wait_s`. In the benchmark the task an agent waited for was finished, not released.
+Claims do not wait. A claim that sends `wait_s` is refused (HTTP 400): `wait_s is no longer accepted on claim: a refused claim lists free_tasks to claim instead; to wait for news use peers with wait_s`.
 
 Answer to `claim(resource="task 03 median", takeover=true)` when agent-b stopped while holding it (`tasks` showed it `stalled`): you hold it and its files. Read its evidence and notes (`tasks`, `briefs`, `peers`) and continue it.
 
@@ -445,7 +445,7 @@ release(resource="slot:devserver")  # after
 
 ## The three agent rules
 
-These are the rules from the research, worded for the relay tools. Paste them into the agent's system prompt or `AGENTS.md`, or run `/ctrlb-agent:relay <run id>` in Claude Code, which loads them as a skill.
+These are the rules for agents that share a run, worded for the relay tools. Paste them into the agent's system prompt or `AGENTS.md`, or run `/ctrlb-agent:relay <run id>` in Claude Code, which loads them as a skill.
 
 ```text
 1. Other agents are working in this same directory right now. Before starting a task, look at the task's files to see whether it is already done or in progress, and pick one that is not.
@@ -464,7 +464,7 @@ done
 wait
 ```
 
-In the research, rule 3 is the one that cut duplicate work from 27 of 96 tasks to 1. Register the run's tasks first, from the orchestrator or the script that starts the agents (`task(name, text, paths)` for each, or `POST .../briefs` with `paths`): a claim of a registered task then takes the task and its files in one step, so no two agents can each hold half of it, and a misspelled task name is refused with the registered one as `suggestion`. The files are handed back when the task is released, so another agent can edit them later; the task, released with `finished=true`, is what stops another agent from doing it again.
+Rule 3 is the one that stops two agents doing the same task. Register the run's tasks first, from the orchestrator or the script that starts the agents (`task(name, text, paths)` for each, or `POST .../briefs` with `paths`): a claim of a registered task then takes the task and its files in one step, so no two agents can each hold half of it, and a misspelled task name is refused with the registered one as `suggestion`. The files are handed back when the task is released, so another agent can edit them later; the task, released with `finished=true`, is what stops another agent from doing it again.
 
 To have agents share what they read, add this paragraph to the rules:
 

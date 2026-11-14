@@ -1,5 +1,5 @@
 {
-  "synthetic": "Built by hand from relay-plan section 4 (Relay, runs list), not recorded from a running Seeker. Replace with a recording once Seeker Task 4 serves the route.",
+  "synthetic": "Written by hand, not recorded from a running Seeker.",
   "route": "GET /ai/relay/{dataset}/runs?status=all&limit=",
   "responses": {
     "ok": {"status": 200, "body": {"runs": [
