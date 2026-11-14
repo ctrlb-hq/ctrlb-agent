@@ -88,7 +88,7 @@ Even in `enforce` mode:
 - The session-start rule and the `AGENTS.md` / `CLAUDE.md` block ask the agent to search the record. They do not force it. An agent can still answer from its context or grep first.
 - Codex runs no hook until a person approves it with `/hooks`, and again after every change to a hook. Until then a Codex session gets no session-start rule, and the `AGENTS.md` block is the only rule it reads.
 - The block reaches only the sessions that read that file: Codex reads `AGENTS.md` in the project, Claude Code reads `CLAUDE.md`. A session started in another directory does not see it.
-- `init` refuses a file with one CtrlB marker and no pair, or with two blocks. Fix the markers by hand and run it again.
+- `init` refuses a file with one CtrlB marker and no pair, or with two blocks, and a file without a block that ends inside a code block that is never closed. Fix the file by hand and run it again.
 
 ## Redaction
 

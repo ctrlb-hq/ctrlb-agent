@@ -8,7 +8,7 @@ about earlier work. It sits between <!-- ctrlb:begin --> and <!-- ctrlb:end -->;
 changed. A file that does not exist is created. A run that would change nothing writes nothing. Before a change, the
 old file is copied to <name>.ctrlb-backup-<time> beside it. --dry-run prints the diff and writes nothing. --remove
 deletes the block. Every file is checked before any is written: one marker without its pair, or two blocks, is
-refused (exit 2); a file that cannot be read or is not UTF-8 stops the run (exit 1). Markers inside fenced code blocks
+refused (exit 2), and so is a file without a block that ends inside an open code block; a file that cannot be read or is not UTF-8 stops the run (exit 1). Markers inside fenced code blocks
 are ignored."""
 import argparse, difflib, os, sys
 sys.dont_write_bytecode = True

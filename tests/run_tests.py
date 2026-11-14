@@ -286,9 +286,9 @@ def registered_rule(text, md=False):
 
 def recall_rule(text, sid):
     """The session-start recall rule: search before the first grep, file read or shell command about earlier work,
-    find_command or next_actions after a failed command, and the session id to pass on to subagents."""
+    find_command after a failed command, then next_actions on what it returns, and the session id to pass on to subagents."""
     return (f'call `search_sessions` (session_id {sid})' in text and 'Before your first grep, file read or shell command' in text
-            and 'After a command fails, call `find_command` or `next_actions`' in text
+            and 'After a command fails, call `find_command` with the command before changing it, then `next_actions` with a session_id and seq it returns to see what followed.' in text
             and 'Pass this session_id to every subagent you start' in text)
 
 
@@ -1252,8 +1252,14 @@ def test_init():
     old = b'# Rules\n\n<!-- ctrlb:begin -->\n## CtrlB\n\nold\n<!-- ctrlb:end -->\n\n## After\n'
     d = fresh('remove-middle', {'CLAUDE.md': old})
     p = run(d, '--claude', '--remove')
-    check('init --remove of a block in the middle keeps the text after it',
-          p.returncode == 0 and read(os.path.join(d, 'CLAUDE.md')) == b'# Rules\n\n## After\n')
+    check('init --remove of a block in the middle: only the block goes; the blank lines around it, which init did not add, stay',
+          p.returncode == 0 and read(os.path.join(d, 'CLAUDE.md')) == b'# Rules\n\n\n## After\n')
+    for name, body in (('trailing-blank', b'# Rules\n\nUse tabs.\n\n'), ('crlf-trailing-blank', b'a\r\n\r\n')):
+        d = fresh(name, {'AGENTS.md': body})
+        run(d, '--codex')
+        p = run(d, '--codex', '--remove')
+        check(f'init then --remove on a file ending in a blank line ({name}): the same bytes come back',
+              p.returncode == 0 and read(os.path.join(d, 'AGENTS.md')) == body)
 
     d = fresh('dry', {'AGENTS.md': mine})
     p = run(d, '--codex', '--claude', '--dry-run')
@@ -1281,7 +1287,7 @@ def test_init():
     check('init without --codex or --claude: usage error, exit 2, nothing written', p.returncode == 2 and not os.listdir(d))
 
     check('init: the subagent rule carries the same after-failure sentence as the session rule',
-          'After a command fails, call `find_command` or `next_actions` with the command before changing it.' in hooks_shared.SUBAGENT)
+          'After a command fails, call `find_command` with the command before changing it, then `next_actions` with a session_id and seq it returns to see what followed.' in hooks_shared.SUBAGENT)
 
     ex = b'# Rules\n\n```md\n<!-- ctrlb:begin -->\nan example\n<!-- ctrlb:end -->\n```\n\n~~~\n<!-- ctrlb:end -->\n~~~\n'
     d = fresh('fenced', {'AGENTS.md': ex})
@@ -1344,6 +1350,32 @@ def test_init():
     p = run(d, '--codex')
     check('init when AGENTS.md cannot be read: one line naming it, exit 1, no traceback', p.returncode == 1
           and 'AGENTS.md: cannot read it' in p.stderr and 'Traceback' not in p.stderr, p.stderr[-200:])
+    check('init: next_actions is described with the session_id and seq that find_command returns, not with a command',
+          all('`next_actions` with the command' not in t and 'then `next_actions` with a session_id and seq it returns' in t
+              for t in (hooks_shared.RECALL, hooks_shared.SUBAGENT, project_rules.RULE)))
+
+    for kind in ('```', '~~~'):
+        body = b'# Rules\n\n' + kind.encode() + b'sh\nmake test\n'
+        d = fresh('unclosed-' + ('backtick' if kind == '```' else 'tilde'), {'AGENTS.md': body})
+        p = run(d, '--codex')
+        p2 = run(d, '--codex')
+        check(f'init refuses a file that ends inside an unclosed {kind} code block: exit 2, names line 3, writes nothing, '
+              f'and a rerun does the same', p.returncode == 2 and 'line 3 opens a code block' in p.stderr
+              and p2.returncode == 2 and read(os.path.join(d, 'AGENTS.md')) == body and not backups(d), p.stderr[-200:])
+
+    d = fresh('tmp-file', {'AGENTS.md': mine, 'AGENTS.md.ctrlb-tmp': b'not ours\n'})
+    p = run(d, '--codex')
+    check('init: an existing AGENTS.md.ctrlb-tmp file is left untouched and no temporary file is left behind',
+          p.returncode == 0 and read(os.path.join(d, 'AGENTS.md.ctrlb-tmp')) == b'not ours\n'
+          and b'ctrlb:begin' in read(os.path.join(d, 'AGENTS.md'))
+          and not [n for n in os.listdir(d) if n.endswith('.tmp')], ', '.join(os.listdir(d)))
+    d = fresh('tmp-link', {'AGENTS.md': mine, 'target.txt': b'precious\n'})
+    os.symlink('target.txt', os.path.join(d, 'AGENTS.md.ctrlb-tmp'))
+    p = run(d, '--codex')
+    check('init: a symlink named AGENTS.md.ctrlb-tmp is not followed; it and its target are left untouched',
+          p.returncode == 0 and os.path.islink(os.path.join(d, 'AGENTS.md.ctrlb-tmp'))
+          and read(os.path.join(d, 'target.txt')) == b'precious\n' and b'ctrlb:begin' in read(os.path.join(d, 'AGENTS.md')))
+
     d = fresh('second-broken', {'AGENTS.md': mine, 'CLAUDE.md': b'<!-- ctrlb:end -->\n'})
     p = run(d, '--codex', '--claude')
     check('init --codex --claude: a broken CLAUDE.md stops the run before AGENTS.md is written', p.returncode == 2

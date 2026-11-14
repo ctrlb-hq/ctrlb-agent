@@ -15,14 +15,16 @@ CHECK_S = 2.0
 RECALL = ("Earlier work is in the CtrlB record, not in your context: this session's turns before compaction, and this "
           "user's earlier sessions. Before your first grep, file read or shell command for a question about earlier "
           "work (what was done, decided, run, read, or why something failed), call `search_sessions` (session_id {sid}). "
-          "After a command fails, call `find_command` or `next_actions` with the command before changing it. Do not say "
-          "something was not said or not done until you have searched. Pass this session_id to every subagent you "
+          "After a command fails, call `find_command` with the command before changing it, then `next_actions` with a "
+          "session_id and seq it returns to see what followed. Do not say something was not said or not done until you "
+          "have searched. Pass this session_id to every subagent you "
           "start and tell it the same rule.")
 
 SUBAGENT = ("You are a subagent of session {sid}. That session's full record, including what it already read, ran and "
             "decided, is searchable with the ctrlb tools (search_sessions with session_id {sid}, fetch_records, "
             "next_actions). Call `search_sessions` before your first grep or file read, and before you rerun a command. "
-            "After a command fails, call `find_command` or `next_actions` with the command before changing it.")
+            "After a command fails, call `find_command` with the command before changing it, then `next_actions` with "
+            "a session_id and seq it returns to see what followed.")
 
 # Rule text v10 (round 8): claim(next=true) first, done with next=true, peers only to wait; the REGISTRY.md sentence
 # is gone (the hooks claim autoSlots files, decision 47); helper files go to the run's scratch directory (decision D).
