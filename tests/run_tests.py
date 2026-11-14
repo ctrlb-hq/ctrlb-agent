@@ -2124,6 +2124,118 @@ def test_local_configure_status(seeker):
           and 'health check failed' in p.stdout.lower() and KEY not in p.stdout + p.stderr)
 
 
+def test_local_install():
+    """Only local fixtures: the root installer verifies before replacing a binary."""
+    import io
+    import pathlib
+    import tempfile
+    from contextlib import redirect_stdout
+    from unittest import mock
+    import local_install
+
+    with tempfile.TemporaryDirectory(prefix='local install ', dir=WORK) as temporary:
+        release = pathlib.Path(temporary, 'release files')
+        release.mkdir()
+        stub = (b'#!/bin/sh\n'
+                b'printf "%s\\n" "$@" > "$CTRLB_HOME/init-args"\n'
+                b'echo "stub init output"\n'
+                b'echo "stub init error output" >&2\n'
+                b'if [ "${STUB_INIT_FAIL:-}" = 1 ]; then exit 1; fi\n')
+        filename = 'ctrlb-linux-amd64'
+        (release / filename).write_bytes(stub)
+        manifest = release / 'SHA256SUMS'
+        checksum = hashlib.sha256(stub).hexdigest()
+        manifest.write_text(checksum + '  ' + filename + '\n')
+        base = release.as_uri()
+
+        def run(name, args, system='Linux', machine='x86_64', **extra):
+            home = os.path.join(temporary, name)
+            env = {k: v for k, v in os.environ.items() if not k.startswith('CTRLB_')}
+            env.update(CTRLB_HOME=home)
+            env.update(extra)
+            launcher = ('import platform, runpy; platform.system = lambda: ' + repr(system) +
+                        '; platform.machine = lambda: ' + repr(machine) + '; runpy.run_path(' +
+                        repr(os.path.join(ROOT, 'install.py')) + ', run_name="__main__")')
+            process = subprocess.run([sys.executable, '-I', '-c', launcher, '--local'] + args,
+                                     capture_output=True, text=True, env=env, timeout=15)
+            return process, pathlib.Path(home)
+
+        p, home = run('success', ['--version', 'v1.2.3', '--download-url', base, '--port', '7654'])
+        installed = home / 'bin' / 'ctrlb'
+        check('local install: file base with spaces installs the verified bytes with mode 0755',
+              p.returncode == 0 and installed.is_file() and installed.read_bytes() == stub
+              and stat.S_IMODE(installed.stat().st_mode) == 0o755, p.stderr[-200:])
+        check('local install: the installed binary initializes the requested port',
+              (home / 'init-args').is_file() and (home / 'init-args').read_text() == 'init\n--port\n7654\n')
+        check('local install: next steps include both agents and two config-reading exports, init output suppressed',
+              'claude plugin install ctrlb-agent@ctrlb-agent' in p.stdout and 'install.py --codex' in p.stdout
+              and p.stdout.count('  export ') == 2 and 'export CTRLB_MCP_URL=' in p.stdout
+              and 'export CTRLB_KEY=' in p.stdout and 'config.json' in p.stdout
+              and 'stub init' not in p.stdout + p.stderr)
+        exports = '\n'.join(line.strip() for line in p.stdout.splitlines() if line.lstrip().startswith('export '))
+        syntax = subprocess.run(['/bin/sh', '-n'], input=exports, capture_output=True, text=True, timeout=5)
+        check('local install: printed exports have valid shell syntax', syntax.returncode == 0)
+        p, home = run('env-base', [], CTRLB_DOWNLOAD_URL=base)
+        check('local install: CTRLB_DOWNLOAD_URL is a full base and init receives no default port flag',
+              p.returncode == 0 and (home / 'init-args').read_text() == 'init\n', p.stderr[-200:])
+        p, _ = run('flag-base', ['--download-url', base], CTRLB_DOWNLOAD_URL='http://192.0.2.1/releases')
+        check('local install: --download-url wins over the environment', p.returncode == 0, p.stderr[-200:])
+
+        manifest.write_text('0' * 64 + '  ' + filename + '\n')
+        p, home = run('wrong-checksum', ['--download-url', base])
+        check('local install: wrong checksum refuses, deletes the download and never runs init',
+              p.returncode != 0 and 'checksum mismatch' in p.stderr and not (home / 'bin' / 'ctrlb').exists()
+              and not list(home.glob('bin/.ctrlb-download-*')) and not (home / 'init-args').exists())
+        previous = home / 'bin' / 'ctrlb'
+        previous.write_bytes(b'previous installation')
+        p, _ = run('wrong-checksum', ['--download-url', base])
+        check('local install: failed verification preserves an existing installation',
+              p.returncode != 0 and previous.read_bytes() == b'previous installation'
+              and not list(home.glob('bin/.ctrlb-download-*')))
+        manifest.write_text(checksum + '  ctrlb-darwin-arm64\n')
+        p, home = run('missing-checksum', ['--download-url', base])
+        check('local install: missing target checksum refuses and leaves nothing installed',
+              p.returncode != 0 and 'missing checksum' in p.stderr and not (home / 'bin' / 'ctrlb').exists()
+              and not list(home.glob('bin/.ctrlb-download-*')) and not (home / 'init-args').exists())
+        for system, machine in [('Windows', 'AMD64'), ('Linux', 'riscv64')]:
+            p, home = run('unsupported-' + machine, ['--download-url', base], system=system, machine=machine)
+            check(f'local install: unsupported {system}/{machine} refuses before downloading',
+                  p.returncode != 0 and 'unsupported platform' in p.stderr and not home.exists())
+        p, home = run('unsafe-http', ['--download-url', 'http://192.0.2.1/releases'])
+        check('local install: HTTP on a non-loopback host refuses before downloading',
+              p.returncode != 0 and 'must use HTTPS' in p.stderr and not home.exists())
+        p, home = run('no-base', [])
+        check('local install: no download address gives a clear error without installing',
+              p.returncode != 0 and '--download-url or CTRLB_DOWNLOAD_URL' in p.stderr and not home.exists())
+
+        manifest.write_text(checksum + '  ' + filename + '\n')
+        p, home = run('init-failure', ['--download-url', base], STUB_INIT_FAIL='1')
+        check('local install: init failure returns non-zero without relaying binary output',
+              p.returncode != 0 and 'ctrlb init failed' in p.stderr and 'stub init' not in p.stdout + p.stderr)
+        targets = []
+        for system in ('Darwin', 'Linux'):
+            for machine in ('arm64', 'aarch64', 'amd64', 'x86_64'):
+                with mock.patch.object(local_install.platform, 'system', return_value=system), \
+                        mock.patch.object(local_install.platform, 'machine', return_value=machine):
+                    arch = 'arm64' if machine in ('arm64', 'aarch64') else 'amd64'
+                    targets.append(local_install.target_name() == f'ctrlb-{system.lower()}-{arch}')
+        check('local install: all four release targets and architecture aliases map correctly', all(targets))
+        rejected = False
+        try:
+            local_install._SafeRedirect().redirect_request(None, None, 302, 'Found', {}, 'http://192.0.2.1/binary')
+        except local_install.InstallError:
+            rejected = True
+        check('local install: redirects cannot bypass the HTTPS policy', rejected)
+        versions = []
+        for args, version in [([], 'latest'), (['--version', 'v1.2.3'], 'v1.2.3')]:
+            with mock.patch.object(local_install, 'install_binary') as download, \
+                    mock.patch.dict(os.environ, {'CTRLB_DOWNLOAD_URL': base + '/<version>'}), \
+                    redirect_stdout(io.StringIO()):
+                code = local_install.main(args)
+            versions.append(code == 0 and download.call_args.args[0] == base + '/' + version)
+        check('local install: URL templates substitute the requested version or latest', all(versions))
+
+
 def main():
     seeker = Seeker()
     test_layout()
@@ -2150,6 +2262,7 @@ def main():
     test_local_configure_status(seeker)
     test_codex_install()
     test_root_install()
+    test_local_install()
     test_codex_backfill(seeker)
     test_validate()
     seeker.httpd.shutdown()

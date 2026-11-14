@@ -8,6 +8,8 @@ CtrlB's agent package for Claude Code and Codex. It does three things:
 
 Everything goes to Seeker with your MCP key. Nothing talks to the lake directly. Standard library Python 3.9 or newer; nothing else is installed.
 
+For Recall on one machine with a standalone binary and SQLite, see [Local mode](docs/local-mode.md). It includes installation, agent setup, limits and moving your records to hosted CtrlB. Relay is hosted only.
+
 ## Install in Claude Code
 
 Mint a key on the Connect page in CtrlB. Put these three lines in your shell profile:
