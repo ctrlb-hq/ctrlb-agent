@@ -54,7 +54,7 @@ python3 -I install.py --codex --otel \
   --dry-run
 ```
 
-Drop `--dry-run` to write it. The installer refuses to write your CtrlB MCP key into an OTEL header. The header value is stored in `config.toml` as given, so the file holds your ingest credentials; keep its mode at 0600.
+The dry run shows header values as `"<hidden>"`. Drop `--dry-run` to write it. The installer refuses to write your CtrlB MCP key into an OTEL header. The header value is stored in `config.toml` as given, so the file holds your ingest credentials; keep its mode at 0600.
 
 If you want the export without the hooks or the MCP server, add the tables yourself. This is the layout Codex 0.166 accepts:
 

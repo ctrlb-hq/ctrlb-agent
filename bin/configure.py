@@ -4,7 +4,7 @@ from the key (its "email" claim, the one Seeker reads), writes ~/.ctrlb/config.j
 and checks that Seeker answers. Environment variables CTRLB_* override the file. Flags (for scripts): --url,
 --dataset, --run, --key-stdin (read the key from one line of stdin instead of a hidden prompt; the key is never taken
 from the command line). --user is accepted and ignored: the name on the rows is the key's user."""
-import argparse, getpass, json, os, sys
+import argparse, datetime, getpass, json, os, shutil, sys, tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 import common  # noqa: E402
@@ -15,6 +15,46 @@ def ask(label, default='', given=None):
         return given.strip()
     v = input(f'{label}' + (f' [{default}]' if default else '') + ': ').strip()
     return v or default
+
+
+def save(path, c):
+    """Write config.json atomically: a new 0600 temporary file in the same directory, then a replace, so an interrupted
+    run leaves the old file whole. The old file is copied to config.json.ctrlb-backup-<time> (0600) first when the
+    content changes. When config.json is a link, the file it points to is written (said on screen) and the link kept.
+    Returns (the file written, the backup path or '')."""
+    target = path
+    if os.path.islink(path):
+        target = os.path.realpath(path)
+        print(f'{path} is a link to {target}; writing that file and keeping the link')
+    text = json.dumps(c, indent=1)
+    backup = ''
+    if os.path.exists(target):
+        with open(target) as fh:
+            same = fh.read() == text
+        if same:
+            os.chmod(target, 0o600)
+            return target, ''
+        stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+        backup, i = f'{target}.ctrlb-backup-{stamp}', 1
+        while os.path.exists(backup):
+            backup, i = f'{target}.ctrlb-backup-{stamp}-{i}', i + 1
+        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as out, open(target, 'rb') as src:
+            shutil.copyfileobj(src, out)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix='.config.json.', suffix='.ctrlb-tmp')
+    try:
+        with os.fdopen(fd, 'w') as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return target, backup
 
 
 def main():
@@ -50,12 +90,11 @@ def main():
     if user:
         c['user'] = user
     print(f"the key's user (written as user_name): {user or '(none in the key; CtrlB fills it from the key)'}")
-    os.makedirs(common.HOME, mode=0o700, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w') as fh:
-        json.dump(c, fh, indent=1)
-    os.chmod(path, 0o600)
-    print(f'saved {path} (mode 0600)')
+    common.private_dir(common.HOME)
+    written, backup = save(path, c)
+    print(f'saved {written} (mode 0600)')
+    if backup:
+        print(f'backup of the previous file: {backup} (mode 0600)')
     cfg = common.config()
     try:
         common.runs(cfg, limit=1, timeout=15)
