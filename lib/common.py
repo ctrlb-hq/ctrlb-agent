@@ -13,6 +13,8 @@ Config comes from environment variables, falling back to ~/.ctrlb/config.json (w
   CTRLB_ENFORCE  "off" skips the edit check without calling Seeker; anything else lets Seeker's mode decide
                                                                  file key "enforce"
   CTRLB_MCP_URL  Seeker's /mcp URL, read by plugin/.mcp.json     file key "mcp_url" (shown by status only)
+  CTRLB_MODE     "local" disables Relay hooks                   file key "mode"
+  CTRLB_BIN      optional path to the local ctrlb executable
   CTRLB_SCRATCH_DIR  the run's durable scratch directory; {run} is replaced by the run id
                  (default <CTRLB_HOME>/relay/<run id>/scratch)          file key "scratchDir"
   CTRLB_AUTO_SLOTS   files the hooks claim as slot:<path> around each edit (relative paths, comma-separated;
@@ -21,7 +23,7 @@ Config comes from environment variables, falling back to ~/.ctrlb/config.json (w
   CTRLB_HOME     where config.json, hooks.log and upload state live (default ~/.ctrlb)
 
 Everything is off when the URL or the key is missing or the dataset name is not letters, digits and _."""
-import base64, fcntl, hashlib, json, os, re, socket, time, urllib.error, urllib.parse, urllib.request
+import base64, fcntl, hashlib, json, os, re, shutil, socket, subprocess, time, urllib.error, urllib.parse, urllib.request
 
 VERSION = '0.2.0'
 HOME = os.environ.get('CTRLB_HOME') or os.path.expanduser('~/.ctrlb')
@@ -68,6 +70,7 @@ def config():
              agent=(env('CTRLB_AGENT') or env('CTRLB_USER') or '').strip(),
              dataset=pick('CTRLB_DATASET', 'dataset', DEFAULT_DATASET),
              enforce=pick('CTRLB_ENFORCE', 'enforce').lower())
+    c['mode'] = 'local' if f.get('mode') == 'local' or env('CTRLB_MODE') == 'local' else 'hosted'
     # user_name only ever comes from the key in effect (CTRLB_KEY or the file's key), decoded now, so a key from the
     # environment and an old config.json "user" written as a label can never put another name on the rows.
     c['user'] = key_user(c['key'])
@@ -76,6 +79,70 @@ def config():
     c['auto_slots'] = _auto_slots(env('CTRLB_AUTO_SLOTS'), f.get('autoSlots'))
     c['off'] = env('CTRLB_OFF') == '1' or not c['url'] or not c['key'] or not NAME_RE.match(c['dataset'])
     return c
+
+
+def local_mode(cfg):
+    """Local Recall has no Relay tools or hooks."""
+    return cfg.get('mode') == 'local' or os.environ.get('CTRLB_MODE') == 'local'
+
+
+def ctrlb_binary():
+    """First executable in CTRLB_BIN, <CTRLB_HOME>/bin/ctrlb, then PATH."""
+    for candidate in (os.environ.get('CTRLB_BIN'), os.path.join(HOME, 'bin', 'ctrlb'), 'ctrlb'):
+        if candidate:
+            found = shutil.which(os.path.expanduser(candidate))
+            if found:
+                return os.path.abspath(found)
+    return None
+
+
+def loopback_url(cfg):
+    try:
+        url = urllib.parse.urlsplit(cfg.get('url') or '')
+        return url.scheme in ('http', 'https') and url.hostname in ('127.0.0.1', 'localhost')
+    except ValueError:
+        return False
+
+
+class _NoHealthRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def local_health(cfg, timeout=0.25):
+    """The health HTTP status; never follow redirects, use proxies, or read response text."""
+    req = urllib.request.Request(cfg['url'] + '/healthz', headers={'Authorization': 'Bearer ' + cfg['key']})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoHealthRedirect())
+    with opener.open(req, timeout=timeout) as resp:
+        return resp.status
+
+
+def start_local_server(cfg):
+    """Best effort SessionStart: short probe, detached serve, then at most three seconds of polling."""
+    if not local_mode(cfg) or not loopback_url(cfg):
+        return
+    try:
+        local_health(cfg)
+        return
+    except Exception:
+        pass
+    binary = ctrlb_binary()
+    if not binary:
+        log('local server: ctrlb executable not found')
+        return
+    try:
+        subprocess.Popen([binary, 'serve'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            try:
+                local_health(cfg, timeout=min(0.25, max(0.001, deadline - time.monotonic())))
+                return
+            except Exception:
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        log('local server: health check did not answer in time')
+    except Exception:
+        log('local server: could not start ctrlb serve')
 
 
 DEFAULT_AUTO_SLOTS = ('REGISTRY.md',)

@@ -310,7 +310,7 @@ def detach(mode, payload):
 
 def _poster(payload):
     cfg = common.config()
-    if cfg['off']:
+    if cfg['off'] or common.local_mode(cfg):
         return
     run, agent, rel, h = payload['run'], payload['agent'], payload['rel'], payload['hash']
     try:

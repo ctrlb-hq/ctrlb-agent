@@ -3,7 +3,8 @@
 Seeker is a local fake that answers with the synthetic responses in tests/fixtures/seeker/ (relay-plan section 4).
 Nothing is sent anywhere else, Claude is never called, and no real config is read: every CTRLB_* variable from the
 calling environment is dropped and CTRLB_HOME points into tests/work/."""
-import base64, glob, hashlib, http.server, json, os, re, shutil, socket, stat, subprocess, sys, threading, time
+import base64, glob, hashlib, http.server, json, os, re, shutil, signal, socket, stat, subprocess, sys, threading, time
+from unittest import mock
 sys.dont_write_bytecode = True
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -90,6 +91,11 @@ class Seeker:
                 owner = KEYS.get(auth[len('Bearer '):]) if auth.startswith('Bearer ') else None
                 if owner is None:
                     return self._answer(**outer.records['responses']['no_key'])
+                if self.path == '/healthz':
+                    health = outer.state.get('health', 'ok')
+                    if health == 'slow':
+                        time.sleep(5)
+                    return self._answer(503 if health == 'down' else 200, {'status': 'ok'})
                 m = re.match(r'^/ai/sessions/([A-Za-z0-9_]+)/records$', self.path)
                 if m and method == 'POST':
                     lim = outer.records['limits']
@@ -1927,6 +1933,197 @@ def test_round8_hooks(seeker):
           '`claim(next=true)`' in skill and '`next=true`' in skill and 'claim(resource="slot:REGISTRY.md"' not in skill)
 
 
+def test_local_mode(seeker):
+    main, sub = setup_transcripts()
+    home = os.path.join(WORK, 'home-local')
+    os.makedirs(home, exist_ok=True)
+    config_path = os.path.join(home, 'config.json')
+    cfg = dict(url=seeker.url, key=KEY, dataset=common.DEFAULT_DATASET, mcp_url=seeker.url + '/mcp', mode='local')
+    with open(config_path, 'w') as fh:
+        json.dump(cfg, fh)
+    with mock.patch.object(common, 'HOME', home), mock.patch.dict(os.environ, {}, clear=True):
+        check('local mode: config file enables local mode', common.local_mode(common.config()))
+        with mock.patch.dict(os.environ, CTRLB_MODE='hosted'):
+            check('local mode: file local mode keeps Relay off despite environment hosted', common.local_mode(common.config()))
+        with mock.patch.object(common, '_file_config', return_value={}):
+            check('local mode: defaults to hosted', not common.local_mode(common.config()))
+            with mock.patch.dict(os.environ, CTRLB_MODE='local'):
+                check('local mode: environment enables local mode', common.local_mode(common.config()))
+
+    ci = inputs(main, sub)
+    _, cm, cs = setup_codex()
+    xi = cinputs(cm, cs)
+    for call, fixtures, label in ((hook, ci, 'Claude'), (chook, xi, 'Codex')):
+        for source in ('file', 'environment'):
+            h = home if source == 'file' else os.path.join(WORK, 'home-local-' + label)
+            env = base_env(seeker.url, h, CTRLB_RUN='local-run')
+            if source == 'environment':
+                env['CTRLB_MODE'] = 'local'
+            seeker.reset()
+            for mode, fixture in (('session-start', 'session_start'), ('subagent-start', 'subagent_start')):
+                p, _ = call(mode, fixtures[fixture], env)
+                ctx = out_of(p).get('additionalContext', '')
+                check(f'{label} local {source} {mode}: recall context without Relay', p.returncode == 0
+                      and 'search_sessions' in ctx and 'Relay' not in ctx and 'claim(' not in ctx)
+            # REGISTRY.md exercises autoSlots; the Agent prompt would register a task and contract in hosted mode.
+            edits = dict(fixtures['session_start'], tool_name='Write', tool_input={'file_path': 'REGISTRY.md', 'content': 'test'})
+            if label == 'Codex':
+                edits.update(tool_name='apply_patch', tool_input='*** Begin Patch\n*** Update File: REGISTRY.md\n@@\n-a\n+b\n*** End Patch')
+            events = [('pre-tool', edits), ('session-end', dict(fixtures['session_start'], hook_event_name='SessionEnd'))]
+            if label == 'Claude':
+                events += [('pre-agent', dict(edits, tool_name='Agent', tool_input={'prompt':
+                            'Task: update registry. Files: `REGISTRY.md`. Test: `python3 -m unittest`.'})),
+                           ('post-tool', edits), ('post-tool-failure', edits),
+                           ('pre-tool', dict(edits, tool_name='mcp__ctrlb__done', tool_input={})),
+                           ('post-tool', dict(edits, tool_name='mcp__ctrlb__claim', tool_input={},
+                                              tool_response={'held': True})),
+                           ('post-tool', dict(edits, tool_name='Bash', tool_input={'command': 'python3 -m unittest'},
+                                              tool_response={'exit_code': 0}))]
+            for mode, event in events:
+                p, _ = call(mode, event, env)
+                check(f'{label} local {source} {mode} {event.get("tool_name", "")}: silent success',
+                      p.returncode == 0 and not p.stdout.strip())
+            check(f'{label} local {source}: no Relay HTTP calls', not any('/ai/relay/' in c['path'] for c in seeker.calls))
+            check(f'{label} local {source}: session upload still runs', bool(seeker.rows))
+    seeker.reset()
+    env = base_env(seeker.url, home, CTRLB_MODE='local')
+    p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'lib', 'relay_hooks.py'), 'post-artifact'],
+                       input=json.dumps(dict(run='local-run', agent='test-agent', rel='test.txt', text='test', hash='test')),
+                       capture_output=True, text=True, env=env, timeout=5)
+    check('local mode: pending detached artifact poster sends no Relay request', p.returncode == 0 and not seeker.calls)
+
+
+def local_stub(home):
+    """Synthetic ctrlb executable; writes only test state and serves health until the test stops it."""
+    path = os.path.join(home, 'bin', 'ctrlb')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    source = '''import http.server, json, os, sys
+home = os.environ['CTRLB_HOME']
+with open(os.path.join(home, 'invoked.json'), 'w') as fh:
+    json.dump(dict(argv=sys.argv[1:], pid=os.getpid(), detached=os.getsid(0) == os.getpid(),
+                   stdin=os.read(0, 1).decode()), fh)
+if sys.argv[1] == 'init':
+    print('test-key-not-a-real-key')
+    print('test-key-not-a-real-key', file=sys.stderr)
+    if os.environ.get('STUB_FAIL'):
+        sys.exit(1)
+    port = sys.argv[sys.argv.index('--port') + 1] if '--port' in sys.argv else '7531'
+    url = 'http://127.0.0.1:' + port
+    with open(os.path.join(home, 'config.json'), 'w') as fh:
+        json.dump(dict(url=url, mcp_url=url + '/mcp', key='test-key-not-a-real-key',
+                       dataset='agent_sessions', mode='local'), fh)
+    os.chmod(os.path.join(home, 'config.json'), 0o600)
+elif sys.argv[1] == 'serve' and not os.environ.get('STUB_NO_HEALTH'):
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+    http.server.HTTPServer(('127.0.0.1', int(os.environ['STUB_PORT'])), H).serve_forever()
+'''
+    with open(path, 'w') as fh:
+        fh.write('#!' + sys.executable + '\n' + source)
+    os.chmod(path, 0o700)
+    return path
+
+
+def test_local_startup(seeker):
+    for call, label, sid in ((hook, 'Claude', SID), (chook, 'Codex', CSID)):
+        home = os.path.join(WORK, 'home-start-' + label)
+        binary = local_stub(home)
+        marker = os.path.join(home, 'invoked.json')
+        inp = dict(session_id=sid, hook_event_name='SessionStart')
+        env = base_env(seeker.url, home, CTRLB_MODE='local', CTRLB_BIN=binary)
+        p, dt = call('session-start', inp, env)
+        check(f'{label} startup: healthy server is not started', p.returncode == 0 and not os.path.exists(marker) and dt < 1.5)
+        port = closed_port()
+        env.update(CTRLB_URL=f'http://127.0.0.1:{port}', STUB_PORT=str(port))
+        try:
+            p, dt = call('session-start', inp, env)
+            info = json.loads(read(marker)) if os.path.exists(marker) else {}
+            check(f'{label} startup: detached serve retains CTRLB_HOME, null stdin, becomes healthy',
+                  p.returncode == 0 and info.get('argv') == ['serve'] and info.get('detached') and info.get('stdin') == ''
+                  and dt < 3.5 and common.local_health(dict(url=env['CTRLB_URL'], key=KEY)) == 200)
+        finally:
+            if os.path.exists(marker):
+                os.kill(json.loads(read(marker))['pid'], signal.SIGTERM)
+                os.unlink(marker)
+        env.update(CTRLB_URL=seeker.url, STUB_NO_HEALTH='1')
+        seeker.state['health'] = 'slow'
+        try:
+            p, dt = call('session-start', inp, env, timeout=5)
+            check(f'{label} startup: slow health gives up within hook timeout, keeps recall context',
+                  p.returncode == 0 and 3 <= dt < 4 and 'search_sessions' in out_of(p).get('additionalContext', ''))
+        finally:
+            seeker.state.pop('health', None)
+        if os.path.exists(marker):
+            os.unlink(marker)
+        env['CTRLB_URL'] = 'http://192.0.2.1:7531'
+        p, dt = call('session-start', inp, env)
+        check(f'{label} startup: non-loopback URL is skipped', p.returncode == 0 and not os.path.exists(marker) and dt < 1.5)
+        # Isolate PATH so no installed ctrlb can interfere with the missing-binary case.
+        os.unlink(binary)
+        env.update(CTRLB_URL=f'http://localhost:{closed_port()}', PATH=home)
+        p, dt = call('session-start', inp, env)
+        check(f'{label} startup: missing binary logs one line and continues', p.returncode == 0 and dt < 1.5
+              and _log(home).count('ctrlb executable not found') == 1 and 'search_sessions' in p.stdout)
+
+    home = os.path.join(WORK, 'home-binary-lookup')
+    binary = local_stub(home)
+    with mock.patch.object(common, 'HOME', home), mock.patch.dict(os.environ, {}, clear=True):
+        check('binary lookup: CTRLB_HOME/bin/ctrlb fallback', common.ctrlb_binary() == binary)
+        with mock.patch.dict(os.environ, CTRLB_BIN=sys.executable):
+            check('binary lookup: CTRLB_BIN has precedence', common.ctrlb_binary() == os.path.abspath(sys.executable))
+        with mock.patch.object(common, 'HOME', home + '-other'), mock.patch.dict(os.environ, PATH=os.path.dirname(binary)):
+            check('binary lookup: PATH fallback', common.ctrlb_binary() == binary)
+    check('startup URL check: only exact loopback hostnames',
+          all(common.loopback_url({'url': u}) for u in ('http://127.0.0.1:7531', 'http://localhost:7531'))
+          and not any(common.loopback_url({'url': u}) for u in ('http://localhost.example.test', 'http://127.0.0.2',
+                                                               'file://localhost', 'http://[bad')))
+
+
+def test_local_configure_status(seeker):
+    home = os.path.join(WORK, "home-configure local's")
+    binary = local_stub(home)
+    env = base_env(seeker.url, home, CTRLB_BIN=binary)
+    env.pop('CTRLB_URL')
+    env.pop('CTRLB_KEY')
+    configure = os.path.join(ROOT, 'bin', 'configure.py')
+    status = os.path.join(ROOT, 'bin', 'status.py')
+    for flags in ([], ['--port', '8753']):
+        p = subprocess.run([sys.executable, '-I', configure, '--local'] + flags, input='', capture_output=True,
+                           text=True, env=env, timeout=5)
+        invoked = os.path.join(home, 'invoked.json')
+        args = json.loads(read(invoked)).get('argv') if os.path.exists(invoked) else []
+        check('configure --local ' + ' '.join(flags) + ': invokes init without prompting or showing key',
+              p.returncode == 0 and args == ['init'] + flags and KEY not in p.stdout + p.stderr)
+        path = os.path.join(home, 'config.json')
+        cfg = json.loads(read(path)) if os.path.isfile(path) else {}
+        check('configure --local: export reads key from config; MCP URL from config',
+              cfg.get('mcp_url') and cfg['mcp_url'] in p.stdout and 'export CTRLB_KEY="$(' in p.stdout
+              and 'python3 -I -c' in p.stdout and 'config.json' in p.stdout)
+        exports = '\n'.join(s.strip() for s in p.stdout.splitlines() if s.strip().startswith('export '))
+        if exports:
+            # Check the exported value without letting it reach the test output.
+            script = exports + '\n' + 'test "$CTRLB_KEY" = ' + KEY
+            q = subprocess.run(['/bin/sh', '-c', script], capture_output=True, text=True, env=env, timeout=5)
+            check('configure --local: printed export is executable', q.returncode == 0 and not q.stdout and not q.stderr)
+    p = subprocess.run([sys.executable, '-I', configure, '--local'], input='', capture_output=True, text=True,
+                       env=dict(env, STUB_FAIL='1'), timeout=5)
+    check('configure --local: failed init does not reveal output or key', p.returncode != 0 and KEY not in p.stdout + p.stderr)
+    env['CTRLB_URL'] = seeker.url
+    env['CTRLB_KEY'] = KEY
+    seeker.reset()
+    p = subprocess.run([sys.executable, '-I', status], capture_output=True, text=True, env=env, timeout=5)
+    check('status local: mode, health answer, binary path; no key', p.returncode == 0 and '"mode": "local"' in p.stdout
+          and 'HTTP 200' in p.stdout and binary in p.stdout and KEY not in p.stdout + p.stderr)
+    check('status local: no Relay request', not any('/ai/relay/' in c['path'] for c in seeker.calls))
+    p = subprocess.run([sys.executable, '-I', status], capture_output=True, text=True,
+                       env=dict(env, CTRLB_URL=f'http://127.0.0.1:{closed_port()}'), timeout=5)
+    check('status local: unreachable health is reported without failure', p.returncode == 0
+          and 'health check failed' in p.stdout.lower() and KEY not in p.stdout + p.stderr)
+
+
 def main():
     seeker = Seeker()
     test_layout()
@@ -1948,6 +2145,9 @@ def main():
     test_config_and_status(seeker)
     test_codex_rows(seeker)
     test_codex_hooks(seeker)
+    test_local_mode(seeker)
+    test_local_startup(seeker)
+    test_local_configure_status(seeker)
     test_codex_install()
     test_root_install()
     test_codex_backfill(seeker)
