@@ -131,10 +131,43 @@ def agent_name(cfg, session_id, subagent=''):
     return label or session_id or ''
 
 
+def _tighten(path, mode):
+    """Clear the group and other bits of an existing file or directory. Never raises."""
+    try:
+        st = os.stat(path)
+        if st.st_mode & 0o077:
+            os.chmod(path, st.st_mode & mode)
+    except OSError:
+        pass
+
+
+def private_dir(d):
+    """Make d (mode 0700), and make sure CTRLB_HOME and d are readable only by this user: the state files hold shell
+    commands and output summaries, the log holds error text. Raises OSError only when d cannot be made."""
+    os.makedirs(HOME, mode=0o700, exist_ok=True)
+    _tighten(HOME, 0o700)
+    if os.path.abspath(d) != os.path.abspath(HOME):
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        _tighten(d, 0o700)
+    return d
+
+
+def private_open(path, mode='w'):
+    """open() for a file under CTRLB_HOME: created with mode 0600, an existing one tightened to 0600."""
+    flags = {'w': os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 'a': os.O_WRONLY | os.O_CREAT | os.O_APPEND}[mode]
+    fd = os.open(path, flags, 0o600)
+    try:
+        if os.fstat(fd).st_mode & 0o077:
+            os.fchmod(fd, 0o600)
+    except OSError:
+        pass
+    return os.fdopen(fd, mode)
+
+
 def log(msg):
     try:
-        os.makedirs(HOME, exist_ok=True)
-        with open(os.path.join(HOME, 'hooks.log'), 'a') as fh:
+        private_dir(HOME)
+        with private_open(os.path.join(HOME, 'hooks.log'), 'a') as fh:
             fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {os.getpid()} {msg}\n")
     except Exception:
         pass
@@ -203,13 +236,12 @@ class TokenState:
     it is read and written. Tokens are hold nonces, not secrets."""
 
     def __init__(self, run, agent):
-        d = os.path.join(HOME, 'state')
-        os.makedirs(d, exist_ok=True)
+        d = private_dir(os.path.join(HOME, 'state'))
         name = hashlib.sha1(f'{run}\0{agent}'.encode()).hexdigest()
         self.file = os.path.join(d, f'tokens-{name}.json')
 
     def _locked(self, fn):
-        with open(self.file + '.mutex', 'w') as mx:
+        with private_open(self.file + '.mutex') as mx:
             fcntl.flock(mx, fcntl.LOCK_EX)
             try:
                 try:
@@ -222,7 +254,7 @@ class TokenState:
                 out, changed = fn(data)
                 if changed:
                     tmp = self.file + '.tmp'
-                    with open(tmp, 'w') as fh:
+                    with private_open(tmp) as fh:
                         json.dump(data, fh)
                     os.replace(tmp, self.file)
                 return out
@@ -388,8 +420,7 @@ class FileState:
     (epoch seconds)."""
 
     def __init__(self, path, deadline):
-        d = os.path.join(HOME, 'state')
-        os.makedirs(d, exist_ok=True)
+        d = private_dir(os.path.join(HOME, 'state'))
         key = hashlib.sha1(os.path.abspath(path).encode()).hexdigest()
         self.file = os.path.join(d, key + '.json')
         self.mutex_path = os.path.join(d, key + '.mutex')
@@ -397,7 +428,7 @@ class FileState:
         self.data = dict(path=os.path.abspath(path), offset=0, line=0, prev_ts=0, names={}, mids=[], cost=0.0)
 
     def __enter__(self):
-        self.fh = open(self.mutex_path, 'w')
+        self.fh = private_open(self.mutex_path)
         while True:
             try:
                 fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -423,7 +454,7 @@ class FileState:
             self.data['names'] = dict(list(names.items())[-2000:])
         self.data['mids'] = self.data.get('mids', [])[-200:]
         tmp = self.file + '.tmp'
-        with open(tmp, 'w') as fh:
+        with private_open(tmp) as fh:
             json.dump(self.data, fh)
         os.replace(tmp, self.file)
 

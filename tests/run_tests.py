@@ -1955,6 +1955,157 @@ def test_round8_hooks(seeker):
           '`claim(next=true)`' in skill and '`next=true`' in skill and 'claim(resource="slot:REGISTRY.md"' not in skill)
 
 
+def test_hardening(seeker):
+    """Install and hook hardening: shell quoting of the hook path, OTEL header values hidden in a dry run, a new
+    temporary file for every write, an atomic config.json with a backup, private CTRLB_HOME files, and artefact
+    restore confined to the scratch directory."""
+    import relay_hooks
+    base = os.path.join(WORK, 'hardening')
+    shutil.rmtree(base, ignore_errors=True)
+    os.makedirs(base)
+
+    # a checkout path with shell syntax in it: the hook command passes it as written and runs nothing from it
+    odd = os.path.join(base, 'repo $(touch PWNED) `touch TICK` "q" \\b')
+    for d in ('codex', 'lib'):
+        shutil.copytree(os.path.join(ROOT, d), os.path.join(odd, d), ignore=shutil.ignore_patterns('__pycache__'))
+    chome = os.path.join(base, 'codex-odd')
+    os.makedirs(chome)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('CTRLB_') and k != 'CODEX_HOME'}
+    env.update(CTRLB_HOME=os.path.join(base, 'home-install'), CODEX_HOME=chome)
+    p = subprocess.run([sys.executable, '-I', os.path.join(odd, 'codex', 'install.py'), '--mcp-url', 'http://127.0.0.1:8095/mcp'],
+                       capture_output=True, text=True, env=env, timeout=30)
+    cmds = [json.loads(l.split('=', 1)[1]) for l in read(os.path.join(chome, 'config.toml')).decode().splitlines()
+            if l.startswith('command = ')]
+    run_dir = os.path.join(base, 'run')
+    os.makedirs(run_dir)
+    hook_env = dict(env, CTRLB_OFF='1')
+    for c in cmds[:1]:
+        subprocess.run(['sh', '-c', c], cwd=run_dir, input='', capture_output=True, text=True, env=hook_env, timeout=30)
+    # what sh makes of the path word: printf it in place of python3 -I
+    words = [subprocess.run(['sh', '-c', "printf '%s' " + c[len('python3 -I '):].rsplit(' ', 1)[0]], cwd=run_dir,
+                            capture_output=True, text=True, timeout=10).stdout for c in cmds]
+    check('codex install: a checkout path with $(...), backquotes, quotes and a backslash is one shell word; nothing in it runs',
+          p.returncode == 0 and len(cmds) == 7 and not os.listdir(run_dir)
+          and all(c.startswith('python3 -I ') for c in cmds)
+          and all(w == os.path.realpath(os.path.join(odd, 'codex', 'hook.py')) for w in words),
+          f'{os.listdir(run_dir)} {cmds[:1]} {p.stderr[-200:]}')
+
+    # --dry-run never prints an OTEL header value; the file written without --dry-run holds it, as documented
+    chome = os.path.join(base, 'codex-otel')
+    os.makedirs(chome)
+    hv = 'otelhdr' + 'value0001'
+    args = ['--mcp-url', 'http://127.0.0.1:8095/mcp', '--otel', '--otel-endpoint', 'http://127.0.0.1:8095/api/o/s/_otel/v1/logs',
+            '--otel-header', f'Authorization=Bearer {hv}', '--otel-header', 'X-Org=org1']
+    p = install(args + ['--dry-run'], chome)
+    check('codex install --dry-run: OTEL header values are shown as "<hidden>", never printed',
+          p.returncode == 0 and hv not in p.stdout + p.stderr and 'org1' not in p.stdout
+          and '+headers = { "Authorization" = "<hidden>", "X-Org" = "<hidden>" }' in p.stdout, p.stdout[-300:])
+    p = install(args, chome)
+    p2 = install(['--mcp-url', 'http://127.0.0.1:8095/mcp', '--otel', '--otel-endpoint', 'http://127.0.0.1:8095/api/o/s/_otel/v1/logs',
+                  '--dry-run'], chome)
+    check('codex install --dry-run: a header value already in config.toml is hidden on the removed line too',
+          hv in read(os.path.join(chome, 'config.toml')).decode() and hv not in p2.stdout and '-headers = {' in p2.stdout,
+          p2.stdout[-300:])
+
+    # a file or link named like the old fixed temporary file is never written through
+    chome = os.path.join(base, 'codex-tmp')
+    os.makedirs(chome)
+    victim = os.path.join(base, 'victim.txt')
+    with open(victim, 'w') as fh:
+        fh.write('keep me\n')
+    os.symlink(victim, os.path.join(chome, 'config.toml.ctrlb-tmp'))
+    p = install(['--mcp-url', 'http://127.0.0.1:8095/mcp'], chome)
+    cfgp = os.path.join(chome, 'config.toml')
+    check('codex install: a link named config.toml.ctrlb-tmp is not followed; config.toml is a new 0600 file; no temporary '
+          'file is left', p.returncode == 0 and read(victim) == b'keep me\n' and not os.path.islink(cfgp)
+          and stat.S_IMODE(os.stat(cfgp).st_mode) == 0o600
+          and sorted(os.listdir(chome)) == ['config.toml', 'config.toml.ctrlb-tmp'], str(sorted(os.listdir(chome))))
+
+    # configure.py: atomic write, a 0600 backup of the old file, and a link kept and said
+    home = os.path.join(base, 'home-cfg')
+    cenv = {k: v for k, v in os.environ.items() if not k.startswith('CTRLB_')}
+    cenv['CTRLB_HOME'] = home
+    k1, k2 = 'cfgkey' + '-first-0001', 'cfgkey' + '-second-0002'
+
+    def configure(key, url):
+        return subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'configure.py'), '--url', url, '--dataset',
+                               'agent_sessions', '--run', '', '--key-stdin'], input=key + '\n', capture_output=True, text=True,
+                              env=cenv, timeout=30)
+    configure(k1, seeker.url)
+    p = configure(k2, seeker.url)
+    names = sorted(os.listdir(home))
+    bk = [n for n in names if n.startswith('config.json.ctrlb-backup-')]
+    cfg_path = os.path.join(home, 'config.json')
+    check('configure.py: a second run backs up the old config.json (0600) and replaces it whole (0600); no temporary file',
+          p.returncode == 0 and len(bk) == 1 and k1 in read(os.path.join(home, bk[0])).decode()
+          and stat.S_IMODE(os.stat(os.path.join(home, bk[0])).st_mode) == 0o600
+          and k2 in read(cfg_path).decode() and stat.S_IMODE(os.stat(cfg_path).st_mode) == 0o600
+          and not [n for n in names if 'ctrlb-tmp' in n] and k1 not in p.stdout + p.stderr and k2 not in p.stdout + p.stderr,
+          str(names))
+    real_cfg = os.path.join(base, 'dotfiles-config.json')
+    shutil.copy(cfg_path, real_cfg)
+    os.chmod(real_cfg, 0o600)
+    os.unlink(cfg_path)
+    os.symlink(real_cfg, cfg_path)
+    p = configure(k1, seeker.url)
+    check('configure.py: when config.json is a link, the file it points to is written, the link is kept, and it says so',
+          p.returncode == 0 and os.path.islink(cfg_path) and k1 in read(real_cfg).decode()
+          and 'is a link to' in p.stdout, p.stdout[-300:])
+
+    # CTRLB_HOME, its state directory and every file the hooks write are private, also under umask 022, and an
+    # existing world-readable log is tightened
+    home = os.path.join(base, 'home-hooks')
+    os.makedirs(home, mode=0o755)
+    os.chmod(home, 0o755)
+    with open(os.path.join(home, 'hooks.log'), 'w') as fh:
+        fh.write('old line\n')
+    os.chmod(os.path.join(home, 'hooks.log'), 0o644)
+    tr = os.path.join(base, 'session.jsonl')
+    shutil.copy(os.path.join(FIX, 'claude', 'session.jsonl'), tr)
+    henv = base_env('http://127.0.0.1:9', home)
+    old_umask = os.umask(0o022)
+    try:
+        for mode, ev in (('upload', 'Stop'), ('post-tool', 'PostToolUse')):
+            hook(mode, {'session_id': SID, 'transcript_path': tr, 'cwd': '/work/dash', 'hook_event_name': ev, 'tool_name': 'Bash',
+                        'tool_input': {'command': 'pytest -q'}, 'tool_response': {'stdout': 'ok', 'exit_code': 0}}, henv)
+    finally:
+        os.umask(old_umask)
+    loose = []
+    for d, ds, fs in os.walk(home):
+        if os.path.relpath(d, home).split(os.sep)[0] == 'relay':
+            continue
+        for n in fs:
+            m = stat.S_IMODE(os.stat(os.path.join(d, n)).st_mode)
+            if m & 0o077:
+                loose.append(f'{os.path.relpath(os.path.join(d, n), home)} {oct(m)}')
+        m = stat.S_IMODE(os.stat(d).st_mode)
+        if m & 0o077:
+            loose.append(f'{os.path.relpath(d, home)}/ {oct(m)}')
+    state = os.path.join(home, 'state')
+    check('hooks: CTRLB_HOME and state are 0700 and every state, mutex and log file is 0600 (umask 022; an old 0644 log '
+          'is tightened)', not loose and os.path.isdir(state) and os.listdir(state), ', '.join(loose))
+
+    # artefact restore never writes through a link in the scratch directory, or outside it
+    scratch = os.path.join(base, 'scratch')
+    outside = os.path.join(base, 'outside')
+    os.makedirs(scratch)
+    os.makedirs(outside)
+    os.symlink(outside, os.path.join(scratch, 'link'))
+    arts = {'artifacts': {'artifacts': [{'path': 'link/settings.json', 'agent': 'a1', 'text': '{"x": 1}'},
+                                        {'path': 'notes/plan.md', 'agent': 'a1', 'text': 'plan'}]}}
+    old_home = common.HOME
+    common.HOME = os.path.join(base, 'home-restore')
+    try:
+        have = relay_hooks.restore_artifacts(arts, 'run-h', 'a1', scratch)
+        logtext = read(os.path.join(common.HOME, 'hooks.log')).decode() if os.path.exists(os.path.join(common.HOME, 'hooks.log')) else ''
+    finally:
+        common.HOME = old_home
+    check('artefact restore: a path through a link in the scratch directory is refused and logged; a plain path is restored',
+          have == ['notes/plan.md'] and not os.listdir(outside) and read(os.path.join(scratch, 'notes', 'plan.md')) == b'plan'
+          and 'artifact not restored: link/settings.json' in logtext
+          and not [n for n in os.listdir(os.path.join(scratch, 'notes')) if 'ctrlb-tmp' in n], f'{have} {os.listdir(outside)} {logtext[-200:]}')
+
+
 def main():
     seeker = Seeker()
     test_layout()
@@ -1980,6 +2131,7 @@ def main():
     test_root_install()
     test_codex_backfill(seeker)
     test_validate()
+    test_hardening(seeker)
     seeker.httpd.shutdown()
     fails = [r for r in results if not r[1]]
     print(f'\n{len(results) - len(fails)}/{len(results)} passed (Seeker: synthetic fixtures in tests/fixtures/seeker)')
