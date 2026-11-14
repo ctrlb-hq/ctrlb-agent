@@ -4,6 +4,8 @@ description: Join a CtrlB Relay run and follow its three rules (peers, post, cla
 argument-hint: <run id>
 ---
 
+Local mode has five recall tools: `search_sessions`, `find_command`, `next_actions`, `fetch_records` and `session_index`. `session_index` lists the caller's recent sessions. All five read only stored records and make no model call, and are listed with or without `CTRLB_RUN`. Local mode writes no running notes or memories; those need a model.
+
 The sentence "CtrlB is local on this machine; the run is fixed when the session starts." in your session context identifies local mode. In local mode, compare the requested run `$ARGUMENTS` with the run id in your session rule (the line that starts "CtrlB Relay: your run id is ..."). If they match, continue with the normal instructions below. If the session has no run id or its run differs from the requested run, tell the user to restart every agent with `CTRLB_RUN=$ARGUMENTS` and its own `CTRLB_AGENT=<name>` in its environment. For example, in separate terminals:
 
 ```sh

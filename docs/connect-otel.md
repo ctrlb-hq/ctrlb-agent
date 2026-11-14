@@ -87,3 +87,5 @@ The export is the harness's event log. The agent package writes different rows a
 - **No CtrlB Relay.** The agent is not told its run id, has no `peers`, `post`, `claim` or `release` tools, and edits are not checked. Add the MCP server (Connect Claude Code or Connect Codex) for those.
 - **No redaction.** The package's secret patterns run only on rows it uploads. With `OTEL_LOG_USER_PROMPTS` and `OTEL_LOG_ASSISTANT_RESPONSES`, prompt and response text is exported as written.
 - **No past sessions.** Only events after the variables are set are exported. `bin/backfill.py` uploads past sessions as session store rows.
+
+For local setup, see [Local mode](local-mode.md).

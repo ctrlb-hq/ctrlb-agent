@@ -221,6 +221,8 @@ Changing settings needs the `relay.manage` permission.
 
 CtrlB's MCP server at `<your CtrlB URL>/mcp` serves these calls as tools: `search_sessions`, `find_command`, `next_actions`, `fetch_records`, `peers`, `post`, `claim`, `release`, `brief` and `briefs`. Send the key as `Authorization: Bearer <your key>`. The relay tools take `run_id` and `agent` as arguments, or from the `X-CtrlB-Run` and `X-CtrlB-Agent` headers.
 
+For local setup, see [Local mode](local-mode.md).
+
 ```sh
 claude mcp add --transport http ctrlb "<your CtrlB URL>/mcp" --header "Authorization: Bearer <your key>"
 ```

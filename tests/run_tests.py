@@ -3134,6 +3134,27 @@ def test_local_install_download_errors():
 
 def test_local_documentation():
     doc = read(os.path.join(ROOT, 'docs', 'local-mode.md')).decode()
+    recall_tools = ['search_sessions', 'find_command', 'next_actions', 'fetch_records', 'session_index']
+    check('local docs: five recall tools with descriptions',
+          'five recall tools' in doc
+          and re.findall(r'^- `(\w+)`: .+\.$', doc, re.M) == recall_tools)
+    paths = ['README.md', 'docs/local-mode.md', 'docs/limits.md', 'docs/session-store.md',
+             'docs/relay-tools.md',
+             'plugin/skills/recall/SKILL.md', 'plugin/skills/relay/SKILL.md']
+    for path in paths:
+        text = read(os.path.join(ROOT, path)).decode()
+        check(f'local recall wording: {path} names all five tools and session index scope',
+              all(f'`{tool}`' in text for tool in recall_tools)
+              and ("lists the caller's recent sessions" in text
+                   or "list the caller's recent sessions" in text))
+        check(f'local recall wording: {path} documents stored reads, run independence and no model writes',
+              'read only stored records and make no model call' in text
+              and 'with or without `CTRLB_RUN`' in text
+              and 'Local mode writes no running notes or memories; those need a model.' in text)
+    for name in ('claude-code', 'codex', 'http', 'otel'):
+        path = f'docs/connect-{name}.md'
+        check(f'local docs: {path} links to local setup',
+              '(local-mode.md)' in read(os.path.join(ROOT, path)).decode())
     commands = [line for line in doc.splitlines() if line.startswith('ctrlb push ')]
     check('local docs: push uses hosted environment key or private key file without a key argument',
           commands and not any(re.search(r'--key(?:\s|=)', c) for c in commands)

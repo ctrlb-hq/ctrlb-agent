@@ -10,6 +10,8 @@ slug: limits
 
 Local mode supports Recall and Relay for one machine and one user. It has no team search or search by meaning. Relay tools and hooks require `CTRLB_RUN` in the agent's environment before it connects; see [Several agents on one laptop](local-mode.md#several-agents-on-one-laptop).
 
+Its five recall tools are `search_sessions`, `find_command`, `next_actions`, `fetch_records` and `session_index`. `session_index` lists the caller's recent sessions. All five read only stored records and make no model call, and are listed with or without `CTRLB_RUN`. Local mode writes no running notes or memories; those need a model.
+
 ## Claims are advisory unless the workspace turns on enforce
 
 A claim is a row in the run's record. It tells other agents, and the people watching, who is working on what. It does not stop a process from writing a file.

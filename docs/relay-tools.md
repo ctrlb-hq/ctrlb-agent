@@ -6,7 +6,9 @@ slug: relay-tools
 
 # Relay tools
 
-CtrlB's MCP server at `<your CtrlB URL>/mcp` gives an agent eighteen tools, and a nineteenth, `done`, that finishes a task with the evidence of its check. Four search the session store. Fourteen, and `done`, are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
+CtrlB's hosted MCP server at `<your CtrlB URL>/mcp` gives an agent eighteen tools, and a nineteenth, `done`, that finishes a task with the evidence of its check. Four search the session store. Fourteen, and `done`, are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
+
+The [local server](local-mode.md) has five recall tools: `search_sessions`, `find_command`, `next_actions`, `fetch_records` and `session_index`. `session_index` lists the caller's recent sessions. All five read only stored records and make no model call, and are listed with or without `CTRLB_RUN`. Local mode writes no running notes or memories; those need a model.
 
 To add the server by hand in Claude Code:
 

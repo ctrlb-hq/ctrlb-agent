@@ -2,14 +2,17 @@
 
 Local mode runs Recall and Relay with one `ctrlb` binary and a SQLite database on this machine. It needs no CtrlB account or other service. Once installed, session uploads, recall and coordination work without a network connection.
 
-The agent gets four recall tools:
+The agent gets five recall tools:
 
 - `search_sessions`: find words or phrases in past sessions.
 - `find_command`: find shell commands from past sessions.
 - `next_actions`: read what happened after a matching action.
 - `fetch_records`: read a range of records from a session.
+- `session_index`: list the caller's recent sessions.
 
-With no `CTRLB_RUN` in the agent's environment, local mode lists only these four tools and leaves Relay hooks off. Set `CTRLB_RUN` before starting agents to coordinate them in one run.
+All five tools read only stored records and make no model call. They are listed with or without `CTRLB_RUN` in the agent's environment. With no `CTRLB_RUN`, local mode lists only these five tools and leaves Relay hooks off. Set `CTRLB_RUN` before starting agents to coordinate them in one run.
+
+Local mode writes no running notes or memories; those need a model.
 
 ## Install
 

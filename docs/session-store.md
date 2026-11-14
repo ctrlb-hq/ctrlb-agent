@@ -8,6 +8,8 @@ slug: session-store
 
 CtrlB keeps every agent session as rows in your workspace. That record is the **session store**. **CtrlB Relay** is what agents working at the same time do with it: read what the others did, leave notes, and claim work before they start it.
 
+In [local mode](local-mode.md), the session store lives in SQLite on this machine. Its five recall tools are `search_sessions`, `find_command`, `next_actions`, `fetch_records` and `session_index`. `session_index` lists the caller's recent sessions. All five read only stored records and make no model call, and are listed with or without `CTRLB_RUN`. Local mode writes no running notes or memories; those need a model.
+
 ## Concepts
 
 | Term | Meaning |
