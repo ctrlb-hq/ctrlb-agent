@@ -48,13 +48,15 @@ Whole-word, case-insensitive search over messages, thinking, tool calls (with th
 | Argument | |
 |---|---|
 | `term` | Required. A word or phrase; it needs a word of 3 to 50 letters, digits, `.` or `+`. |
-| `session_id` | Search one session. |
+| `session_id` | Optional. Search one session; omit it to search this user's sessions. |
 | `tool` | Only rows of this tool, for example `Bash`. |
 | `order` | `newest` (default) or `oldest`. |
 | `one_per_session` | Keep the first hit of each session. |
 | `limit`, `offset` | 10 hits by default, at most 25. `offset` pages. |
 
 Answer: `{total, offset, capped_at, hits: [{session_id, parent_session, seq, role, block_type, tool_name, is_error, snippet}]}`. The snippet is 300 characters around the hit. Read around a hit with `fetch_records`.
+
+For earlier work in general, omit `session_id`. Pass the current `session_id` only to search this session's own turns before compaction. A subagent searching its parent's work passes the parent's `session_id`.
 
 ### find_command
 

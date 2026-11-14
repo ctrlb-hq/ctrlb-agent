@@ -4,6 +4,9 @@
                                             option after --codex is passed through, --help lists them)
   python3 -I install.py --local [options]   installs the CtrlB binary and initializes local mode
                                             (--help lists the download, version and port options)
+  python3 -I install.py init --codex|--claude [--dir DIR] [--dry-run] [--remove]
+                                            writes the CtrlB block into the project's AGENTS.md (Codex) or
+                                            CLAUDE.md (Claude Code) (bin/init.py; text outside the block is kept)
 
 Claude Code installs from the marketplace instead:
   claude plugin marketplace add ctrlb-hq/ctrlb-agent
@@ -18,6 +21,10 @@ def main(argv):
         sys.path.insert(0, os.path.join(HERE, 'lib'))
         import local_install
         return local_install.main(argv[1:])
+    if argv[:1] == ['init']:
+        sys.path.insert(0, os.path.join(HERE, 'bin'))
+        import init as project_init   # bin/init.py
+        return project_init.main(argv[1:])
     if argv[:1] != ['--codex']:
         print(__doc__)
         return 0 if argv[:1] in (['-h'], ['--help']) else 2

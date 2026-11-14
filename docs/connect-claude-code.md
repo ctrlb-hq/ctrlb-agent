@@ -110,6 +110,25 @@ python3 -I ~/ctrlb-agent/bin/configure.py
 
 It asks for the URL, the sessions dataset, an optional name and run id, and the key. The key prompt hides what you type. It writes `~/.ctrlb/config.json` with mode 0600, and checks that CtrlB answers. The hooks read that file when `CTRLB_URL` or `CTRLB_KEY` is not set. The MCP server still reads `CTRLB_MCP_URL` and `CTRLB_KEY` from the environment, because Claude Code expands them in `.mcp.json`.
 
+## Project instructions (optional)
+
+At session start the plugin tells the agent when to search the record: before the first grep, file read or shell command for a question about earlier work, and after a command fails. Every session with the plugin gets this rule.
+
+For earlier work in general, the rule calls `search_sessions` without `session_id` to search this user's sessions. The current session id is used only for this session's own turns before compaction; a subagent uses the parent's session id when searching the parent's work.
+
+To keep the rule in the project itself, for example for sessions where the hooks are off, write it into the project's `CLAUDE.md` from a clone of the repository. The block names the CtrlB tools, and only the plugin gives a session those tools, so every teammate still needs the plugin installed.
+
+Run the last two commands from your project's root directory:
+
+```sh
+git clone https://github.com/ctrlb-hq/ctrlb-agent.git ~/ctrlb-agent
+cd your-project
+python3 -I ~/ctrlb-agent/install.py init --claude --dry-run
+python3 -I ~/ctrlb-agent/install.py init --claude
+```
+
+The block sits between `<!-- ctrlb:begin -->` and `<!-- ctrlb:end -->`. Text outside the markers is not changed. A file that does not exist is created; a run that would change nothing writes nothing; before a change, the old file is copied to `CLAUDE.md.ctrlb-backup-<time>`. `--dry-run` prints the diff and writes nothing, and `--remove` deletes the block. Add `--codex` to write `AGENTS.md` for Codex as well.
+
 ## Edit checks
 
 Before an edit, the hook sends the file path, relative to the session's working directory, to CtrlB. The workspace setting `enforce` decides the answer:
@@ -136,4 +155,4 @@ In a relay run the plugin also registers a task for each sub-agent it spawns, ke
 - Status: run `/ctrlb-agent:setup` in Claude Code.
 - Log: `~/.ctrlb/hooks.log`.
 - Off for one session: `CTRLB_OFF=1 claude`.
-- Remove: `claude plugin uninstall ctrlb-agent@ctrlb-agent`, then delete `~/.ctrlb`. Rows already in CtrlB stay there.
+- Remove: `claude plugin uninstall ctrlb-agent@ctrlb-agent`, then delete `~/.ctrlb`. Rows already in CtrlB stay there. To remove the `CLAUDE.md` block, run `python3 -I ~/ctrlb-agent/install.py init --claude --remove` in the project.
