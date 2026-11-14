@@ -287,7 +287,9 @@ def registered_rule(text, md=False):
 def recall_rule(text, sid):
     """The session-start recall rule: search before the first grep, file read or shell command about earlier work,
     find_command after a failed command, then next_actions on what it returns, and the session id to pass on to subagents."""
-    return (f'call `search_sessions` (session_id {sid})' in text and 'Before your first grep, file read or shell command' in text
+    return ("call `search_sessions` without session_id to search this user's sessions." in text
+            and f"Pass session_id {sid} only to search this session's own turns before compaction." in text
+            and 'Before your first grep, file read or shell command' in text
             and 'After a command fails, call `find_command` with the command before changing it, then `next_actions` with a session_id and seq it returns to see what followed.' in text
             and 'Pass this session_id to every subagent you start' in text)
 
@@ -1197,7 +1199,7 @@ def test_init():
     def backups(d):
         return sorted(n for n in os.listdir(d) if '.ctrlb-backup-' in n)
 
-    rule = hooks_shared.RECALL.format(sid='SID').replace(' (session_id SID)', '')
+    rule = hooks_shared.RECALL.format(sid='SID').replace('session_id SID', 'session_id')
     check('init: the block text is the session-start rule without the session id sentence',
           rule == project_rules.RULE + ' Pass this session_id to every subagent you start and tell it the same rule.')
 
@@ -1380,6 +1382,156 @@ def test_init():
     p = run(d, '--codex', '--claude')
     check('init --codex --claude: a broken CLAUDE.md stops the run before AGENTS.md is written', p.returncode == 2
           and 'CLAUDE.md' in p.stderr and read(os.path.join(d, 'AGENTS.md')) == mine and not backups(d), p.stderr[-200:])
+
+
+def test_recall_search_scope():
+    import hooks_shared
+    import project_rules
+    recall = hooks_shared.RECALL.format(sid=SID)
+    subagent = hooks_shared.SUBAGENT.format(sid=SID)
+    check('recall search scope: earlier work searches the user sessions without a session filter',
+          all("call `search_sessions` without session_id to search this user's sessions." in rule
+              for rule in (recall, project_rules.RULE)))
+    check('recall search scope: the current session filter is only for its own turns before compaction',
+          f"Pass session_id {SID} only to search this session's own turns before compaction." in recall
+          and "Pass session_id only to search this session's own turns before compaction." in project_rules.RULE)
+    check('recall search scope: subagents filter parent work and omit the filter for earlier work in general',
+          f'Call `search_sessions` with session_id {SID} to search your parent\'s work' in subagent
+          and "For earlier work in general, omit session_id to search this user's sessions." in subagent)
+    docs = [os.path.join(ROOT, 'docs', name) for name in
+            ('session-store.md', 'relay-tools.md', 'connect-codex.md', 'connect-claude-code.md')]
+    docs.append(os.path.join(ROOT, 'plugin', 'skills', 'recall', 'SKILL.md'))
+    check('recall search scope: docs distinguish general recall, pre-compaction turns and parent work',
+          all("this user's sessions" in (text := open(path).read()) and "this session's own turns before compaction" in text
+              and "parent's" in text for path in docs))
+    for harness, script in (('Claude Code', HOOK), ('Codex', CODEX_HOOK)):
+        env = base_env('http://127.0.0.1:1', os.path.join(WORK, 'recall-scope-' + harness.replace(' ', '-')))
+        inp = dict(session_id=SID, transcript_path='', cwd=WORK, hook_event_name='SessionStart')
+        p, _ = hook('session-start', inp, env, script=script)
+        check(f'recall search scope: {harness} session-start emits the general and current-session rules',
+              p.returncode == 0 and recall_rule(out_of(p).get('additionalContext', ''), SID))
+        inp.update(hook_event_name='SubagentStart', agent_id='agent-fixture')
+        p, _ = hook('subagent-start', inp, env, script=script)
+        check(f'recall search scope: {harness} subagent-start emits the parent-session rule',
+              p.returncode == 0 and subagent in out_of(p).get('additionalContext', ''))
+
+
+def test_project_backup_exclusive():
+    import project_rules
+    from unittest.mock import patch
+    base = os.path.join(WORK, 'backup-exclusive')
+    shutil.rmtree(base, ignore_errors=True)
+    os.makedirs(base)
+    source = os.path.join(base, 'AGENTS.md')
+    old = b'# Keep these rules\n'
+    stamp = '20260102-030405'
+    candidate = source + '.ctrlb-backup-' + stamp
+    with patch('project_rules.datetime.datetime') as date:
+        date.now.return_value.strftime.return_value = stamp
+        with open(source, 'wb') as fh:
+            fh.write(old)
+        os.chmod(source, 0o640)
+        target = os.path.join(base, 'absent.txt')
+        os.symlink(target, candidate)
+        os.mkdir(candidate + '-1')
+        with open(candidate + '-2', 'wb') as fh:
+            fh.write(b'existing backup\n')
+        backup = project_rules.write(source, 'updated\n')
+        check('backup exclusive: dangling symlinks, directories and files are skipped without changing them',
+              backup == candidate + '-3' and not os.path.lexists(target) and os.path.islink(candidate)
+              and os.path.isdir(candidate + '-1') and read(candidate + '-2') == b'existing backup\n'
+              and read(backup) == old and read(source) == b'updated\n'
+              and stat.S_IMODE(os.stat(source).st_mode) == 0o640)
+
+    # Insert a collision at the creation call, after any preliminary name check could have run.
+    for collision in ('file', 'symlink'):
+        source = os.path.join(base, collision + '.md')
+        candidate = source + '.ctrlb-backup-' + stamp
+        target = os.path.join(base, collision + '-target.txt')
+        with open(source, 'wb') as fh:
+            fh.write(old)
+        with open(target, 'wb') as fh:
+            fh.write(b'precious\n')
+        real_open, attempts = os.open, []
+
+        def racing_open(path, flags, mode=0o777, *args, **kwargs):
+            if str(path).startswith(candidate):
+                attempts.append((str(path), flags, mode))
+                if str(path) == candidate:
+                    if collision == 'symlink':
+                        os.symlink(target, path)
+                    else:
+                        with open(path, 'wb') as fh:
+                            fh.write(b'concurrent backup\n')
+            return real_open(path, flags, mode, *args, **kwargs)
+
+        with patch('project_rules.datetime.datetime') as date, patch('project_rules.os.open', side_effect=racing_open):
+            date.now.return_value.strftime.return_value = stamp
+            backup = project_rules.write(source, 'updated\n')
+        required = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0)
+        check(f'backup exclusive: a racing {collision} is preserved and creation retries a fresh suffix',
+              backup == candidate + '-1' and len(attempts) == 2
+              and all(flags & required == required and mode in (0o600, 0o644) for _, flags, mode in attempts)
+              and read(target) == b'precious\n' and read(backup) == old and read(source) == b'updated\n'
+              and (os.path.islink(candidate) if collision == 'symlink' else read(candidate) == b'concurrent backup\n'))
+
+    source = os.path.join(base, 'reserved.md')
+    candidate = source + '.ctrlb-backup-' + stamp
+    target = os.path.join(base, 'reserved-target.txt')
+    saved = candidate + '.saved'
+    with open(source, 'wb') as fh:
+        fh.write(old)
+    with open(target, 'wb') as fh:
+        fh.write(b'precious\n')
+
+    def swapped_open(path, flags, mode=0o777, *args, **kwargs):
+        fd = real_open(path, flags, mode, *args, **kwargs)
+        if str(path) == candidate:
+            os.rename(path, saved)
+            os.symlink(target, path)
+        return fd
+
+    with patch('project_rules.datetime.datetime') as date, patch('project_rules.os.open', side_effect=swapped_open):
+        date.now.return_value.strftime.return_value = stamp
+        project_rules.write(source, 'updated\n')
+    check('backup exclusive: copying uses the reserved descriptor even if its path becomes a symlink',
+          os.path.islink(candidate) and read(target) == b'precious\n' and read(saved) == old
+          and stat.S_IMODE(os.stat(saved).st_mode) in (0o600, stat.S_IMODE(os.stat(source).st_mode)))
+
+
+def test_project_list_fences():
+    import project_rules
+    examples = {
+        'bullet': '- ```md\n  <!-- ctrlb:begin -->\n  example to preserve\n  <!-- ctrlb:end -->\n  ```\n',
+        'ordered': '1. ~~~md\n   <!-- ctrlb:begin -->\n   example to preserve\n   <!-- ctrlb:end -->\n   ~~~\n',
+        'continuation': '- item\n\n  ```md\n  <!-- ctrlb:begin -->\n  example to preserve\n  <!-- ctrlb:end -->\n  ```\n',
+        'nested': '- outer\n  - inner\n\n    ```md\n    <!-- ctrlb:begin -->\n    example to preserve\n    <!-- ctrlb:end -->\n    ```\n',
+        'nested-marker': '- outer\n    - ~~~md\n      <!-- ctrlb:begin -->\n      example to preserve\n      <!-- ctrlb:end -->\n      ~~~\n',
+        'tabs': '- outer\n\t- ```md\n\t  <!-- ctrlb:begin -->\n\t  example to preserve\n\t  <!-- ctrlb:end -->\n\t  ```\n',
+        'fence-content': '```md\n- ```\n<!-- ctrlb:begin -->\nexample to preserve\n<!-- ctrlb:end -->\n```\n',
+    }
+    for name, example in examples.items():
+        for nl in ('\n', '\r\n'):
+            old = example.replace('\n', nl)
+            real = old + nl + project_rules.BEGIN + nl + 'old rule' + nl + project_rules.END + nl
+            name_check = f'list fences: {name} ({repr(nl)}) keeps examples through append, update, rerun and removal'
+            try:
+                added = project_rules.render(old)
+                replaced = project_rules.render(real)
+            except project_rules.Refused as e:
+                check(name_check, False, str(e))
+                continue
+            check(name_check,
+                  added.startswith(old + nl + project_rules.BEGIN + nl)
+                  and project_rules.render(added) == added and project_rules.render(added, remove=True) == old
+                  and replaced.startswith(old + nl + project_rules.BEGIN + nl) and 'old rule' not in replaced
+                  and project_rules.render(old, remove=True) == old)
+    outdent = '- ```md\n  <!-- ctrlb:begin -->\n  <!-- ctrlb:end -->\n\n# Outside the list\n'
+    check('list fences: an outdent ends the list fence before a real block',
+          project_rules.render(outdent).startswith(outdent + '\n' + project_rules.BEGIN + '\n'))
+    indented = '    ```md\n' + project_rules.BEGIN + '\nold rule\n' + project_rules.END + '\n    ```\n'
+    check('list fences: four-space indentation without a list does not open a fence',
+          project_rules._markers(project_rules.split_lines(indented)) == ([1], [3], None))
 
 
 def test_codex_install():
@@ -2171,6 +2323,9 @@ def main():
     test_codex_hooks(seeker)
     test_codex_install()
     test_root_install()
+    test_recall_search_scope()
+    test_project_backup_exclusive()
+    test_project_list_fences()
     test_init()
     test_codex_backfill(seeker)
     test_validate()

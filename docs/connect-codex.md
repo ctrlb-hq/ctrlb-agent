@@ -45,6 +45,8 @@ Then start Codex and run `/hooks` once. Codex runs no hook until a person approv
 
 Codex reads `AGENTS.md` in your project at the start of every session, with no approval step. Because hooks run only after `/hooks`, the `AGENTS.md` block is what reaches Codex by default. It tells the agent when to search the record: before the first grep, file read or shell command for a question about earlier work, and after a command fails.
 
+For earlier work in general, the rule calls `search_sessions` without `session_id` to search this user's sessions. The current session id is used only for this session's own turns before compaction; a subagent uses the parent's session id when searching the parent's work.
+
 Run this from your project's root directory:
 
 ```sh

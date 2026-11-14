@@ -29,8 +29,9 @@ FILES = {'codex': 'AGENTS.md', 'claude': 'CLAUDE.md'}
 
 RULE = ("Earlier work is in the CtrlB record, not in your context: this session's turns before compaction, and this "
         "user's earlier sessions. Before your first grep, file read or shell command for a question about earlier "
-        "work (what was done, decided, run, read, or why something failed), call `search_sessions`. After a command "
-        "fails, call `find_command` with the command before changing it, then `next_actions` with a session_id and "
+        "work (what was done, decided, run, read, or why something failed), call `search_sessions` without session_id "
+        "to search this user's sessions. Pass session_id only to search this session's own turns before compaction. "
+        "After a command fails, call `find_command` with the command before changing it, then `next_actions` with a session_id and "
         "seq it returns to see what followed. Do not say something was not said or not done until you have searched.")
 
 
@@ -67,17 +68,40 @@ def _ending(line):
 
 def _markers(lines):
     """(begin marker indexes, end marker indexes, index of a fence left open at the end or None), skipping lines inside
-    ``` or ~~~ fenced code blocks. A marker is the whole line, trimmed: <!-- ctrlb:begin --> or <!-- ctrlb:end -->."""
+    ``` or ~~~ fenced code blocks, including list items. A marker is the whole line, trimmed:
+    <!-- ctrlb:begin --> or <!-- ctrlb:end -->."""
     begins, ends, fence, opened = [], [], None, None
+    list_indents, fence_indent = [], 0
     for i, ln in enumerate(lines):
         body = ln[:len(ln) - len(_ending(ln))]
-        m = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', body)
+        # Tabs occupy four-column stops in Markdown. Keep the original line for marker matching and output.
+        expanded = body.expandtabs(4)
+        indent = len(expanded) - len(expanded.lstrip(' '))
         if fence:
-            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+            if fence_indent and expanded.strip() and indent < fence_indent:
+                # An outdent ends the list container, and with it its fenced code block.
                 fence = None
-            continue
+            else:
+                m = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', expanded[fence_indent:])
+                if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+                    fence = None
+                continue
+        if expanded.strip():
+            while list_indents and indent < list_indents[-1]:
+                list_indents.pop()
+        offset = list_indents[-1] if list_indents else 0
+        # Remove list containers before looking for a fence: '- ```', '1. ~~~', and nested/continuation lines.
+        # CommonMark allows up to three spaces before a list marker and one to four spaces after it.
+        while True:
+            item = re.match(r'^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])( +)', expanded[offset:])
+            if not item:
+                break
+            padding = len(item.group(1))
+            offset += item.end() - (padding - 1 if padding > 4 else 0)
+            list_indents.append(offset)
+        m = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', expanded[offset:])
         if m and not (m.group(1)[0] == '`' and '`' in m.group(2)):
-            fence, opened = m.group(1), i
+            fence, opened, fence_indent = m.group(1), i, offset
             continue
         if body.strip() == BEGIN:
             begins.append(i)
@@ -133,12 +157,16 @@ def read(path):
         return fh.read()
 
 
-def backup_path(path):
+def _reserve_backup(path):
+    """Return a fresh backup path and its exclusively created descriptor; existing symlinks are collisions too."""
     stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     p, i = f'{path}.ctrlb-backup-{stamp}', 1
-    while os.path.exists(p):
-        p, i = f'{path}.ctrlb-backup-{stamp}-{i}', i + 1
-    return p
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0)
+    while True:
+        try:
+            return p, os.open(p, flags, 0o600)
+        except FileExistsError:
+            p, i = f'{path}.ctrlb-backup-{stamp}-{i}', i + 1
 
 
 def write(path, text):
@@ -148,9 +176,14 @@ def write(path, text):
     path = os.path.realpath(path)
     backup, mode = '', 0o644
     if os.path.exists(path):
-        backup = backup_path(path)
-        shutil.copy2(path, backup)
         mode = os.stat(path).st_mode & 0o777
+        backup, backup_fd = _reserve_backup(path)
+        try:
+            with os.fdopen(backup_fd, 'wb') as dst, open(path, 'rb') as src:
+                shutil.copyfileobj(src, dst)
+        except BaseException:
+            os.unlink(backup)
+            raise
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.' + os.path.basename(path) + '.ctrlb-', suffix='.tmp')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8', newline='') as fh:
