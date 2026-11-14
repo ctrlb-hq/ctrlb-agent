@@ -1,4 +1,4 @@
-"""Claude Code transcript -> session rows (relay-plan section 5), one per content block, and incremental upload to
+"""Claude Code transcript -> session rows, one per content block, and incremental upload to
 Seeker with redaction. seq is the line number in the transcript file, so a row can be traced back to its place.
 
 Beyond the content blocks:

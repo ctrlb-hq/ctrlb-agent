@@ -1,4 +1,4 @@
-"""Codex rollout -> session rows (relay-plan section 5), the same columns as rows_claude with harness = "codex".
+"""Codex rollout -> session rows, the same columns as rows_claude with harness = "codex".
 
 A rollout is ~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<time>-<thread id>.jsonl, one JSON object per line:
 {timestamp, type, payload}. What becomes a row (seq is the line number, block_idx the item index):

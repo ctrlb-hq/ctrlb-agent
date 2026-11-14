@@ -1,6 +1,7 @@
 """Secret redaction, shared by every parser. Runs on each row's body and command before upload.
 Pattern matching cannot catch every secret; it catches the common shapes (keys, tokens, Authorization values,
-assignments to names ending in SECRET, TOKEN, PASSWORD or KEY, passwords in URLs)."""
+assignments to names ending in SECRET, TOKEN, PASSWORD or KEY, passwords in URLs, credential headers such as
+X-API-Key and Cookie, and flags such as --token and --password)."""
 import re
 
 REDACT = [
@@ -19,6 +20,16 @@ REDACT = [
     # config line as an artefact because \b does not fire between "_" and "access"
     re.compile(r'(?i)(["\']?\b(?:[a-z0-9]+[_\-.])*(?:password|passwd|secret|client_secret|api_?key|access_?key|auth_?token|access_token|refresh_token)["\']?\s*[:=]\s*["\']?)(?![<$])[^\s"\',}]{4,}'),
     re.compile(r'(\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:)[^\s@/]+(@)'),
+    # credential headers, in curl -H/--header, httpie Name:value and raw requests. A value already redacted by an
+    # earlier pattern is left alone, so a secret is counted once.
+    re.compile(r'(?i)(\b(?:x-api-key|api-key|x-auth-token|x-access-token|private-token|x-amz-security-token)\s*:\s*)'
+               r'(?!\[REDACTED\])[^\s"\';,]{4,}'),
+    re.compile(r'(?i)(\b(?:proxy-)?authorization\s*:\s*(?:[A-Za-z][A-Za-z0-9_\-]*\s+)?)(?!\[REDACTED\])[A-Za-z0-9._~+/=\-]{8,}'),
+    re.compile(r'(?i)(\b(?:set-)?cookie\s*:\s*)(?!\[REDACTED\])[^\s=;"\']+=[^"\'\r\n]*'),
+    # credential flags: --token <value>, --api-key=<value>, --password "<value>"; a value starting with -, < or $ is another
+    # flag, a placeholder or a variable reference
+    re.compile(r'(?i)((?<![\w-])--(?:[a-z0-9]+-)*(?:token|api-?key|password|passwd|secret|access-key|auth-token|access-token)'
+               r'(?:=|\s+)["\']?)(?![-<$]|\[REDACTED\])[^\s"\']{4,}'),
 ]
 
 

@@ -65,15 +65,6 @@ agent-a                        relay dataset                        agent-b
 - A claim with `reopen=true` on a done task writes a `REOPEN` row instead of a `HOLD` and follows the same steps, so two agents that reopen at once agree on one holder. Only rows from that `REOPEN` on decide the key; the earlier rounds stay in the record.
 - `check` is step 3 for each path, with no hold written.
 
-In the research behind this page, 480 contended write-first claims produced no double holder, against 30 of 30 trials for read-then-write. Four agents on one repository did 27 of 96 tasks twice with no shared record, 19 when they could post, and 1 when they could claim.
-
-## Research
-
-The two papers behind the session store and Relay are not public yet. They are:
-
-- *A Session Store for Long-Running Coding Agents: Keeping the Full Record Searchable Across Compactions* (`session-store-long-running.tex`): one agent, and a record that survives compaction.
-- *A Session Store for Swarms of Coding Agents: Coordinating Through a Shared, Searchable Record* (`session-store-swarms.tex`): many agents, one record they coordinate through, the claim protocol and its measurements.
-
 ## Next
 
 - [Connect Claude Code](connect-claude-code.md), [Connect Codex](connect-codex.md), [Connect with OTEL only](connect-otel.md), [Connect over HTTP](connect-http.md)

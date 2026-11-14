@@ -98,11 +98,11 @@ The hook gives up after two seconds. On a timeout, an unreachable Seeker or any 
 
 Rows go to `POST /ai/sessions/{dataset}/records`, at most 500 per call. The dataset is `agent_sessions` unless `CTRLB_DATASET` says otherwise. Uploads happen at the end of each turn, before each compaction, when a subagent starts or stops, and when the session ends. Each upload sends only the transcript lines added since the last one.
 
-Each row carries the session, run and agent ids, the role and block type, the tool name, the shell command, the paths an edit tool touched, the text (cut at 64 KB), error and summary flags, cwd, git branch, token counts and cost. Section 5 of `docs/relay-plan.md` lists the columns. `harness` is `claude` or `codex`.
+Each row carries the session, run and agent ids, the role and block type, the tool name, the shell command, the paths an edit tool touched, the text (cut at 64 KB), error and summary flags, cwd, git branch, token counts and cost. `harness` is `claude` or `codex`.
 
 Codex rows come from the rollout files in `~/.codex/sessions`. User and assistant messages, reasoning summaries, tool calls and tool results become rows. Developer messages and encrypted reasoning do not. Each `token_usage_record` becomes one `result` row with the token counts. Codex rows carry no cost.
 
-Before upload, text that looks like a secret is replaced with `[REDACTED]`. That covers private keys, cloud and API keys, tokens, JWTs, Authorization and Bearer values, assignments to names ending in SECRET, TOKEN, PASSWORD or KEY, and passwords in URLs. Pattern matching cannot catch every secret. Do not paste real credentials into a session.
+Before upload, text that looks like a secret is replaced with `[REDACTED]`. That covers private keys, cloud and API keys, tokens, JWTs, Authorization and Bearer values, credential headers such as `X-API-Key`, `X-Auth-Token` and `Cookie`, flags such as `--token`, `--api-key` and `--password`, assignments to names ending in SECRET, TOKEN, PASSWORD or KEY, and passwords in URLs. Pattern matching cannot catch every secret. Do not paste real credentials into a session.
 
 ## Configuration
 
@@ -148,8 +148,6 @@ lib/paths.py                      resource keys, identical to Seeker's (tests/fi
 bin/                              configure.py, status.py, backfill.py
 tests/run_tests.py                python3 -I tests/run_tests.py
 docs/connect-*.md                 the docs-site pages: Claude Code, Codex, OTEL only, HTTP
-docs/relay-plan.md                the build plan
-research/relay/                   the research prototype of Relay and its parity runner (research code, not the plugin)
 ```
 
 ## Tests
@@ -158,4 +156,4 @@ research/relay/                   the research prototype of Relay and its parity
 python3 -I tests/run_tests.py
 ```
 
-The tests run against a local fake Seeker that answers with the responses in `tests/fixtures/seeker/`. Those responses are synthetic: they are built from section 4 of the plan, not recorded. When `claude` is installed, the tests also run `claude plugin validate` on the marketplace and the plugin. When `codex` is installed, they load the installer's output with `codex mcp list` in a temporary Codex home. The tests never touch `~/.codex/config.toml`.
+The tests run against a local fake Seeker that answers with the responses in `tests/fixtures/seeker/`. Those responses are synthetic: they are written by hand, not recorded. When `claude` is installed, the tests also run `claude plugin validate` on the marketplace and the plugin. When `codex` is installed, they load the installer's output with `codex mcp list` in a temporary Codex home. The tests never touch `~/.codex/config.toml`.
