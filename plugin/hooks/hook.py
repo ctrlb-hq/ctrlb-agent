@@ -47,7 +47,7 @@ def _who(cfg, inp):
     return common.run_id(cfg, sid), common.agent_name(cfg, sid, inp.get('agent_id') or ''), sid
 
 
-def session_end(cfg, inp):
+def session_end(cfg, inp, deadline=None):
     """Seeker decision 36: on SessionEnd (a normal end, SIGTERM or SIGINT; never SIGKILL) hand off every hold the agent
     still has, in one write: each task openly (to nobody) with a text built from this session's record, each path
     and slot released. Sent only in a relay run (CTRLB_RUN set, or a ctrlb relay tool was called in this session).
@@ -65,8 +65,11 @@ def session_end(cfg, inp):
     except Exception:
         last = None
     text = handoff_text(rec, last)
+    remaining = min(HANDOFF_S, deadline - time.monotonic()) if deadline is not None else HANDOFF_S
+    if remaining <= 0:
+        return None
     try:
-        ans = common.handoff_all(cfg, run, agent, text, inp.get('cwd') or '', timeout=HANDOFF_S)
+        ans = common.handoff_all(cfg, run, agent, text, inp.get('cwd') or '', timeout=remaining)
     except Exception as e:
         common.log(f"session-end handoff {run}/{agent}: {type(e).__name__}: {str(e)[:200]}")
         return None
@@ -82,6 +85,8 @@ def pre_tool(cfg, inp):
     if (inp.get('tool_name') or '') in DONE_TOOLS:
         run, agent, sid = _who(cfg, inp)
         return witness(common.SessionRecord(run, agent).get(sid), inp.get('tool_input'))
+    if cfg['enforce'] == 'off':
+        return None
     paths = rows_claude.edit_paths(inp.get('tool_name'), inp.get('tool_input'))
     if not paths:
         return None
@@ -101,8 +106,6 @@ def pre_tool(cfg, inp):
         paths = [p for p in normalise_edit_paths(paths, cwd) if p not in slots]
         if not paths:
             return None
-    if cfg['enforce'] == 'off':
-        return None
     return decide(cfg, run, agent, paths, cwd)
 
 
@@ -217,11 +220,12 @@ def main():
     elif mode == 'flush':
         upload(cfg, inp, SYNC_S)
     elif mode == 'session-end':
+        deadline = time.monotonic() + 1.4      # leave room for interpreter shutdown within the host's 1.5 s
         try:
-            session_end(cfg, inp)
+            session_end(cfg, inp, deadline)
         except Exception as e:
             common.log(f"session-end: {type(e).__name__}: {str(e)[:200]}")
-        upload(cfg, inp, SYNC_S)
+        upload(cfg, inp, max(0, deadline - time.monotonic()))
     elif mode == 'upload':
         upload(cfg, inp, ASYNC_S)
     elif mode in ('post-tool', 'post-tool-failure'):

@@ -20,7 +20,7 @@ A rollout is ~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<time>-<thread id>.jsonl
 session_meta gives the ids, cwd and git branch; turn_context updates cwd. A rollout whose session_meta names a
 parent_thread_id is a subagent: parent_session is that id, agent_id its own thread id, and it joins its parent's
 run (decision 4). Upload is incremental by byte offset with FileState, through rows_claude.upload_file."""
-import glob, json, os, re, shlex
+import functools, glob, json, os, re, shlex
 import common, rows_claude
 from paths import edit_paths as normalise_edit_paths
 from rows_claude import micros
@@ -113,12 +113,44 @@ def agent_for(cfg, sid, parent=''):
     return label or sid or ''
 
 
+@functools.lru_cache(maxsize=4)
+def _session_files(root):
+    """Index filenames once per process; backfill must not reopen every session for each child."""
+    files = {}
+    for file in rollouts(root):
+        match = UUID_RE.search(os.path.basename(file))
+        if match:
+            files[match.group(1)] = file
+    return files
+
+
+def session_run(cfg, sid, parent='', path=''):
+    """Resolve the ancestor chain once for both uploads and hooks. A missing ancestor falls back to the oldest
+    known thread; cycles stop without looping. An explicit run always wins."""
+    if cfg.get('run') or not parent:
+        return common.run_id(cfg, sid, parent)
+    seen = {sid}
+    while parent and parent not in seen and len(seen) < 64:
+        seen.add(parent)
+        sid, parent = parent, ''
+        # A sibling named directly by id is also useful for exported rollouts. Only safe filename components
+        # may be used here; normal Codex filenames are found by their UUID suffix, without reading other files.
+        file = os.path.join(os.path.dirname(path), sid + '.jsonl') if path and re.fullmatch(r'[\w-]+', sid) else ''
+        if not file or not os.path.isfile(file):
+            file = _session_files(os.path.join(codex_home(), 'sessions')).get(sid)
+        if file:
+            meta = read_meta(file)
+            if str(meta.get('id') or meta.get('session_id') or '') == sid:
+                parent = str(meta.get('parent_thread_id') or '')
+    return sid
+
+
 def ids_for_file(cfg, path):
     meta = read_meta(path)
     m = UUID_RE.search(os.path.basename(path))
     sid = str(meta.get('id') or meta.get('session_id') or (m.group(1) if m else os.path.basename(path)))
     parent = str(meta.get('parent_thread_id') or '')
-    return dict(sid=sid, parent=parent, agent_id=sid if parent else '', run_id=common.run_id(cfg, sid, parent),
+    return dict(sid=sid, parent=parent, agent_id=sid if parent else '', run_id=session_run(cfg, sid, parent, path),
                 agent=agent_for(cfg, sid, parent))
 
 

@@ -71,7 +71,7 @@ class Seeker:
                 pass
 
             def _answer(self, status, body):
-                raw = json.dumps(body).encode()
+                raw = body if isinstance(body, bytes) else json.dumps(body).encode()
                 try:
                     self.send_response(status)
                     self.send_header('Content-Type', 'application/json')
@@ -104,6 +104,11 @@ class Seeker:
                     if any(isinstance(r, dict) and r.get('user_name') not in (None, '', owner) for r in body):
                         outer.refused.append(body)
                         return self._answer(**outer.records['responses']['other_user'])
+                    if outer.state.get('records_answer'):
+                        status, answer = outer.state['records_answer'](body)
+                        if status == 202 and isinstance(answer, dict) and answer.get('accepted') == len(body):
+                            outer.rows.extend(body)
+                        return self._answer(status, answer)
                     outer.rows.extend(body)
                     return self._answer(202, dict(outer.records['responses']['accepted']['body'], accepted=len(body)))
                 m = re.match(r'^/ai/relay/([A-Za-z0-9_]+)/runs/([^/]+)/check$', self.path)
@@ -550,6 +555,35 @@ def test_redaction_assignment_safety():
             check('credential containers mask string leaves: ' + key,
                   (json.loads(cleaned) if isinstance(cleaned, str) else cleaned) == expected and n == 1
                   and redact.redact(cleaned) == (cleaned, 0) and original == {key: value})
+    for key in ('Admin Password', 'db:password', '/api_key', '@password', '$TOKEN', 'Admin db_password',
+                'db:/auth_token', '/private_key', '@client_secret', '$access_key'):
+        for value in ('S', 'synthetic-value', 1234, {'nested': ['synthetic-value']}):
+            original = {key: value}
+            expected = {key: {'nested': ['[REDACTED]']} if isinstance(value, dict) else '[REDACTED]'}
+            for text in (original, json.dumps(original)):
+                clean, n = redact.redact(text)
+                check('credential JSON keys accept spaces and punctuation before the name: ' + key,
+                      (json.loads(clean) if isinstance(clean, str) else clean) == expected and n == 1
+                      and redact.redact(clean) == (clean, 0) and original == {key: value})
+    for name in ('DB_PASSWORD', 'API_TOKEN', 'SECRET_KEY_BASE', 'PRIMARY_KEY'):
+        for value in ('abc,def', 'abc}def', 'abc]def', '[1,2]', 'abc;def', '$VARIABLE', '<placeholder>'):
+            text = name + '=>' + value
+            expected = name + '=>[REDACTED]'
+            check('uppercase arrow assignments mask the complete shell value: ' + name,
+                  redact.redact(text) == (expected, 1) and redact.redact(expected) == (expected, 0))
+    for name in ('X-Auth-Token', 'X-Access-Token', 'Private-Token', 'X-Amz-Security-Token', 'X-Api-Key', 'Api-Key'):
+        for value in ('abc}def', 'abc]def', '[1234]', 'abcdef,tail', '[1234,5678]'):
+            for text in (name + ': ' + value, 'curl -H "' + name + ': ' + value + '" example.test'):
+                clean, n = redact.redact(text)
+                expected = text.replace(value, '[REDACTED]' + value[value.index(','):] if ',' in value else '[REDACTED]')
+                check('credential headers retain complete brace and bracket values: ' + name,
+                      clean == expected and n > 0 and redact.redact(clean) == (clean, 0))
+    for text, expected in (('curl -H "password: null" example.test', 'curl -H "password: [REDACTED]" example.test'),
+                           ("'SECRET_KEY=null", "'SECRET_KEY=[REDACTED]"),
+                           ('TOKEN:=<placeholder>', 'TOKEN:=[REDACTED]'),
+                           ('password=>$VARIABLE', 'password=>[REDACTED]'),
+                           ('api_key=><placeholder>', 'api_key=>[REDACTED]')):
+        check('non-JSON literals retain legacy redaction coverage', redact.redact(text) == (expected, 1))
     original = {'token': ['firstsecret', None, True, False, 1234, 1.5,
                           {'v': 'S', 'nested': ['lastsecret', False]}], 'ordinary': ['keep']}
     expected = {'token': ['[REDACTED]', None, True, False, '[REDACTED]', '[REDACTED]',
@@ -2231,13 +2265,13 @@ def test_round6_hooks(seeker):
     hook('post-tool', dict(post, tool_name='Bash', tool_input={'command': 'cd /work/dash && python3 -m pytest tests/test_lat.py -q'},
                            tool_response={'stdout': '..\n2 passed in 0.01s\n', 'stderr': ''}), env)
     ev_in = {'resource': 'task 07 latency', 'run_id': run, 'agent': 'agent-1',
-             'evidence': {'command': 'python3 -m pytest tests/test_lat.py', 'exit_code': 0, 'summary': '2 passed in 0.01s'}}
+             'evidence': {'command': 'cd /work/dash && python3 -m pytest tests/test_lat.py -q', 'exit_code': 0, 'summary': '2 passed in 0.01s'}}
     p, _ = hook('pre-tool', dict(pre, tool_input=ev_in), env)
     o = out_of(p)
-    check('witness: a command of this session containing the evidence, same exit code: allow with witnessed=true, the rest kept',
+    check('witness: the complete command of this session, same exit code: allow with witnessed=true, the rest kept',
           o.get('permissionDecision') == 'allow' and o.get('updatedInput', {}).get('witnessed') is True
           and o['updatedInput'].get('resource') == 'task 07 latency' and o['updatedInput']['evidence']['summary'] == '2 passed in 0.01s', json.dumps(o)[:300])
-    no_code = dict(ev_in, evidence={'command': 'python3 -m pytest tests/test_lat.py'})
+    no_code = dict(ev_in, evidence={'command': 'cd /work/dash && python3 -m pytest tests/test_lat.py -q'})
     o = out_of(hook('pre-tool', dict(pre, tool_input=no_code), env)[0])
     check('witness: no exit code given: filled from the record (the newest run, exit 0)',
           o.get('permissionDecision') == 'allow' and o['updatedInput']['evidence'].get('exit_code') == 0 and o['updatedInput']['witnessed'] is True,
@@ -3241,7 +3275,7 @@ def test_mcp_url_transport():
         for opt in ('', 'true', '1'):
             for url in urls:
                 accepted = url in urls[:4] or opt == '1'
-                env = {'CTRLB_ALLOW_HTTP': opt}
+                env = {'CTRLB_ALLOW_HTTP': opt, 'PATH': os.environ.get('PATH', os.defpath)}
                 args = ['--mcp-url', url] if source == 'flag' else []
                 if source == 'environment':
                     env['CTRLB_MCP_URL'] = url
@@ -3872,6 +3906,605 @@ def test_hardening(seeker):
           and not [n for n in os.listdir(os.path.join(scratch, 'notes')) if 'ctrlb-tmp' in n], f'{have} {os.listdir(outside)} {logtext[-200:]}')
 
 
+def test_upload_acceptance(seeker):
+    home = os.path.join(WORK, 'home-upload-acceptance')
+    path = os.path.join(WORK, 'acceptance.jsonl')
+    with open(path, 'w') as fh:
+        fh.write(line('user', 'acknowledged text', '2026-11-03T10:00:00Z'))
+    cfg = dict(url=seeker.url, key=KEY, dataset=common.DEFAULT_DATASET, user='', run='', agent='')
+    responses = [(200, b'<html>login</html>'), (200, {'accepted': 1}), (201, {'accepted': 1}),
+                 (204, b''), (202, b'not JSON'), (202, {}), (202, []), (202, {'accepted': 0}),
+                 (202, {'accepted': 2}), (202, {'accepted': True}), (202, {'accepted': '1'}),
+                 (202, {'accepted': 1.0})]
+    try:
+        with mock.patch.object(common, 'HOME', home):
+            for status, answer in responses:
+                seeker.reset()
+                seeker.state['records_answer'] = lambda body, s=status, a=answer: (s, a)
+                rejected = 0
+                for _ in range(2):
+                    try:
+                        rows_claude.upload_file(cfg, path, time.time() + 5)
+                    except common.SeekerError:
+                        rejected += 1
+                state = common.FileState(path, time.time() + 1)
+                offset = json.loads(read(state.file)).get('offset') if os.path.exists(state.file) else 0
+                check('upload requires HTTP 202 and an integer count for every row: ' + repr((status, answer)),
+                      rejected == 2 and offset == 0 and len(seeker.calls) == 2)
+            seeker.state.pop('records_answer')
+            c = rows_claude.upload_file(cfg, path, time.time() + 5)
+            check('full acceptance advances the upload checkpoint exactly once', c['rows'] == 1
+                  and rows_claude.upload_file(cfg, path, time.time() + 5)['rows'] == 0)
+    finally:
+        seeker.state.pop('records_answer', None)
+
+
+def test_upload_checkpoint_retry(seeker):
+    import rows_codex
+    cfg = dict(url=seeker.url, key=KEY, dataset=common.DEFAULT_DATASET, user='', run='', agent='')
+    for harness in ('claude', 'codex'):
+        home = os.path.join(WORK, 'home-checkpoint-' + harness)
+        path = os.path.join(WORK, 'checkpoint-' + harness + '.jsonl')
+        if harness == 'claude':
+            filler = json.loads(line('user', 'filler', '2026-11-03T10:00:00Z'))
+            usage = dict(type='assistant', message=dict(id='usage-at-boundary', role='assistant',
+                         usage={'input_tokens': 73, 'output_tokens': 11}, content=[{'type': 'text', 'text': 'usage'}]))
+            records = [filler] * 500 + [usage, dict(type='cost-state', totalCostUSD=0.75)]
+            uploader = rows_claude.upload_file
+        else:
+            filler = dict(type='response_item', payload=dict(type='message', role='user',
+                          content=[{'type': 'input_text', 'text': 'filler'}]))
+            records = [dict(type='session_meta', payload={'id': 'thread-checkpoint'})] + [filler] * 500
+            records += [dict(type='token_usage_record', payload=dict(response_id='usage-at-boundary',
+                            usage={'input_tokens': 73, 'output_tokens': 11}))]
+            uploader = rows_codex.upload_file
+        with open(path, 'w') as fh:
+            fh.writelines(json.dumps(r) + '\n' for r in records)
+        requests = []
+
+        def answer(body):
+            requests.append(body)
+            return (500, {}) if len(requests) == 2 else (202, {'accepted': len(body)})
+
+        seeker.reset()
+        seeker.state['records_answer'] = answer
+        try:
+            with mock.patch.object(common, 'HOME', home):
+                try:
+                    uploader(cfg, path, time.time() + 5)
+                except common.SeekerError:
+                    pass
+                state = json.loads(read(common.FileState(path, time.time() + 1).file))
+                check(harness + ' checkpoint excludes the unaccepted boundary usage state',
+                      'usage-at-boundary' not in state['mids'] and state['cost'] == 0)
+                uploader(cfg, path, time.time() + 5)
+                accepted = [r for r in seeker.rows if r['input_tokens'] == 73]
+                check(harness + ' retry retains the usage row and its full token count',
+                      len(requests) == 3 and len(accepted) == 1 and accepted[0]['output_tokens'] == 11)
+                if harness == 'claude':
+                    check('retry retains cumulative cost accounting', sum(r['cost_usd'] for r in seeker.rows) == 0.75)
+        finally:
+            seeker.state.pop('records_answer', None)
+
+
+def test_upload_large_line(seeker):
+    cfg = dict(url=seeker.url, key=KEY, dataset=common.DEFAULT_DATASET, user='', run='', agent='')
+    path = os.path.join(WORK, 'large-line.jsonl')
+    blocks = [{'type': 'text', 'text': 'z' * 65_000} for _ in range(70)]
+    with open(path, 'w') as fh:
+        fh.write(json.dumps(dict(type='assistant', message={'role': 'assistant', 'content': blocks})) + '\n')
+        fh.write(line('user', 'tail after large line', '2026-11-03T10:00:00Z'))
+    for fail_second in (False, True):
+        home = os.path.join(WORK, 'home-large-line-' + str(fail_second))
+        calls = []
+
+        def answer(body):
+            calls.append(body)
+            return (500, {}) if fail_second and len(calls) == 2 else (202, {'accepted': len(body)})
+
+        seeker.reset()
+        seeker.state['records_answer'] = answer
+        try:
+            with mock.patch.object(common, 'HOME', home):
+                try:
+                    rows_claude.upload_file(cfg, path, time.time() + 10)
+                except common.SeekerError:
+                    state = json.loads(read(common.FileState(path, time.time() + 1).file))
+                    check('partial large-line checkpoint keeps a row cursor and pre-line parser state',
+                          state['offset'] == 0 and state['line'] == 0 and 0 < state['row'] < 70)
+                    rows_claude.upload_file(cfg, path, time.time() + 10)
+                check('large line fits byte limits and reaches the tail after retry=' + str(fail_second),
+                      len(seeker.rows) == 71 and seeker.rows[-1]['body'] == 'tail after large line'
+                      and all(c['size'] <= rows_claude.BATCH_BYTES for c in seeker.calls)
+                      and len({(r['seq'], r['block_idx']) for r in seeker.rows}) == 71)
+        finally:
+            seeker.state.pop('records_answer', None)
+
+
+def test_upload_individual_row(seeker):
+    path = os.path.join(WORK, 'large-metadata.jsonl')
+    with open(path, 'w') as fh:
+        fh.write(line('user', 'large metadata', '2026-11-03T10:00:00Z'))
+        fh.write(line('user', 'tail', '2026-11-03T10:00:00Z'))
+
+    def rows(rec, seq, st, ids, cfg, hostname):
+        result = rows_claude.rows_from(rec, seq, st, ids, cfg, hostname)
+        if seq == 0:
+            for key, value in result[0].items():
+                if isinstance(value, str) and key != 'user_name':
+                    result[0][key] = '\x01' * 100000
+        return result
+
+    seeker.reset()
+    cfg = dict(url=seeker.url, key=KEY, dataset=common.DEFAULT_DATASET, user='', run='', agent='')
+    with mock.patch.object(common, 'HOME', os.path.join(WORK, 'home-large-metadata')):
+        c = rows_claude.upload_file(cfg, path, time.time() + 10, rows_fn=rows)
+    check('an individually oversized row is truncated to fit and does not block the following row',
+          c['rows'] == 2 and seeker.rows[0]['truncated'] and seeker.rows[-1]['body'] == 'tail'
+          and all(call['size'] <= rows_claude.BATCH_BYTES for call in seeker.calls))
+
+
+def test_session_end_shared_budget():
+    import contextlib
+    import io
+    import runpy
+    cfg = dict(off=False)
+    for script, sid in ((HOOK, SID), (CODEX_HOOK, CSID)):
+        main = runpy.run_path(script)['main']
+        clock, budgets = [0.0], []
+
+        def handoff(cfg, inp, deadline):
+            clock[0] = 1.0
+
+        def upload(*args):
+            budgets.append(args[2])
+
+        with mock.patch.dict(main.__globals__, session_end=handoff, upload=upload), \
+                mock.patch.object(common, 'config', return_value=cfg), \
+                mock.patch.object(time, 'monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(sys, 'argv', [script, 'session-end']), \
+                mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({'session_id': sid}))):
+            main()
+        limit = 0.4 if script == HOOK else 4.0
+        check('session-end handoff and flush share one total budget: ' + os.path.relpath(script, ROOT),
+              len(budgets) == 1 and abs(budgets[0] - limit) < 0.001)
+
+
+def test_upload_deadline(seeker):
+    path = os.path.join(WORK, 'deadline.jsonl')
+    with open(path, 'w') as fh:
+        fh.writelines(line('user', 'budget', '2026-11-03T10:00:00Z') for _ in range(2000))
+    cfg = dict(url=seeker.url, key=KEY, dataset=common.DEFAULT_DATASET, user='', run='', agent='')
+    with mock.patch.object(common, 'HOME', os.path.join(WORK, 'home-deadline')):
+        clock, timeouts = [0.0], []
+
+        def send(cfg, rows, timeout):
+            timeouts.append(timeout)
+            clock[0] += 1
+            return {'accepted': len(rows)}
+
+        with mock.patch.object(rows_claude.time, 'monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(common, 'ingest_records', side_effect=send):
+            result = rows_claude.upload_file(cfg, path, time.time() + 0.25)
+        state = json.loads(read(common.FileState(path, time.time() + 1).file))
+        check('uploader stops sending after its deadline and preserves only accepted progress',
+              len(timeouts) == 1 and 0 < timeouts[0] <= 0.25 and result['rows'] == 500 and state['line'] == 500)
+        with mock.patch.object(common, 'ingest_records') as send_mock:
+            rows_claude.upload_file(cfg, path, time.time() - 1)
+            check('expired upload does not parse or send new rows', not send_mock.called)
+    # Exercise the socket timeout as well as the deterministic scheduling check.
+    seeker.reset()
+
+    def slow(body):
+        time.sleep(0.3)
+        return 202, {'accepted': len(body)}
+
+    seeker.state['records_answer'] = slow
+    try:
+        with mock.patch.object(common, 'HOME', os.path.join(WORK, 'home-deadline-socket')):
+            start = time.monotonic()
+            try:
+                rows_claude.upload_file(cfg, path, time.time() + 0.1)
+            except (TimeoutError, OSError):
+                pass
+            check('upload socket timeout uses the remaining budget with no two-second minimum',
+                  len(seeker.calls) <= 1 and time.monotonic() - start < 1)
+    finally:
+        seeker.state.pop('records_answer', None)
+
+
+def test_installer_validation_and_credentials():
+    import contextlib
+    import io
+    import runpy
+    installer = runpy.run_path(INSTALL)
+    main, validate = installer['main'], installer['validate']
+    home = os.path.join(WORK, 'installer-validation')
+    os.makedirs(home, exist_ok=True)
+    path = os.path.join(home, 'config.toml')
+    cfg = dict(mcp_url='http://127.0.0.1:8095/mcp', key='')
+    original = 'mcp_servers = { docs = { command = "docs-mcp" } }\n'
+    with open(path, 'w') as fh:
+        fh.write(original)
+    with mock.patch.object(common, 'config', return_value=cfg), mock.patch.dict(sys.modules, {'tomllib': None}), \
+            contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+        code = main(['--config', path])
+    check('installer without tomllib refuses extending an inline table and leaves the file intact',
+          code == 2 and read(path).decode() == original and 'nothing written' in err.getvalue()
+          and not glob.glob(path + '.ctrlb-backup-*'))
+    with mock.patch.dict(sys.modules, {'tomllib': None}), mock.patch.object(shutil, 'which', return_value=None):
+        try:
+            validate('model = "test"\n')
+            refused = False
+        except installer['InstallError'] as e:
+            refused = 'Python 3.11+' in str(e) and 'nothing written' in str(e)
+    check('installer refuses to guess when neither TOML parser is available', refused)
+    diagnostic = ('invalid inline table mcp_servers\npassword=synthetic-validator-secret\n' + 'detail ' * 200).encode()
+    with mock.patch.object(common, 'config', return_value=cfg), mock.patch.dict(sys.modules, {'tomllib': None}), \
+            mock.patch.object(shutil, 'which', return_value='/fake/codex'), \
+            mock.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, b'', diagnostic)), \
+            contextlib.redirect_stderr(io.StringIO()) as err:
+        code = main(['--config', path])
+    check('Codex validation refusal includes bounded redacted stderr and leaves the config intact',
+          code == 2 and 'invalid inline table mcp_servers' in err.getvalue()
+          and 'synthetic-validator-secret' not in err.getvalue() and '[REDACTED]' in err.getvalue()
+          and len(err.getvalue()) < 650 and read(path).decode() == original
+          and not glob.glob(path + '.ctrlb-backup-*'))
+    odd = os.path.join(home, 'checkout-\U0001f680', 'hook.py')
+    with mock.patch.dict(installer['block'].__globals__, HOOK=odd):
+        text = installer['block'](cfg['mcp_url'])
+    validate(text)
+    check('TOML basic strings retain non-BMP Unicode scalar values', '\\ud83d' not in text and odd in text)
+    marker = 'synthetic-' + 'otel-header-001'
+    for quoted in ("'Basic " + marker + "'", '"Basic ' + marker + '"'):
+        text = installer['block'](cfg['mcp_url'], 'http://127.0.0.1:1/logs', [('Authorization', 'Basic ' + marker)])
+        text = text.replace('"Basic ' + marker + '"', quoted)
+        with open(path, 'w') as fh:
+            fh.write(text)
+        with mock.patch.object(common, 'config', return_value=cfg), contextlib.redirect_stdout(io.StringIO()) as out:
+            code = main(['--config', path, '--uninstall', '--dry-run'])
+        check('dry-run hides literal and basic TOML header strings: ' + quoted[0],
+              code == 0 and marker not in out.getvalue() and '<hidden>' in out.getvalue() and read(path).decode() == text)
+    multiline = '[otel.exporter.otlp-http]\nheaders = { Authorization = """Basic\n' + marker + '\n""" }\n'
+    check('dry-run sanitization also hides multiline headers', marker not in installer['hide_header_values'](multiline))
+    multiline = multiline.replace(marker, '[looks_like_a_table]\n' + marker)
+    check('table-like lines inside a multiline header cannot reset dry-run masking',
+          marker not in installer['hide_header_values'](multiline))
+    for key in ('headers.Authorization', 'otlp-http.headers.Authorization', '"headers" . "Authorization"'):
+        text = installer['block'](cfg['mcp_url'])
+        text = text.replace(installer['END'], '[otel.exporter]\n' + key + " = 'Basic " + marker + "'\n" + installer['END'])
+        with open(path, 'w') as fh:
+            fh.write(text)
+        with mock.patch.object(common, 'config', return_value=cfg), contextlib.redirect_stdout(io.StringIO()) as out:
+            code = main(['--config', path, '--uninstall', '--dry-run'])
+        check('uninstall dry-run masks dotted header values: ' + key,
+              code == 0 and marker not in out.getvalue() and '<hidden>' in out.getvalue()
+              and installer['has_credentials'](text) and read(path).decode() == text)
+    for key in ('headers', 'http_headers', 'bearer_token'):
+        check('credential detection matches complete names: ' + key,
+              installer['has_credentials'](key + ' = "synthetic"')
+              and not installer['has_credentials']('env_' + key + ' = "VARIABLE"'))
+    with open(path, 'w') as fh:
+        fh.write('model = "test"\n')
+    os.chmod(path, 0o644)
+    for repeat in (False, True):
+        with mock.patch.object(common, 'config', return_value=cfg), contextlib.redirect_stdout(io.StringIO()) as out:
+            code = main(['--config', path])
+        check('an install without header credentials keeps mode 0644 and reports no credentials: repeat=' + str(repeat),
+              code == 0 and stat.S_IMODE(os.stat(path).st_mode) == 0o644
+              and 'credentials' not in out.getvalue())
+    with open(path, 'w') as fh:
+        fh.write('model = "test"\n')
+    os.chmod(path, 0o644)
+    args = ['--config', path, '--otel', '--otel-endpoint', 'http://127.0.0.1:1/logs', '--otel-header', 'Authorization=Basic ' + marker]
+    with mock.patch.object(common, 'config', return_value=cfg), contextlib.redirect_stdout(io.StringIO()) as out:
+        code = main(args)
+    check('installer restricts newly added credentials to mode 0600 and reports the change',
+          code == 0 and stat.S_IMODE(os.stat(path).st_mode) == 0o600 and '0600' in out.getvalue())
+    os.chmod(path, 0o644)
+    with mock.patch.object(common, 'config', return_value=cfg), contextlib.redirect_stdout(io.StringIO()):
+        main(['--config', path, '--uninstall'])
+    backups = glob.glob(path + '.ctrlb-backup-*')
+    secret_backups = [b for b in backups if marker in read(b).decode()]
+    check('credential-bearing installer backups are private', bool(secret_backups)
+          and all(stat.S_IMODE(os.stat(b).st_mode) == 0o600 for b in secret_backups))
+
+
+def test_witness_invocations():
+    import hooks_shared as shared
+    tests = ('echo pytest', "printf '%s\\n' 'pytest tests/missing.py'", '# pytest tests/missing.py',
+             'false && pytest tests/missing.py', 'pytest tests/missing.py || true', 'pytest tests/missing.py; true')
+    for command in tests:
+        rec = {'bash': [{'command': command, 'exit_code': 0}]}
+        out = shared.witness(rec, {'evidence': {'command': 'pytest tests/missing.py', 'exit_code': 0}})['hookSpecificOutput']
+        check('witness rejects printed, skipped or masked test substrings: ' + command,
+              out.get('permissionDecision') == 'deny' and not shared.is_test_command(command))
+    rec = {'bash': [{'command': 'pytest -k "two  spaces"', 'exit_code': 0}]}
+    out = shared.witness(rec, {'evidence': {'command': 'pytest -k "two spaces"', 'exit_code': 0}})['hookSpecificOutput']
+    check('witness preserves whitespace within quoted arguments', out['permissionDecision'] == 'deny')
+    rec = {'bash': [{'command': 'pytest -k "$TEST"', 'exit_code': 0}]}
+    out = shared.witness(rec, {'evidence': {'command': "pytest -k '$TEST'", 'exit_code': 0}})['hookSpecificOutput']
+    check('witness preserves shell quoting and expansion semantics', out['permissionDecision'] == 'deny')
+    rec = {'bash': [{'command': 'pytest', 'exit_code': 0, 'truncated': True}]}
+    out = shared.witness(rec, {'evidence': {'command': 'pytest', 'exit_code': 0}})['hookSpecificOutput']
+    check('witness refuses a record whose command was truncated', out['permissionDecision'] == 'deny')
+    rec = {'bash': [{'command': 'python3 -I tests/run_tests.py', 'exit_code': 0}]}
+    out = shared.witness(rec, {'evidence': {'command': 'python3  -I tests/run_tests.py', 'exit_code': 0}})['hookSpecificOutput']
+    check('witness accepts a complete direct test invocation with ordinary whitespace differences',
+          out['permissionDecision'] == 'allow' and out['updatedInput']['witnessed'] is True)
+    command = "printf '%s\\n' 'pytest tests/missing.py'"
+    p = subprocess.run(['/bin/sh', '-c', command], capture_output=True, text=True, timeout=5)
+    rec = {'bash': [{'command': command, 'exit_code': p.returncode, 'summary': p.stdout}]}
+    out = shared.witness(rec, {'evidence': {'command': 'pytest tests/missing.py', 'exit_code': 0}})['hookSpecificOutput']
+    check('an actual shell invocation that only prints a test is never its witness',
+          p.returncode == 0 and 'pytest' in p.stdout and out['permissionDecision'] == 'deny')
+    for command, allowed in (('pytest |& tail -1', False), ('pytest &> log', True), ('pytest >& log', True),
+                             ('pytest > out.txt', True), ('pytest >> out.txt', True), ('pytest >| out.txt', True),
+                             ('pytest 2>&1', True), ('pytest > out.txt 2>&1', True), ('pytest &>> log', True),
+                             ('pytest > out.txt | tail -1', False), ('pytest 2>&1 | tail -1', False),
+                             ('pytest &> log; true', False), ('pytest >& log && true', False),
+                             ('pytest >', False), ('pytest &> | tail', False), ('pytest &', False)):
+        rec = {'bash': [{'command': command, 'exit_code': 0}]}
+        out = shared.witness(rec, {'evidence': {'command': command, 'exit_code': 0}})['hookSpecificOutput']
+        check('witness distinguishes output redirection from masked exit status: ' + command,
+              bool(shared.is_test_command(command)) == allowed
+              and (out.get('updatedInput', {}).get('witnessed') is True) == allowed
+              and out['permissionDecision'] == ('allow' if allowed else 'deny'))
+    root = os.path.join(WORK, 'redirected-test')
+    os.makedirs(root, exist_ok=True)
+    script = os.path.join(root, 'test_status.py')
+    with open(script, 'w') as fh:
+        fh.write('import sys\nprint("test result")\nsys.exit(7)\n')
+    command = sys.executable + ' ' + script + ' > ' + os.path.join(root, 'out.txt')
+    result = subprocess.run(['/bin/sh', '-c', command], capture_output=True, timeout=5)
+    out = shared.witness({'bash': [{'command': command, 'exit_code': result.returncode}]},
+                         {'evidence': {'command': command, 'exit_code': 7}})['hookSpecificOutput']
+    check('a real redirected test preserves its failing exit status in the witness',
+          result.returncode == 7 and out['updatedInput']['witnessed'] is True)
+
+
+def test_restore_concurrency():
+    import relay_hooks
+    root = os.path.join(WORK, 'restore-concurrency')
+    scratch, outside = os.path.join(root, 'scratch'), os.path.join(root, 'outside')
+    os.makedirs(scratch, exist_ok=True)
+    os.makedirs(outside, exist_ok=True)
+    parts = {'artifacts': {'artifacts': [{'path': 'plan.txt', 'agent': 'agent', 'text': 'old server copy'}]}}
+    real_open = os.open
+    real_link = os.link
+    raced = [False]
+
+    def create_first(source, path, **kwargs):
+        if path == 'plan.txt' and not raced[0]:
+            raced[0] = True
+            with open(os.path.join(scratch, 'plan.txt'), 'w') as fh:
+                fh.write('new user work')
+        return real_link(source, path, **kwargs)
+
+    with mock.patch.object(os, 'link', side_effect=create_first):
+        relay_hooks.restore_artifacts(parts, 'run', 'agent', scratch)
+    check('restoring an artifact cannot replace work created immediately before exclusive publication',
+          raced[0] and read(os.path.join(scratch, 'plan.txt')) == b'new user work')
+    os.mkdir(os.path.join(scratch, 'notes'))
+    parts['artifacts']['artifacts'][0]['path'] = 'notes/other.txt'
+    raced[0] = False
+
+    def swap_parent(path, flags, mode=0o777, **kwargs):
+        if path == 'notes' and not raced[0]:
+            raced[0] = True
+            os.rmdir(os.path.join(scratch, 'notes'))
+            os.symlink(outside, os.path.join(scratch, 'notes'))
+        return real_open(path, flags, mode, **kwargs)
+
+    with mock.patch.object(os, 'open', side_effect=swap_parent):
+        have = relay_hooks.restore_artifacts(parts, 'run', 'agent', scratch)
+    check('restoring an artifact refuses a parent swapped to a symlink during directory traversal',
+          raced[0] and not have and not os.listdir(outside))
+    parts['artifacts']['artifacts'][0]['path'] = 'link.txt'
+    os.symlink(os.path.join(outside, 'victim'), os.path.join(scratch, 'link.txt'))
+    have = relay_hooks.restore_artifacts(parts, 'run', 'agent', scratch)
+    check('artifact restoration never follows an existing destination symlink', not have and not os.listdir(outside))
+    linked = os.path.join(root, 'linked')
+    os.symlink(outside, linked)
+    linked_scratch = os.path.join(linked, 'run', 'scratch')
+    parts['artifacts']['artifacts'][0]['path'] = 'notes/plan.txt'
+    have = relay_hooks.restore_artifacts(parts, 'run-linked', 'agent', linked_scratch)
+    check('artifact restoration follows symlinked ancestors of the scratch root',
+          have == ['notes/plan.txt'] and read(os.path.join(linked_scratch, 'notes', 'plan.txt')) == b'old server copy')
+    parent = os.path.join(root, 'traversable')
+    os.makedirs(os.path.join(parent, 'scratch'))
+    os.chmod(parent, 0o111)
+    try:
+        have = relay_hooks.restore_artifacts(parts, 'run-traversable', 'agent', os.path.join(parent, 'scratch'))
+        check('artifact restoration needs only traversal access above the scratch root', have == ['notes/plan.txt'])
+    finally:
+        os.chmod(parent, 0o700)
+
+
+def test_relay_off_and_next(seeker):
+    import hooks_shared as shared
+    import runpy
+    claude_hook = runpy.run_path(HOOK)
+    home = os.path.join(WORK, 'home-off-next')
+    cfg = dict(url=seeker.url, key=KEY, dataset=common.DEFAULT_DATASET, run='run-off-next', agent='agent',
+               enforce='off', auto_slots=['REGISTRY.md'], mode='hosted', off=False)
+    inp = dict(session_id=SID, cwd=WORK, tool_name='Edit', tool_input={'file_path': os.path.join(WORK, 'REGISTRY.md')})
+    seeker.reset()
+    with mock.patch.object(common, 'HOME', home):
+        out = claude_hook['pre_tool'](cfg, inp)
+        check('enforcement off bypasses automatic slot claims and all edit denial paths', out is None and not seeker.calls)
+        inp.update(tool_name='mcp__ctrlb__done', tool_input={'resource': 'old', 'evidence': {'command': 'pytest'}})
+        off = claude_hook['pre_tool'](cfg, inp)['hookSpecificOutput']
+        check('enforcement off still refuses done evidence that was never witnessed', off['permissionDecision'] == 'deny')
+        shared.record_bash(cfg['run'], cfg['agent'], SID, 'pytest', 0, 'passed')
+        off = claude_hook['pre_tool'](cfg, inp)['hookSpecificOutput']
+        check('enforcement off still certifies matching done evidence for witness-required workspaces',
+              off['updatedInput']['witnessed'] is True and off['updatedInput']['evidence']['exit_code'] == 0)
+        bare = dict(inp, tool_input={'resource': 'old'})
+        check('enforcement off adds no automatic allow decision to done without evidence',
+              claude_hook['pre_tool'](cfg, bare) is None)
+        nonce = 'synthetic-' + 'next-hold-nonce'
+        state = common.TokenState(cfg['run'], cfg['agent'])
+        state.put(['name:old', 'path:old.py'], 'synthetic-old-hold')
+        answer = dict(done=True, key='name:old', paths=['path:old.py'],
+                      next=dict(held=True, key='name:new', paths=['path:new.py'], token=nonce))
+        claude_hook['post_tool'](cfg, dict(inp, tool_response=answer))
+        check('done with next saves the next task and file nonces after dropping the completed task',
+              state.get(['name:old', 'path:old.py', 'name:new', 'path:new.py']) == {'name:new': nonce, 'path:new.py': nonce})
+        shared.record_tokens(cfg['run'], cfg['agent'], 'done', {'done': True, 'next': {'held': False}})
+        check('done with no free next task does not erase unrelated held tokens',
+              state.get(['name:new', 'path:new.py']) == {'name:new': nonce, 'path:new.py': nonce})
+
+
+def test_nested_codex_run():
+    import rows_codex
+    import runpy
+    root = os.path.join(WORK, 'nested-codex')
+    os.makedirs(root, exist_ok=True)
+    paths = []
+    for sid, parent in (('root-thread', ''), ('child-thread', 'root-thread'), ('grandchild-thread', 'child-thread')):
+        path = os.path.join(root, sid + '.jsonl')
+        with open(path, 'w') as fh:
+            fh.write(json.dumps(dict(type='session_meta', payload=dict(id=sid, parent_thread_id=parent))) + '\n')
+        paths.append(path)
+    cfg = dict(run='', agent='')
+    hook_run = runpy.run_path(CODEX_HOOK)['session_run']
+    ids = [rows_codex.ids_for_file(cfg, p) for p in paths]
+    check('nested Codex uploads share the root run while preserving immediate parent identity',
+          [i['run_id'] for i in ids] == ['root-thread'] * 3 and ids[-1]['parent'] == 'child-thread'
+          and ids[-1]['agent'] == 'grandchild-thread')
+    check('nested Codex edit hooks resolve the same root run as uploads',
+          hook_run(cfg, 'grandchild-thread', paths[-1]) == ('root-thread', 'child-thread'))
+    check('explicit configured run overrides nested Codex ancestry',
+          rows_codex.ids_for_file(dict(cfg, run='explicit-run'), paths[-1])['run_id'] == 'explicit-run')
+    with open(paths[0], 'w') as fh:
+        fh.write(json.dumps(dict(type='session_meta', payload=dict(id='root-thread', parent_thread_id='grandchild-thread'))) + '\n')
+    check('cyclic Codex ancestry terminates', bool(rows_codex.ids_for_file(cfg, paths[-1])['run_id']))
+    home = os.path.join(root, 'codex-home')
+    sessions = os.path.join(home, 'sessions')
+    ancestor = os.path.join(sessions, '2026', '01', '01')
+    child = os.path.join(sessions, '2026', '02', '02')
+    os.makedirs(ancestor)
+    os.makedirs(child)
+    ids = ['0190f0a0-1111-7000-8000-%012d' % i for i in range(4)]
+    files = []
+    for i in range(3):
+        file = os.path.join(ancestor if i < 2 else child, 'rollout-2026-01-01T00-00-00-' + ids[i] + '.jsonl')
+        with open(file, 'w') as fh:
+            fh.write(json.dumps(dict(type='session_meta', payload=dict(id=ids[i], parent_thread_id=ids[i - 1] if i else '',
+                                                                      base_instructions={'text': 'x' * 30000}))) + '\n')
+        files.append(file)
+    for i in range(300):
+        with open(os.path.join(ancestor, 'rollout-unrelated-%08d.jsonl' % i), 'w') as fh:
+            fh.write('unrelated rollout must not be read\n')
+    with mock.patch.dict(os.environ, CODEX_HOME=home), mock.patch.object(rows_codex, 'read_meta', wraps=rows_codex.read_meta) as meta, \
+            mock.patch.object(rows_codex, 'rollouts', wraps=rows_codex.rollouts) as rollouts:
+        runs = [rows_codex.ids_for_file(cfg, files[-1])['run_id'] for _ in range(5)]
+        check('nested Codex lookup reads only the current rollout and its ancestors, indexing filenames once',
+              runs == [ids[0]] * 5 and meta.call_count == 15 and rollouts.call_count == 1
+              and all(call.args[0] in files for call in meta.call_args_list))
+
+
+def test_backfill_failure_status(seeker):
+    path = os.path.join(WORK, 'backfill-failure-projects', 'example')
+    os.makedirs(path, exist_ok=True)
+    for name in ('one', 'two'):
+        with open(os.path.join(path, name + '.jsonl'), 'w') as fh:
+            fh.write(line('user', 'backfill', '2026-11-03T10:00:00Z'))
+    for partial in (False, True):
+        seeker.reset()
+        requests = []
+
+        def answer(body):
+            requests.append(body)
+            return (202, {'accepted': len(body)}) if partial and len(requests) == 1 else (500, {})
+
+        seeker.state['records_answer'] = answer
+        try:
+            env = base_env(seeker.url, os.path.join(WORK, 'home-backfill-failed-' + str(partial)),
+                           CLAUDE_PROJECTS_DIR=os.path.dirname(path))
+            p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'backfill.py'), '--yes'],
+                               env=env, capture_output=True, text=True, timeout=10)
+            check('backfill reports a failing exit status and count after trying every file: partial=' + str(partial),
+                  p.returncode != 0 and len(requests) == 2 and ('1/2' if partial else '2/2') + ' files failed' in p.stdout)
+        finally:
+            seeker.state.pop('records_answer', None)
+
+
+def test_redaction_linear_budget():
+    # A subprocess also bounds a regression's wall time; the limit on matching itself leaves ample headroom.
+    source = '''import json, sys, time
+sys.path.insert(0, sys.argv[1])
+import redact
+inputs = ['a-' * 100000 + 'z', 'x-' * 100000 + 'token=1', 'A_SECRET_' * 22000 + 'Z',
+          'token = tokens[i]; ' * 12000, '--' + 'x-' * 100000 + 'token=abcd',
+          '-----BEGIN PRIVATE KEY-----\\n' * 7500, 'cookie:' * 29000,
+          'a:=' * 66000, 'x=>' * 66000, 'password:=$' * 18000,
+          'DB_PASSWORD=>[REDACTED]' * 9000]
+results = []
+for value in inputs:
+    start = time.monotonic()
+    clean, count = redact.redact(value)
+    results.append([time.monotonic() - start, count])
+print(json.dumps(results))
+'''
+    try:
+        p = subprocess.run([sys.executable, '-I', '-c', source, os.path.join(ROOT, 'lib')],
+                           capture_output=True, text=True, timeout=12)
+        measurements = json.loads(p.stdout) if p.returncode == 0 else []
+    except subprocess.TimeoutExpired:
+        measurements = []
+    check('redaction handles 200 KB adversarial names and assignments within one second each',
+          len(measurements) == 11 and all(t < 1.0 for t, n in measurements)
+          and measurements[1][1] > 0, str(measurements))
+    for text, marker in [('password => "Xy7!kq"', 'Xy7!kq'), ('TOKEN := X', 'X')]:
+        clean, n = redact.redact(text)
+        check('assignment operators redact the complete value: ' + text, n > 0 and marker not in clean)
+    for name in ('paſsword', 'apİ_key', 'apı_key', 'api_Key', 'ä-password', 'ä-SECRET_KEY'):
+        clean, n = redact.redact(name + '=syntheticvalue')
+        check('linear name scanning retains Unicode boundary and case coverage: ' + name,
+              n > 0 and 'syntheticvalue' not in clean)
+    for first in ('Cookie: ', 'Set-Cookie: ', 'Cookie:', 'Set-Cookie:'):
+        for nested in ('Cookie: sid=abc', 'cookie:cookie: sid=abcdef', 'Cookie:Cookie:sid=abcdef'):
+            clean, n = redact.redact(first + nested)
+            check('nested cookie headers cannot be skipped inside a candidate key: ' + first + nested,
+                  n > 0 and 'abc' not in clean)
+    for name in ('password', 'passwd', 'token', 'secret', 'api-key', 'apikey', 'access-key', 'auth-token', 'access-token',
+                 'service-password', 'service-token', 'service-api-key'):
+        for value in ('abc,def', 'abc}def', 'abc;def', 'abc=def'):
+            text = '--' + name + '=' + value
+            clean, n = redact.redact(text)
+            check('equals-form credential flags mask the complete shell value: ' + text,
+                  n > 0 and clean == '--' + name + '=[REDACTED]')
+    for text, secret in (('--password=abc,--token synthetic-value', 'synthetic-value'),
+                         ('--password=}X-Api-Key: synthetic-value', 'synthetic-value'),
+                         ('_password=Cookie: sid=synthetic-value', 'synthetic-value'),
+                         ("'_TOKEN = X-Api-Key: synthetic-value", 'synthetic-value'),
+                         ('SECRET_KEY" = Set-Cookie: sid=synthetic-value', 'synthetic-value'),
+                         ('TOKEN:=self.TOKEN = synthetic-value', 'synthetic-value'),
+                         ('api_key:= Set-Cookie: sid=synthetic-value', 'synthetic-value'),
+                         ('X-Api-Key: password\n:=synthetic-value', 'synthetic-value'),
+                         ('X-Auth-Token: abc}--token synthetic-value', 'synthetic-value'),
+                         ('X-Auth-Token: abc}X-Api-Key: synthetic-value', 'synthetic-value'),
+                         (r'--password=\"\"abc--password=synthetic-value', 'synthetic-value')):
+        clean, n = redact.redact(text)
+        check('expanded redaction preserves overlapping credential coverage: ' + text,
+              n > 0 and secret not in clean)
+
+
+def test_witness_docs():
+    readme = read(os.path.join(ROOT, 'README.md')).decode()
+    limits = read(os.path.join(ROOT, 'docs', 'limits.md')).decode()
+    relay = read(os.path.join(ROOT, 'docs', 'relay-tools.md')).decode()
+    check('enforcement documentation separates edit checks from done witnessing',
+          all('automatic slot claims' in text and 'Done evidence witnessing still runs' in text for text in (readme, limits))
+          and 'done evidence witnessing still runs |' in readme)
+    check('witness documentation requires a complete command and describes quoting and redirections',
+          'complete command of this session must match' in relay and 'quoted whitespace must match' in relay
+          and 'Output redirection preserves the witness; a pipeline does not.' in relay
+          and "contains the evidence's command" not in relay)
+
+
 def main():
     seeker = Seeker()
     test_layout()
@@ -3882,6 +4515,20 @@ def main():
     test_codex_tool_input_preservation()
     test_hooks(seeker)
     test_batches(seeker)
+    test_upload_acceptance(seeker)
+    test_upload_checkpoint_retry(seeker)
+    test_upload_large_line(seeker)
+    test_upload_individual_row(seeker)
+    test_session_end_shared_budget()
+    test_upload_deadline(seeker)
+    test_installer_validation_and_credentials()
+    test_witness_invocations()
+    test_restore_concurrency()
+    test_relay_off_and_next(seeker)
+    test_nested_codex_run()
+    test_backfill_failure_status(seeker)
+    test_redaction_linear_budget()
+    test_witness_docs()
     test_pre_tool(seeker)
     test_keys()
     test_edit_keys_across_harnesses(seeker)

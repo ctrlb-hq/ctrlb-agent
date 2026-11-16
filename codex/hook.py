@@ -23,7 +23,7 @@ HANDOFF_S = 0.8
 CODEX_HANDOFF_TEXT = 'Session ended (Codex: the hook keeps no record of edits or tests; read the task\'s files and notes).'
 
 
-def session_end(cfg, inp):
+def session_end(cfg, inp, deadline=None):
     """Seeker decision 36 for Codex: in a relay run (CTRLB_RUN set), hand off every hold the agent still has, in one
     write (common.handoff_all). Seeker unreachable or an error: nothing is written."""
     if common.relay_off(cfg) or not cfg.get('run'):
@@ -33,8 +33,11 @@ def session_end(cfg, inp):
     agent = rows_codex.agent_for(cfg, sid, parent)
     if not run or not agent:
         return None
+    remaining = min(HANDOFF_S, deadline - time.monotonic()) if deadline is not None else HANDOFF_S
+    if remaining <= 0:
+        return None
     try:
-        ans = common.handoff_all(cfg, run, agent, CODEX_HANDOFF_TEXT, inp.get('cwd') or '', timeout=HANDOFF_S)
+        ans = common.handoff_all(cfg, run, agent, CODEX_HANDOFF_TEXT, inp.get('cwd') or '', timeout=remaining)
     except Exception as e:
         common.log(f"codex session-end handoff {run}/{agent}: {type(e).__name__}: {str(e)[:200]}")
         return None
@@ -62,7 +65,7 @@ def session_run(cfg, sid, transcript):
     """(run id, parent thread id) of a Codex session. A thread whose rollout names a parent_thread_id is a subagent
     and joins its parent's run."""
     parent = str(rows_codex.read_meta(transcript).get('parent_thread_id') or '') if transcript else ''
-    return common.run_id(cfg, sid, parent), parent
+    return rows_codex.session_run(cfg, sid, parent, transcript), parent
 
 
 def pre_tool(cfg, inp):
@@ -129,11 +132,12 @@ def main():
     elif mode == 'flush':
         upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
     elif mode == 'session-end':
+        deadline = time.monotonic() + SYNC_S
         try:
-            session_end(cfg, inp)
+            session_end(cfg, inp, deadline)
         except Exception as e:
             common.log(f"codex session-end: {type(e).__name__}: {str(e)[:200]}")
-        upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
+        upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], max(0, deadline - time.monotonic()), event, sid)
     elif mode == 'upload':
         upload(cfg, [inp.get('agent_transcript_path') or inp.get('transcript_path')], ASYNC_S, event, sid)
     elif mode == 'pre-tool':

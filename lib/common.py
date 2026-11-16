@@ -298,7 +298,7 @@ class SeekerError(RuntimeError):
         self.status = status
 
 
-def request(cfg, method, path, body=None, query=None, timeout=10):
+def request(cfg, method, path, body=None, query=None, timeout=10, expected_status=None):
     """One call to Seeker. Returns the decoded JSON answer ({} when empty). Raises SeekerError on an HTTP error and
     OSError / TimeoutError when Seeker cannot be reached."""
     url = cfg['url'] + path
@@ -315,6 +315,8 @@ def request(cfg, method, path, body=None, query=None, timeout=10):
             handlers.append(urllib.request.ProxyHandler({}))
         open_request = urllib.request.build_opener(*handlers).open
         with open_request(req, timeout=timeout) as resp:
+            if expected_status is not None and resp.status != expected_status:
+                raise SeekerError(resp.status, f'expected HTTP {expected_status}; upload not acknowledged')
             raw = resp.read()
     except urllib.error.HTTPError as e:
         if 300 <= e.code < 400:
@@ -333,7 +335,11 @@ def _seg(s):
 
 def ingest_records(cfg, rows, timeout=20):
     """POST /ai/sessions/{dataset}/records: at most 500 rows or 4 MB per call; answers 202 {accepted: n}."""
-    return request(cfg, 'POST', f"/ai/sessions/{_seg(cfg['dataset'])}/records", rows, timeout=timeout)
+    answer = request(cfg, 'POST', f"/ai/sessions/{_seg(cfg['dataset'])}/records", rows, timeout=timeout,
+                     expected_status=202)
+    if not isinstance(answer, dict) or type(answer.get('accepted')) is not int or answer['accepted'] != len(rows):
+        raise SeekerError(202, 'upload acknowledgment must accept every row; progress kept for retry')
+    return answer
 
 
 def check(cfg, run, agent, paths, cwd='', timeout=2, tokens=None):
@@ -551,8 +557,8 @@ class FileState:
         key = hashlib.sha1(os.path.abspath(path).encode()).hexdigest()
         self.file = os.path.join(d, key + '.json')
         self.mutex_path = os.path.join(d, key + '.mutex')
-        self.deadline = deadline
-        self.data = dict(path=os.path.abspath(path), offset=0, line=0, prev_ts=0, names={}, mids=[], cost=0.0)
+        self.deadline = time.monotonic() + max(0, deadline - time.time())
+        self.data = dict(path=os.path.abspath(path), offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0)
 
     def __enter__(self):
         self.fh = private_open(self.mutex_path)
@@ -561,7 +567,7 @@ class FileState:
                 fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
-                if time.time() > self.deadline:
+                if time.monotonic() >= self.deadline:
                     self.fh.close()
                     raise TimeoutError('state file busy')
                 time.sleep(0.05)
@@ -573,7 +579,7 @@ class FileState:
         return self
 
     def reset(self):
-        self.data.update(offset=0, line=0, prev_ts=0, names={}, mids=[], cost=0.0)
+        self.data.update(offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0)
 
     def save(self):
         names = self.data['names']

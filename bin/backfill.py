@@ -51,17 +51,21 @@ def main():
         return
     total = dict(rows=0, lines=0, redacted=0)
     t0 = time.time()
+    failed = 0
     for i, f in enumerate(files, 1):
         try:
             c = upload(cfg, f, time.time() + 600)
             for k in total:
                 total[k] += c[k]
         except Exception as e:
+            failed += 1
             print(f'  failed {f}: {str(e)[:200]}')
         if i % 25 == 0 or i == len(files):
             print(f'  {i}/{len(files)} files, {total["rows"]} rows, {total["redacted"]} redactions, {time.time() - t0:.0f}s')
     common.log(f'backfill {total}')
+    print(f'{failed}/{len(files)} files failed')
+    return 1 if failed else 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

@@ -6,6 +6,7 @@ import datetime
 import os
 import json
 import re
+import shlex
 import time
 import common
 from paths import PATH, edit_paths as normalise_edit_paths, key as resource_key
@@ -175,8 +176,6 @@ def record_tokens(run, agent, tool, answer):
     if not run or not agent or not isinstance(answer, dict):
         return []
     keys = [k for k in [answer.get('key')] + list(answer.get('paths') or []) if isinstance(k, str) and k]
-    if not keys:
-        return []
     state = common.TokenState(run, agent)
     name = tool.rsplit('__', 1)[-1]
     if name == 'claim' and answer.get('held') is True and answer.get('token'):
@@ -185,6 +184,8 @@ def record_tokens(run, agent, tool, answer):
     if (name == 'handoff' and answer.get('handed') is True or name == 'release' and answer.get('released')
             or name == 'done' and answer.get('done') is True):
         state.drop(keys)
+        if name == 'done':
+            keys += record_tokens(run, agent, 'claim', answer.get('next'))
         return keys
     return []
 
@@ -203,8 +204,59 @@ COMMAND_MAX = 500
 INSTALL_COMMAND = re.compile(r'\b(?:pip[0-9.]*|uv|poetry|pipx|apt(?:-get)?|brew|npm|yarn|pnpm|cargo|go)\s+(?:install|add|i|get)\b')
 
 
+def _invocation(cmd):
+    """A single invocation, optionally after `cd dir &&` and environment assignments. Compound shell programs
+    need a separate test invocation: their final status does not tell us which branch or pipeline ran."""
+    if not isinstance(cmd, str) or '\n' in cmd or '`' in cmd or '$(' in cmd:
+        return []
+    try:
+        lexer = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        words = list(lexer)
+    except ValueError:
+        return []
+    if len(words) > 3 and words[0] == 'cd' and words[2] == '&&':
+        words = words[3:]
+    invocation, i = [], 0
+    while i < len(words):
+        word = words[i]
+        if word in ('>', '>>', '>|', '&>', '&>>', '>&'):
+            # Output redirection preserves the command's exit status. A pipe (including |&) does not.
+            if i + 1 >= len(words) or all(c in ';&|()<>' for c in words[i + 1]):
+                return []
+            if invocation and invocation[-1].isdigit():
+                invocation.pop()         # optional file descriptor, as in 2>&1
+            i += 2
+            continue
+        if word and all(c in ';&|()<>' for c in word):
+            return []
+        invocation.append(word)
+        i += 1
+    words = invocation
+    while words and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', words[0]):
+        words = words[1:]
+    if words and words[0] == 'env':
+        words = words[1:]
+        while words:
+            if words[0] == '-u' and len(words) > 1:
+                words = words[2:]
+            elif re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', words[0]):
+                words = words[1:]
+            else:
+                break
+    if words and os.path.basename(words[0]) in ('echo', 'printf', 'true', 'false', ':', 'cat', 'eval', 'exit',
+                                               'return', 'export', 'alias', 'source', '.', 'sh', 'bash', 'zsh'):
+        return []
+    return words
+
+
 def is_test_command(cmd):
-    return isinstance(cmd, str) and bool(TEST_COMMAND.search(cmd)) and not INSTALL_COMMAND.search(cmd)
+    words = _invocation(cmd)
+    if not words or INSTALL_COMMAND.search(shlex.join(words)):
+        return False
+    command = shlex.join([os.path.basename(words[0])] + words[1:])
+    return bool(TEST_COMMAND.match(command)) or (re.fullmatch(r'python[0-9.]*', words[0]) and
+            any('test' in os.path.basename(w) and w.endswith('.py') for w in words[1:] if not w.startswith('-')))
 
 
 def _last_line(text):
@@ -363,7 +415,30 @@ LINE_MAX = 200
 
 
 def _norm(cmd):
-    return ' '.join(str(cmd or '').split())
+    # Collapse only unquoted whitespace. Keep quotes and escapes: "$VAR" and '$VAR' run different commands.
+    out, quote, escaped, space = [], '', False, False
+    for ch in str(cmd or '').strip():
+        if escaped:
+            out.append(ch)
+            escaped = False
+        elif quote:
+            out.append(ch)
+            if ch == quote:
+                quote = ''
+            elif ch == '\\' and quote != "'":
+                escaped = True
+        elif ch.isspace():
+            space = bool(out)
+        else:
+            if space:
+                out.append(' ')
+                space = False
+            out.append(ch)
+            if ch in ('"', "'"):
+                quote = ch
+            elif ch == '\\':
+                escaped = True
+    return ''.join(out) if not quote and not escaped else ''
 
 
 def record_bash(run, agent, sid, command, code, line):
@@ -372,6 +447,7 @@ def record_bash(run, agent, sid, command, code, line):
     if not run or not agent or not isinstance(command, str) or not command.strip():
         return None
     rec = dict(command=command.strip()[:COMMAND_MAX], exit_code=code, summary=(line or '')[:SUMMARY_MAX], ts=time.time())
+    rec['truncated'] = len(command.strip()) > COMMAND_MAX
     common.SessionRecord(run, agent).update(sid, lambda d: d['bash'].append(rec))
     return rec
 
@@ -463,8 +539,7 @@ def _code(v):
 
 def witness(rec, tool_input):
     """Decision 38: the PreToolUse output for a done call, checked against this session's Bash record. A command
-    containing the raw evidence command, or whose redacted form equals it (white space collapsed), with an equal
-    exit code (newest first): allow, with
+    equal to the complete raw evidence command or its redacted form, with an equal exit code (newest first): allow, with
     witnessed true (and the exit code filled in from the record when the call left it out). No such command: deny,
     naming what the hook saw. No evidence command: None, unless the agent set witnessed itself (then it is dropped).
     The hook asserts only what it saw; it is as strong as the host it runs on."""
@@ -478,8 +553,8 @@ def witness(rec, tool_input):
         return None
     want = _code(ev.get('exit_code')) if ev.get('exit_code') is not None else None
     bash = rec.get('bash') or []
-    seen = [b for b in reversed(bash) if cmd in _norm(b.get('command')) or
-            cmd == _norm(redact(b.get('command'))[0])]
+    seen = [b for b in reversed(bash) if not b.get('truncated') and _invocation(b.get('command')) and
+            (cmd == _norm(b.get('command')) or cmd == _norm(redact(b.get('command'))[0]))]
     for b in seen:
         code = _code(b.get('exit_code'))
         if code is None:
@@ -490,7 +565,7 @@ def witness(rec, tool_input):
             args['witnessed'] = True
             return _allow(args)
     run = args.get('run_id') or ''
-    head = f"CtrlB Relay{f' (run {run})' if run else ''}: done was not sent: the evidence names `{_cut(cmd, 300)}`"
+    head = f"CtrlB Relay{f' (run {run})' if run else ''}: done was not sent: the evidence names `{_cut(ev.get('command'), 300)}`"
     head += f' with exit code {want}' if want is not None else ''
     if seen:
         b = seen[0]
