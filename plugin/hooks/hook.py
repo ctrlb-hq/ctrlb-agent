@@ -48,10 +48,10 @@ def _who(cfg, inp):
 
 
 def session_end(cfg, inp, deadline=None):
-    """Seeker decision 36: on SessionEnd (a normal end, SIGTERM or SIGINT; never SIGKILL) hand off every hold the agent
+    """On SessionEnd (a normal end, SIGTERM or SIGINT; never SIGKILL) hand off every hold the agent
     still has, in one write: each task openly (to nobody) with a text built from this session's record, each path
     and slot released. Sent only in a relay run (CTRLB_RUN set, or a ctrlb relay tool was called in this session).
-    Seeker unreachable or answering an error: nothing is written (a takeover covers the rest)."""
+    CtrlB unreachable or answering an error: nothing is written (a takeover covers the rest)."""
     if common.relay_off(cfg):
         return None
     run, agent, sid = _who(cfg, inp)
@@ -78,7 +78,7 @@ def session_end(cfg, inp, deadline=None):
 
 
 def pre_tool(cfg, inp):
-    """Decision 7 on an edit; decision 38 (the witness) on a done call. Returns the hook output, or None for no output
+    """Check file holds on an edit; witness evidence on a done call. Returns the hook output, or None for no output
     (allowed, off, or nothing to check)."""
     if common.relay_off(cfg):
         return None
@@ -94,7 +94,7 @@ def pre_tool(cfg, inp):
     cwd = inp.get('cwd') or ''
     slots = relay_hooks.slot_paths(cfg, paths, cwd)
     if slots and relay_hooks.in_relay(cfg, run, agent, sid):
-        # Decision 47: an autoSlots file is claimed as slot:<path> with the file before the edit. Only a definite
+        # an autoSlots file is claimed as slot:<path> with the file before the edit. Only a definite
         # answer that another agent holds it denies; an error or no answer in time lets the edit go ahead unchecked.
         try:
             denied, _ = relay_hooks.claim_slots(cfg, run, agent, slots, cwd)
@@ -110,8 +110,8 @@ def pre_tool(cfg, inp):
 
 
 def pre_agent(cfg, inp):
-    """Decision 43: a sub-agent spawn registers a task (and a contract), in a relay run. Prints nothing: the spawn
-    goes ahead as it was asked for, whatever Seeker answers."""
+    """A sub-agent spawn registers a task (and a contract), in a relay run. Prints nothing: the spawn
+    goes ahead as it was asked for, whatever CtrlB answers."""
     if common.relay_off(cfg) or (inp.get('tool_name') or '') not in AGENT_TOOLS:
         return None
     run, agent, sid = _who(cfg, inp)
@@ -121,8 +121,8 @@ def pre_agent(cfg, inp):
 
 
 def post_tool(cfg, inp):
-    """Decision 21: after a ctrlb claim, handoff, release or done, keep the agent's hold tokens for the pre-tool check.
-    Decision 30: after a test-looking Bash command, remember it, its exit code and last output line; after a done (or
+    """After a ctrlb claim, handoff, release or done, keep the agent's hold tokens for the pre-tool check.
+    After a test-looking Bash command, remember it, its exit code and last output line; after a done (or
     a finished release) refused for evidence, return the context that quotes that command so the agent can call done
     with it. Returns the hook output, or None (nothing printed)."""
     if common.relay_off(cfg):
@@ -131,7 +131,7 @@ def post_tool(cfg, inp):
     args = inp.get('tool_input') if isinstance(inp.get('tool_input'), dict) else {}
     own_run, own_agent, sid = _who(cfg, inp)
     if tool == 'Bash':
-        # Decision 38: every command, with its exit code and last output line, for the done witness.
+        # every command, with its exit code and last output line, for the done witness.
         failed = inp.get('hook_event_name') == 'PostToolUseFailure' or 'error' in inp and 'tool_response' not in inp
         code, line = bash_result(inp.get('error') if failed else inp.get('tool_response'))
         record_bash(own_run, own_agent, sid, args.get('command'), code, line)
@@ -148,12 +148,12 @@ def post_tool(cfg, inp):
             return None
         slots = relay_hooks.slot_paths(cfg, paths, cwd)
         if slots:
-            try:      # decision 47: the slot the pre-tool hook claimed for this edit is released after it
+            try:      # the slot the pre-tool hook claimed for this edit is released after it
                 relay_hooks.release_slots(cfg, own_run, own_agent, slots, cwd)
             except Exception as e:
                 common.log(f"auto slot release {own_run}/{own_agent}: {type(e).__name__}: {str(e)[:200]} (the slot lapses)")
         if not failed:
-            for p in paths:   # decision 44: a small text file under the scratch directories is kept in the record
+            for p in paths:   # a small text file under the scratch directories is kept in the record
                 try:
                     relay_hooks.post_artifact(cfg, own_run, own_agent, p, inp)
                 except Exception as e:
@@ -202,7 +202,7 @@ def main():
         run, agent = common.run_id(cfg, sid), common.agent_name(cfg, sid)
         scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
         text = RECALL.format(sid=sid) + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
-        try:      # decision 45: a relay run's session starts with the record
+        try:      # a relay run's session starts with the record
             block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
         except Exception as e:
             common.log(f"session-start record: {type(e).__name__}: {str(e)[:200]}")

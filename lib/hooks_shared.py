@@ -1,5 +1,5 @@
 """What the Claude Code hook (plugin/hooks/hook.py) and the Codex hook (codex/hook.py) share: the injected rules and
-the edit check of decision 7. Both harnesses take the same output shapes: hookSpecificOutput with additionalContext
+the pre-tool edit check. Both harnesses take the same output shapes: hookSpecificOutput with additionalContext
 (SessionStart, SubagentStart, PreToolUse) and, on PreToolUse, permissionDecision "deny" with a non-empty
 permissionDecisionReason."""
 import datetime
@@ -31,13 +31,14 @@ SUBAGENT = ("You are a subagent of session {sid}. That session's full record, in
             "After a command fails, call `find_command` with the command before changing it, then `next_actions` with "
             "a session_id and seq it returns to see what followed.")
 
-# Rule text v10 (round 8): claim(next=true) first, done with next=true, peers only to wait; the REGISTRY.md sentence
-# is gone (the hooks claim autoSlots files, decision 47); helper files go to the run's scratch directory (decision D).
+# Claim before working, finish with evidence, and read peers for context or to wait for news.
+# The hooks manage autoSlots files; helper files go to the run's scratch directory.
 RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other agents in this run may be working in "
          "the same files. Pass run_id=\"{run}\" and agent=\"{agent}\" to the ctrlb relay tools (peers, post, claim, "
-         "release, handoff, ask, answer, brief, briefs, tasks, contract, contracts). Start with `claim(next=true)`. When "
+         "release, handoff, ask, answer, brief, briefs, tasks, contract, contracts, done). Start with `claim(next=true)`. When "
          "your test passes, call `done` with the evidence and `next=true`. Call `peers` only when you are waiting for an "
-         "answer or a handoff. Claim the task by the name your orchestrator registered (for example "
+         "answer or a handoff, or need context from the run's record; do not poll before each task. Claim the task by "
+         "the name your orchestrator registered (for example "
          "claim(resource=\"task 03 median\"); tasks lists them). Its files come with it. If held is false with "
          "finished_by, the task is done; if held is false with held_by, another agent has it: pick another. If a claim "
          "is refused and the answer lists free tasks, claim one of them next. If the list is empty, post a note saying "
@@ -46,9 +47,10 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
          "agent that has stopped, the hold shows as stalled; take it over the same way. If reason is unknown_task, "
          "claim again with the suggestion. If reason is belongs_to_task, the file comes with a registered task: claim "
          "that task (task in the answer) instead. If the claim answers ask_about, ask the task's owner about those "
-         "before deciding them yourself. Work only while you hold it. When the task is done, release "
-         "it with finished=true. Run the task's test command (tasks and claim show it as test); when it passes, call "
-         "done on the task name with that command, its exit code and its last output line as the evidence. When the "
+         "before deciding them yourself. Work only while you hold it. Use release with finished=false to give a task "
+         "back; release standalone files and slots when done with them. Run the task's test command (tasks and claim "
+         "show it as test); when it passes, call done on the task name with that command, its exit code and its last "
+         "output line as the evidence, and next=true. When the "
          "task has no test command, give the check you ran. A task is finished only when the record shows what was "
          "checked. A file that belongs to no task is claimed by its path. A shared thing that is not a "
          "file, such as the dev server or a port, is claimed as slot:<name> and released when you are done with it. Use "
@@ -62,7 +64,7 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
          "reopen=true. Put helper scripts and binaries in the scratch directory {scratch}, not in /tmp.")
 
 
-# Seeker decision 33: a hold whose holder has stopped is taken over, not waited out.
+# A hold whose holder has stopped is taken over, not waited out.
 STALLED_HINT = ("If the holder has stopped, the hold shows as stalled (tasks lists stalled tasks); claim it with "
                 "takeover=true instead of waiting.")
 
@@ -96,11 +98,11 @@ def _lease(c):
 
 
 def decide(cfg, run, agent, paths, cwd=''):
-    """Decision 7: post the paths an edit is about to touch to Seeker's check and turn the answer into the hook
-    output, or None for no output (allowed, mode off, or no conflict). Raises on any Seeker error; the caller fails
-    open. The paths are sent as paths.edit_paths gives them (relative to cwd, once per key), so Seeker keys them as it
+    """Post the paths an edit is about to touch to CtrlB's check and turn the answer into the hook
+    output, or None for no output (allowed, mode off, or no conflict). Raises on any CtrlB error; the caller fails
+    open. The paths are sent as paths.edit_paths gives them (relative to cwd, once per key), so CtrlB keys them as it
     keys claims and as it keys the paths column of the session rows. The tokens the agent's claims answered are sent
-    with them (decision 21), so Seeker can tell a hold of an earlier round of the file's task."""
+    with them, so CtrlB can tell a hold of an earlier round of the file's task."""
     paths = normalise_edit_paths(paths, cwd or '')
     if not paths or not run or not agent:
         return None
@@ -138,7 +140,7 @@ def decide(cfg, run, agent, paths, cwd=''):
 
 
 def _said(c):
-    """One conflict in words: the holder (held), or Seeker's message for lapsed, unheld and stale_round."""
+    """One conflict in words: the holder (held), or CtrlB's message for lapsed, unheld and stale_round."""
     reason = c.get('reason') or 'held'
     if reason == 'held':
         return f"{_resource(c)} is claimed by {c['held_by']}{_lease(c)}"
@@ -171,7 +173,7 @@ def _tool_answer(resp):
 
 
 def record_tokens(run, agent, tool, answer):
-    """Keep the agent's hold tokens (decision 21): a held claim's token for its key and its bundle's keys; a handoff
+    """Keep the agent's hold tokens: a held claim's token for its key and its bundle's keys; a handoff
     or a release drops them. Returns the keys changed."""
     if not run or not agent or not isinstance(answer, dict):
         return []
@@ -190,7 +192,7 @@ def record_tokens(run, agent, tool, answer):
     return []
 
 
-# ---------------------------------------------------------------- done and its evidence (Seeker decision 30)
+# ---------------------------------------------------------------- done and its evidence
 
 # A test-looking command: pytest, python -m pytest / unittest, go test, npm (run) test, cargo test, make test.
 TEST_COMMAND = re.compile(r'(?:^|[\s;&|(`])(?:pytest|py\.test|python[0-9.]*\s+-m\s+(?:pytest|unittest)|go\s+test|npm\s+(?:run\s+)?test'
@@ -337,7 +339,7 @@ def _epoch(ts):
         return 0.0
 
 
-# Seeker decision 32: an evidence_required refusal of a task with a test command carries it as "test", and its message
+# An evidence_required refusal of a task with a test command carries it as "test", and its message
 # ends with this marker and the command.
 TASK_TEST_MARKER = "; the task's test command is: "
 
@@ -355,7 +357,7 @@ def refusal_test(answer):
 
 
 def names_test(command, test):
-    """Whether a command names the task's test (Seeker's rule: the test, each run of white space as one space,
+    """Whether a command names the task's test (CtrlB's rule: the test, each run of white space as one space,
     appears in the command so spaced)."""
     t = ' '.join((test or '').split())
     return bool(t) and t in ' '.join((command or '').split())
@@ -408,7 +410,7 @@ def evidence_hint(run, agent, answer, transcript='', keys=()):
                                   f'evidence={json.dumps(ev)}); otherwise run the task\'s test first. Report only a check '
                                   f'you ran.')
 
-# ---------------------------------------------------------------- the session record (Seeker decisions 36 and 38)
+# ---------------------------------------------------------------- the session record
 
 HANDOFF_TEXT_MAX = 1500
 LINE_MAX = 200
@@ -488,7 +490,7 @@ def _cut(s, n):
 
 
 def handoff_text(rec, last_test=None):
-    """The open handoff's text (decision 36), one paragraph from the hook's own record: the files edited in this
+    """The open handoff's text, one paragraph from the hook's own record: the files edited in this
     session, the last test command it saw and its exit code, and the agent's last note."""
     parts = ['Session ended.']
     edited = [redact(os.path.basename(p) if len(p) > 80 else p)[0] for p in (rec.get('edited') or [])]
@@ -538,7 +540,7 @@ def _code(v):
 
 
 def witness(rec, tool_input):
-    """Decision 38: the PreToolUse output for a done call, checked against this session's Bash record. A command
+    """The PreToolUse output for a done call, checked against this session's Bash record. A command
     equal to the complete raw evidence command or its redacted form, with an equal exit code (newest first): allow, with
     witnessed true (and the exit code filled in from the record when the call left it out). No such command: deny,
     naming what the hook saw. No evidence command: None, unless the agent set witnessed itself (then it is dropped).

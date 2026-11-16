@@ -7,9 +7,9 @@ hookSpecificOutput.additionalContext, and on PreToolUse permissionDecision "deny
 A hook never fails or blocks a session: every error goes to ~/.ctrlb/hooks.log and the hook exits 0. pre-tool fails
 open (no output) on any error and gives up after two seconds.
 
-Round 8 (docs/relay-hooks.md): session-start creates the run's scratch directory and, in a relay run (CTRLB_RUN), adds
-the record block (decision 45). Codex gets no spawn registration (decision 43), no artefact posting (decision 44) and
-no autoSlots (decision 47): its hooks have no sub-agent tool input to read and no hook after a tool call, so a slot
+As described in docs/relay-hooks.md, session-start creates the run's scratch directory and, in a relay run (CTRLB_RUN), adds
+the record block. Codex gets no spawn registration, no artefact posting and
+no autoSlots: its hooks have no sub-agent tool input to read and no hook after a tool call, so a slot
 claimed before a patch could not be released after it."""
 import json, os, signal, sys, time
 sys.dont_write_bytecode = True
@@ -24,8 +24,8 @@ CODEX_HANDOFF_TEXT = 'Session ended (Codex: the hook keeps no record of edits or
 
 
 def session_end(cfg, inp, deadline=None):
-    """Seeker decision 36 for Codex: in a relay run (CTRLB_RUN set), hand off every hold the agent still has, in one
-    write (common.handoff_all). Seeker unreachable or an error: nothing is written."""
+    """For Codex, in a relay run (CTRLB_RUN set), hand off every hold the agent still has, in one
+    write (common.handoff_all). CtrlB unreachable or an error: nothing is written."""
     if common.relay_off(cfg) or not cfg.get('run'):
         return None
     sid = inp.get('session_id') or ''
@@ -69,7 +69,7 @@ def session_run(cfg, sid, transcript):
 
 
 def pre_tool(cfg, inp):
-    """Decision 7 for apply_patch: the paths come from the patch's *** Update File / Add File / Delete File lines."""
+    """For apply_patch: the paths come from the patch's *** Update File / Add File / Delete File lines."""
     if common.relay_off(cfg) or cfg['enforce'] == 'off':
         return None
     paths = rows_codex.input_paths(inp.get('tool_input'))
@@ -113,7 +113,7 @@ def main():
         agent = rows_codex.agent_for(cfg, sid, parent)
         scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
         text = head + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
-        try:      # decision 45: a relay run's session starts with the record
+        try:      # a relay run's session starts with the record
             block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
         except Exception as e:
             common.log(f"codex session-start record: {type(e).__name__}: {str(e)[:200]}")

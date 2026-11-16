@@ -1,19 +1,19 @@
-"""Config, the Seeker HTTP client, per-file upload state and logging for ctrlb-agent. Standard library only.
+"""Config, the CtrlB HTTP client, per-file upload state and logging for ctrlb-agent. Standard library only.
 
 Config comes from environment variables, falling back to ~/.ctrlb/config.json (written by bin/configure.py, mode 0600):
 
-  CTRLB_URL      Seeker's URL                                   file key "url"
+  CTRLB_URL      CtrlB's URL                                   file key "url"
   CTRLB_ALLOW_HTTP=1  allow plain HTTP to a non-loopback server (HTTPS is the default requirement)
   CTRLB_KEY      the user's MCP key, sent as Authorization: Bearer   file key "key"
-  (no variable)  the key's user: the "email" claim of the key, as Seeker reads it; the only source of user_name
+  (no variable)  the key's user: the "email" claim of the key, as CtrlB reads it; the only source of user_name
                                                                  file key "user" (written by bin/configure.py)
   CTRLB_RUN      run id shared by every agent of one run         file key "run"
   CTRLB_AGENT    optional agent label (default: the session id)  (environment only)
   CTRLB_USER     read for compatibility as the agent label when CTRLB_AGENT is unset; never sent as user_name
   CTRLB_DATASET  sessions dataset (default agent_sessions)        file key "dataset"
-  CTRLB_ENFORCE  "off" skips the edit check without calling Seeker; anything else lets Seeker's mode decide
+  CTRLB_ENFORCE  "off" skips the edit check without calling CtrlB; anything else lets CtrlB's mode decide
                                                                  file key "enforce"
-  CTRLB_MCP_URL  Seeker's /mcp URL, read by plugin/.mcp.json     file key "mcp_url" (shown by status only)
+  CTRLB_MCP_URL  CtrlB's /mcp URL, read by plugin/.mcp.json     file key "mcp_url" (shown by status only)
   CTRLB_MODE     "local" runs Relay hooks only with CTRLB_RUN   file key "mode"
   CTRLB_BIN      optional path to the local ctrlb executable
   CTRLB_SCRATCH_DIR  the run's durable scratch directory; {run} is replaced by the run id
@@ -31,13 +31,13 @@ VERSION = '0.2.1'
 HOME = os.environ.get('CTRLB_HOME') or os.path.expanduser('~/.ctrlb')
 NAME_RE = re.compile(r'^[A-Za-z0-9_]{1,64}$')
 DEFAULT_DATASET = 'agent_sessions'
-USER_CLAIM = 'email'   # the claim Seeker takes the caller's user_name from (middleware GetEmailFromJWT)
+USER_CLAIM = 'email'   # the claim CtrlB takes the caller's user_name from
 
 
 def key_user(key):
-    """The user an MCP key belongs to: the USER_CLAIM of its JWT payload (base64url, no signature check; Seeker
+    """The user an MCP key belongs to: the USER_CLAIM of its JWT payload (base64url, no signature check; CtrlB
     checks the signature). '' when the key is not a JWT or carries no such claim, so rows then omit user_name and
-    Seeker fills it from the key."""
+    CtrlB fills it from the key."""
     try:
         parts = (key or '').strip().split('.')
         if len(parts) != 3:
@@ -227,7 +227,7 @@ def safe_segment(s):
 
 
 def scratch_dir(cfg, run):
-    """The run's durable scratch directory (decision D): scratchDir, with {run} replaced, or
+    """The run's durable scratch directory: scratchDir, with {run} replaced, or
     <CTRLB_HOME>/relay/<run id>/scratch."""
     d = cfg.get('scratch_dir') or ''
     if d:
@@ -236,7 +236,7 @@ def scratch_dir(cfg, run):
 
 
 def run_id(cfg, session_id, parent=''):
-    """Decision 4: CTRLB_RUN when set; else a subagent joins its parent's run and a session is its own run."""
+    """CTRLB_RUN when set; else a subagent joins its parent's run and a session is its own run."""
     return cfg.get('run') or parent or session_id or ''
 
 
@@ -299,8 +299,8 @@ class SeekerError(RuntimeError):
 
 
 def request(cfg, method, path, body=None, query=None, timeout=10, expected_status=None):
-    """One call to Seeker. Returns the decoded JSON answer ({} when empty). Raises SeekerError on an HTTP error and
-    OSError / TimeoutError when Seeker cannot be reached."""
+    """One call to CtrlB. Returns the decoded JSON answer ({} when empty). Raises SeekerError on an HTTP error and
+    OSError / TimeoutError when CtrlB cannot be reached."""
     url = cfg['url'] + path
     validate_url(url)
     if query:
@@ -413,7 +413,7 @@ class TokenState:
 
 class LastTest(TokenState):
     """The last test-looking Bash command of one agent of one run, its exit code and last output line, from the
-    PostToolUse hook (Seeker decision 30): {command, exit_code, summary, ts}. Quoted back to the agent when done is
+    PostToolUse hook: {command, exit_code, summary, ts}. Quoted back to the agent when done is
     refused for evidence; never sent as evidence by the hook."""
 
     def __init__(self, run, agent):
@@ -432,7 +432,7 @@ class LastTest(TokenState):
 
 
 class SessionRecord(TokenState):
-    """What the hooks saw one agent of one run do in its current session (Seeker decisions 36 and 38): {sid, bash:
+    """What the hooks saw one agent of one run do in its current session: {sid, bash:
     [{command, exit_code, summary, ts}] (newest last, at most BASH_MAX), edited: [path], note: {text, ts}, relay: bool
     (a ctrlb relay tool was called)}. A new session id starts a new record. Read by the session-end handoff (its text)
     and by the done witness (was this command run, with this exit code, in this session)."""
@@ -461,7 +461,7 @@ class SessionRecord(TokenState):
 
 
 def handoff_all(cfg, run, agent, text, cwd='', timeout=0.8):
-    """POST /ai/relay/{dataset}/runs/{run}/handoffs with all=true and no receiver (Seeker decision 36): every hold the
+    """POST /ai/relay/{dataset}/runs/{run}/handoffs with all=true and no receiver: every hold the
     agent has in the run is handed off openly (a task: RELEASE plus a NOTE with text) or released (a path, a slot), in
     one write."""
     body = dict(agent=agent, all=True, to='', text=redact(text)[0])
@@ -470,7 +470,7 @@ def handoff_all(cfg, run, agent, text, cwd='', timeout=0.8):
     return request(cfg, 'POST', f"/ai/relay/{_seg(cfg['dataset'])}/runs/{_seg(run)}/handoffs", body, timeout=timeout)
 
 
-# ---------------------------------------------------------------- round 8 relay calls (decisions 43 to 47)
+# ---------------------------------------------------------------- relay calls
 
 def _run_path(cfg, run, tail):
     return f"/ai/relay/{_seg(cfg['dataset'])}/runs/{_seg(run)}/{tail}"
@@ -508,7 +508,7 @@ def release(cfg, run, agent, resource, cwd='', timeout=2):
 
 
 def post_note(cfg, run, agent, text, key='', hash_='', timeout=10):
-    """POST .../posts: a NOTE. key (artifact:<path>) and hash are the round 8 artefact fields (decision 44)."""
+    """POST .../posts: a NOTE. key (artifact:<path>) and hash identify the artefact path and content."""
     body = dict(agent=agent, text=text)
     if key:
         body['key'] = key

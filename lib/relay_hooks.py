@@ -1,9 +1,9 @@
-"""CtrlB Relay round 8 hooks (Seeker decisions 43 to 47), shared by plugin/hooks/hook.py and codex/hook.py. Standard
+"""CtrlB Relay hooks, shared by plugin/hooks/hook.py and codex/hook.py. Standard
 library only. docs/relay-hooks.md lists each hook's event, the fields it reads, what it writes and its time budget.
 
 A  a sub-agent spawn (PreToolUse on Agent) registers a task: `task <n> <description>`, the prompt as its text, the
    workspace paths the prompt names as its files, and an interface block of the prompt as a contract. Synchronous,
-   inside REGISTER_S, so the task is in the record before the sub-agent's first claim; nothing is written when Seeker
+   inside REGISTER_S, so the task is in the record before the sub-agent's first claim; nothing is written when CtrlB
    does not answer, and the spawn always goes ahead.
 B  a small text file written under the session's scratchpad or the run's scratch directory is posted as a NOTE keyed
    artifact:<relative path> with its hash, by a detached process; the same content is posted once.
@@ -40,8 +40,8 @@ RECORD_S = 3.0          # C: every read of the session-start block together
 ARTIFACT_POST_S = 10    # B: the detached post
 ARTIFACT_MAX = 32 * 1024
 BLOCK_MAX = 2000        # C: the context block, in bytes (under 2 KB)
-TEXT_MAX = 2000         # Seeker cuts a brief's text here
-MAX_PATHS = 32          # Seeker takes at most 32 paths per task or contract
+TEXT_MAX = 2000         # CtrlB cuts a brief's text here
+MAX_PATHS = 32          # CtrlB takes at most 32 paths per task or contract
 ARTIFACT = 'artifact:'
 
 
@@ -65,7 +65,7 @@ def _clean_text(text, limit=TEXT_MAX):
     return out if len(b) <= limit else b[:limit].decode(errors='ignore')
 
 
-# ---------------------------------------------------------------- A: a spawn registers a task (decision 43)
+# ---------------------------------------------------------------- A: a spawn registers a task
 
 _SPLIT = re.compile(r'[\s`\'"()\[\]{}<>,;|*=]+')
 _LINE_REF = re.compile(r':\d+(?::\d+)?$')
@@ -172,9 +172,9 @@ def _name_part(s, limit):
 
 
 def register_spawn(cfg, run, agent, tool_input, cwd, budget=REGISTER_S):
-    """Decision 43. The task a sub-agent spawn registers, and the contract when the prompt carries an interface:
+    """The task a sub-agent spawn registers, and the contract when the prompt carries an interface:
     {task, paths, test?, contract?}, or None when the prompt names no workspace path (a task needs one). Raises on a
-    Seeker error or timeout; the caller logs it and lets the spawn go ahead."""
+    CtrlB error or timeout; the caller logs it and lets the spawn go ahead."""
     deadline = time.time() + budget
     args = tool_input if isinstance(tool_input, dict) else {}
     prompt = str(args.get('prompt') or '')
@@ -201,7 +201,7 @@ def register_spawn(cfg, run, agent, tool_input, cwd, budget=REGISTER_S):
     return out
 
 
-# ---------------------------------------------------------------- B: artefacts (decision 44)
+# ---------------------------------------------------------------- B: artefacts
 
 SECRET_NAME = re.compile(r'(?:^|/)(?:\.env(?:\..*)?|.*\.(?:pem|key|p12|pfx|keystore)|id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?'
                          r'|auth\.json|credentials(?:\.json)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials)$', re.I)
@@ -303,7 +303,7 @@ def _confined(root, rel):
 
 
 def post_artifact(cfg, run, agent, path, inp):
-    """Decision 44 for one written file: skipped (None), unchanged since its last post ('same'), or handed to a
+    """One written file: skipped (None), unchanged since its last post ('same'), or handed to a
     detached poster ('posted'). The hash cache is updated before the post; the poster takes the entry back when the
     post fails, so the next write tries again."""
     found = artifact_of(path, artifact_roots(cfg, run, inp))
@@ -358,7 +358,7 @@ def _poster(payload):
         common.RunState(run, agent, 'artifacts').change(drop)
 
 
-# ---------------------------------------------------------------- E: hook-managed slots (decision 47)
+# ---------------------------------------------------------------- E: hook-managed slots
 
 def slot_paths(cfg, paths, cwd):
     """The edited paths (as the edit check sends them) that autoSlots lists."""
@@ -409,7 +409,7 @@ def release_slots(cfg, run, agent, rels, cwd, timeout=RELEASE_S):
     return done
 
 
-# ---------------------------------------------------------------- C: a session starts with the record (decision 45)
+# ---------------------------------------------------------------- C: a session starts with the record
 
 def _get(cfg, run, tail, query, deadline, out, name):
     try:
@@ -493,7 +493,7 @@ def _restore(root, rel, text):
 
 
 def restore_artifacts(parts, run, agent, scratch):
-    """Write this agent's artefacts into the scratch directory, those it does not have yet: from Seeker's answer, else
+    """Write this agent's artefacts into the scratch directory, those it does not have yet: from CtrlB's answer, else
     from the local copies of the artefacts this machine posted. Returns the relative paths now there."""
     have = []
     items = (parts.get('artifacts') or {}).get('artifacts') if isinstance(parts.get('artifacts'), dict) else None
@@ -587,7 +587,7 @@ def record_block(parts, stale, run, agent, scratch, artefacts):
 
 
 def make_scratch(cfg, run):
-    """Create the run's scratch directory (decision D); returns its path ('' when it cannot be made)."""
+    """Create the run's scratch directory; returns its path ('' when it cannot be made)."""
     d = common.scratch_dir(cfg, run)
     try:
         common.private_dir(common.HOME)
@@ -602,7 +602,7 @@ def make_scratch(cfg, run):
 
 
 def session_start_block(cfg, run, agent, source='', budget=RECORD_S):
-    """Decision 45: the record block for a session whose environment carries a run id (CTRLB_RUN), except after a
+    """The record block for a session whose environment carries a run id (CTRLB_RUN), except after a
     compaction (the same session goes on, with its scratch files in place). '' otherwise or when there is nothing."""
     if not cfg.get('run') or not run or not agent or source == 'compact':
         return ''
