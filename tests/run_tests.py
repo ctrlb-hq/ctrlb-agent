@@ -3,7 +3,7 @@
 CtrlB is a local fake that answers with the synthetic responses in tests/fixtures/seeker/.
 Nothing is sent anywhere else, Claude is never called, and no real config is read: every CTRLB_* variable from the
 calling environment is dropped and CTRLB_HOME points into tests/work/."""
-import base64, glob, hashlib, http.server, json, os, re, shutil, signal, socket, stat, subprocess, sys, threading, time, traceback
+import base64, glob, hashlib, http.server, json, os, re, shutil, signal, socket, socketserver, stat, subprocess, sys, threading, time, traceback
 from unittest import mock
 sys.dont_write_bytecode = True
 
@@ -84,6 +84,11 @@ def load(name):
 class StubHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 64
+
+    def server_bind(self):
+        # HTTPServer resolves the host before listen(); loopback fixtures need no reverse DNS.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 class StubRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -3061,7 +3066,13 @@ if sys.argv[1] == 'init':
                        dataset='agent_sessions', mode='local'), fh)
     os.chmod(os.path.join(home, 'config.json'), 0o600)
 elif sys.argv[1] == 'serve' and not os.environ.get('STUB_NO_HEALTH'):
-    import http.server
+    import http.server, socket, socketserver
+    if os.environ.get('STUB_GETFQDN_DELAY'):
+        def slow_getfqdn(host):
+            log('getfqdn')
+            time.sleep(float(os.environ['STUB_GETFQDN_DELAY']))
+            return host
+        socket.getfqdn = slow_getfqdn
     time.sleep(float(os.environ.get('STUB_START_DELAY', '0')))
     class H(http.server.BaseHTTPRequestHandler):
         timeout = 2
@@ -3079,7 +3090,8 @@ elif sys.argv[1] == 'serve' and not os.environ.get('STUB_NO_HEALTH'):
         daemon_threads = True
         request_queue_size = 64
         def server_bind(self):
-            super().server_bind()
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address[:2]
             log('bound', host=self.server_address[0], port=self.server_address[1])
         def server_activate(self):
             super().server_activate()
@@ -3183,6 +3195,43 @@ def test_local_health_retry():
         healthy, detail = wait_local_health('http://127.0.0.1', timeout=0.1)
     check('health retry: deadline exhaustion returns a failed check with the last error',
           not healthy and 'URLError' in detail and 'timed out' in detail)
+
+
+def test_fixture_bind_without_dns():
+    with mock.patch.object(socket, 'getfqdn', side_effect=AssertionError('unexpected reverse DNS')) as lookup:
+        seeker = Seeker()
+        try:
+            healthy, detail = wait_local_health(seeker.url)
+            check('HTTP fixtures: bind and serve health without reverse DNS', healthy and lookup.call_count == 0, detail)
+            check('HTTP fixtures: server name and port come from the bound address',
+                  (seeker.httpd.server_name, seeker.httpd.server_port) == seeker.httpd.server_address
+                  and seeker.httpd.server_name == '127.0.0.1' and seeker.httpd.server_port > 0)
+        finally:
+            seeker.httpd.shutdown()
+            seeker.httpd.server_close()
+
+
+def test_local_stub_slow_dns():
+    home = os.path.join(WORK, 'home-start-slow-dns')
+    binary = local_stub(home)
+    port = closed_port()
+    url = f'http://127.0.0.1:{port}'
+    env = base_env(url, home, STUB_PORT=str(port), STUB_GETFQDN_DELAY='10')
+    process = subprocess.Popen([binary, 'serve'], cwd=home, env=env, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        # The ordinary eight-second readiness deadline is shorter than the injected lookup delay.
+        healthy, detail = wait_local_health(url)
+        check_local_startup('local stub: health answers despite a ten-second reverse DNS delay', healthy, home, url, detail)
+        events = [json.loads(line) for line in read(os.path.join(home, 'startup.jsonl')).decode().splitlines()]
+        names = [event['event'] for event in events]
+        check('local stub: bind and listen complete without calling getfqdn',
+              'bound' in names and 'listening' in names and 'getfqdn' not in names
+              and names.index('bound') < names.index('listening'))
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=5)
 
 
 def test_local_stub_idle_connections():
@@ -4817,6 +4866,8 @@ def main():
     run_test(test_local_session_context, seeker)
     run_test(test_local_relay, seeker)
     run_test(test_local_health_retry)
+    run_test(test_fixture_bind_without_dns)
+    run_test(test_local_stub_slow_dns)
     run_test(test_local_stub_idle_connections)
     run_test(test_local_startup, seeker)
     run_test(test_local_startup_delayed)
