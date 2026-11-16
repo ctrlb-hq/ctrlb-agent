@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 
 MAX_BINARY_BYTES = 512 * 1024 * 1024
+RELEASES = 'https://github.com/ctrlb-hq/ctrlb-agent/releases'
 
 
 class InstallError(Exception):
@@ -27,26 +28,46 @@ def target_name():
     return f'ctrlb-{system}-{arch}'
 
 
-def validate_url(url):
-    """Allow HTTPS, local file fixtures, and HTTP on the two loopback hosts."""
+def release_base(version):
+    """GitHub serves the newest release and a named release at different paths."""
+    if version == 'latest':
+        return RELEASES + '/latest/download'
+    # The version is one path segment of the release address: a tag such as v0.1.0.
+    if not re.fullmatch(r'[A-Za-z0-9._+-]+', version) or version in ('.', '..'):
+        raise InstallError('--version must be a release tag such as v0.1.0 '
+                           '(letters, digits, dot, underscore, plus or hyphen)')
+    return RELEASES + '/download/' + version
+
+
+def validate_url(url, redirect=False):
+    """Allow HTTPS, local file fixtures, and HTTP on the two loopback hosts.
+
+    A redirect target may carry a query, because a release host signs its file
+    addresses that way. It may not be a file.
+    """
     try:
         parsed = urllib.parse.urlsplit(url)
         parsed.port  # Reject malformed ports before opening the URL.
-        if parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
+        if parsed.username is not None or parsed.password is not None:
             raise ValueError
-        if parsed.scheme == 'file' and parsed.netloc in ('', 'localhost') and parsed.path.startswith('/'):
+        if not redirect and (parsed.query or parsed.fragment):
+            raise ValueError
+        if (not redirect and parsed.scheme == 'file' and parsed.netloc in ('', 'localhost')
+                and parsed.path.startswith('/')):
             return
         if parsed.hostname and (parsed.scheme == 'https' or
                                 (parsed.scheme == 'http' and parsed.hostname in ('127.0.0.1', 'localhost'))):
             return
     except ValueError:
         pass
+    if redirect:
+        raise InstallError('the download was redirected to an address that is not allowed; nothing installed')
     raise InstallError('download URL must use HTTPS (file:// and HTTP on 127.0.0.1 or localhost are allowed)')
 
 
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        validate_url(newurl)
+        validate_url(newurl, redirect=True)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -63,7 +84,7 @@ def _checksum(base, filename):
             raise InstallError('SHA256SUMS is too large; nothing installed')
         lines = manifest.decode('ascii').splitlines()
     except (OSError, ValueError, UnicodeError, http.client.HTTPException):
-        raise InstallError('could not download or read SHA256SUMS; nothing installed') from None
+        raise InstallError(f'could not download or read SHA256SUMS from {base}; nothing installed') from None
     matches = []
     for line in lines:
         match = re.fullmatch(r'([0-9a-fA-F]{64}) [ *](.+)', line)
@@ -144,20 +165,23 @@ def print_next_steps():
 
 def main(argv):
     parser = argparse.ArgumentParser(prog='install.py --local', description=__doc__)
-    parser.add_argument('--version', default='latest', help='replace <version> in the download URL (default: latest)')
-    parser.add_argument('--download-url', help='full release base URL (or CTRLB_DOWNLOAD_URL)')
+    parser.add_argument('--version', default='latest',
+                        help='release to install, for example v0.1.0 (default: latest, the newest release)')
+    parser.add_argument('--download-url',
+                        help='full release base URL in place of the GitHub release (or CTRLB_DOWNLOAD_URL); '
+                             '<version> in it is replaced with --version')
     parser.add_argument('--port', type=int, help='local server port (default: 7531 on first init)')
     args = parser.parse_args(argv)
     if args.port is not None and not 1 <= args.port <= 65535:
         parser.error('--port must be between 1 and 65535')
+    version = args.version or 'latest'
     base = args.download_url or os.environ.get('CTRLB_DOWNLOAD_URL')
-    if not base:
-        print('CtrlB local install: supply --download-url or CTRLB_DOWNLOAD_URL; '
-              'the release download address has not been published yet', file=sys.stderr)
-        return 1
-    base = base.replace('<version>', urllib.parse.quote(args.version, safe=''))
     home = os.environ.get('CTRLB_HOME') or os.path.expanduser('~/.ctrlb')
     try:
+        if base:
+            base = base.replace('<version>', urllib.parse.quote(version, safe=''))
+        else:
+            base = release_base(version)
         install_binary(base, home, args.port)
     except InstallError as error:
         print(f'CtrlB local install: {error}', file=sys.stderr)

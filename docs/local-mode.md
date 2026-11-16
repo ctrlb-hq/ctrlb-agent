@@ -19,16 +19,38 @@ Local mode writes no running notes or memories; those need a model.
 Use Python 3.9 or newer on macOS or Linux, with an arm64 or amd64 processor. From a clone of this repository:
 
 ```sh
-python3 -I install.py --local --version "<version>" --download-url "<download address>"
+python3 -I install.py --local
 ```
 
-The release download address has not been published yet. Supply it with `--download-url` or `CTRLB_DOWNLOAD_URL` when it is available; without either, the installer stops with a clear error. The flag wins over the environment variable. The address is the full release base URL; no version is appended to it. The base must contain `SHA256SUMS` and the raw binary named `ctrlb-<os>-<arch>`, where the OS is `darwin` or `linux` and the architecture is `arm64` or `amd64`.
+This downloads the newest `ctrlb` release from this repository's [GitHub releases](https://github.com/ctrlb-hq/ctrlb-agent/releases). Add `--version v0.1.0` to install a named release; the version is the release tag, with its leading `v`. Each release holds `SHA256SUMS` and the raw binary named `ctrlb-<os>-<arch>`, where the OS is `darwin` or `linux` and the architecture is `arm64` or `amd64`.
 
-If the supplied address contains the literal `<version>`, `--version V` replaces it with `V`; omitting that flag uses `latest`. An address without `<version>` is used as given.
+To download from another place, supply the full release base URL with `--download-url` or `CTRLB_DOWNLOAD_URL`. The flag wins over the environment variable. No version is appended to that address. If it contains the literal `<version>`, the value of `--version` replaces it (`latest` when the flag is omitted). The base must hold the same files as a release.
 
 The installer verifies the binary's SHA-256 before replacing anything, installs it with mode 0755 as `~/.ctrlb/bin/ctrlb`, then runs `ctrlb init`. A checksum mismatch or missing checksum refuses the installation. Downloads use HTTPS; `file://` and HTTP on `127.0.0.1` or `localhost` are also accepted for local testing.
 
 `CTRLB_HOME` changes the location of the binary, config and database. `--port N` chooses the local server port (default 7531). Add the `bin` folder under your CtrlB home to your shell's `PATH` to run `ctrlb` directly. Initialization saves the local config with mode 0600; an existing config is backed up before it is replaced.
+
+Claude Code needs no clone. Each release also holds an install script. It needs `curl` and `sha256sum` or `shasum`, verifies the SHA-256 in the same way and installs `ctrlb` in `~/.local/bin`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ctrlb-hq/ctrlb-agent/releases/latest/download/install.sh | sh
+```
+
+Add `~/.local/bin` to your shell's `PATH` if it is not there. Then initialize:
+
+```sh
+ctrlb init
+```
+
+`ctrlb init` shows the local key once and saves the config; the export lines below read it from the config.
+
+`CTRLB_INSTALL_DIR` changes the folder and `CTRLB_VERSION` installs a named release. Set them on `sh`, not on `curl`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ctrlb-hq/ctrlb-agent/releases/latest/download/install.sh | CTRLB_VERSION=v0.1.0 sh
+```
+
+The two routes install in different folders, so use one of them and upgrade with the same one. The hooks look for `ctrlb` in `<CTRLB_HOME>/bin` first, then in `PATH`. A copy that `install.py --local` put in `~/.ctrlb/bin` stays in use until that route replaces it.
 
 Already have the binary? Run `python3 -I bin/configure.py --local` from this clone to initialize it and print the same config-reading exports shown below. Add `--port N` to choose the port. Set `CTRLB_BIN` to the executable's path to override binary discovery for configuration, session start and `bin/status.py`; otherwise they look in `<CTRLB_HOME>/bin/ctrlb`, then absolute entries in `PATH`.
 
