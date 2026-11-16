@@ -28,6 +28,8 @@ export CTRLB_KEY="<your key>"
 
 Codex reads the key from `CTRLB_KEY` each time it starts. The key is never written into `config.toml`.
 
+Use the final HTTPS CtrlB URL; the hooks reject API redirects. The Codex installer checks the MCP URL too, including `--mcp-url` and `CTRLB_MCP_URL`. Plain HTTP is allowed on loopback (`localhost`, `127.0.0.0/8`, `::1`). To use a remote self-hosted HTTP server, export `CTRLB_ALLOW_HTTP=1` before running `bin/configure.py`, `codex/install.py` and Codex. This sends the key and session text without encryption.
+
 ## 2. Run the installer
 
 The installer runs from a clone of the repository. The hooks it writes call `codex/hook.py` in that clone, so keep the clone where it is.

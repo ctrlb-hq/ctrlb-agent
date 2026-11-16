@@ -108,14 +108,16 @@ def main():
     c = dict(url=ask('CtrlB URL (shown on the Connect page)', old.get('url', ''), a.url).rstrip('/'),
              dataset=ask('Sessions dataset', old.get('dataset', common.DEFAULT_DATASET), a.dataset),
              run=ask('Run id for every session (Enter: each session is its own run, which is usual)', old.get('run', ''), a.run))
+    try:
+        common.validate_url(c['url'])
+    except ValueError as e:
+        sys.exit(str(e))
     if a.key_stdin:
         key = sys.stdin.readline()
     else:
         key = getpass.getpass('Key (hidden; Enter keeps the current one): ')
     c['key'] = key.strip() or old.get('key', '')
     c['mcp_url'] = c['url'] + '/mcp' if c['url'] else ''
-    if not c['url'].startswith(('http://', 'https://')):
-        sys.exit('the URL must start with http:// or https://')
     if not common.NAME_RE.match(c['dataset']):
         sys.exit('the dataset name must be letters, digits or _')
     if not c['key']:

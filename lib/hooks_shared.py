@@ -9,6 +9,7 @@ import re
 import time
 import common
 from paths import PATH, edit_paths as normalise_edit_paths, key as resource_key
+from redact import redact
 
 CHECK_S = 2.0
 
@@ -66,7 +67,7 @@ STALLED_HINT = ("If the holder has stopped, the hold shows as stalled (tasks lis
 
 
 def context(event, text):
-    return {'hookSpecificOutput': {'hookEventName': event, 'additionalContext': text}}
+    return {'hookSpecificOutput': {'hookEventName': event, 'additionalContext': redact(text)[0]}}
 
 
 def start_context(cfg, event, text):
@@ -147,7 +148,7 @@ def _said(c):
 
 def _deny(reason):
     return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
-                                   'permissionDecisionReason': reason}}
+                                   'permissionDecisionReason': redact(reason)[0]}}
 
 
 def _tool_answer(resp):
@@ -330,7 +331,9 @@ def evidence_hint(run, agent, answer, transcript='', keys=()):
     resource = answer.get('resource') or answer.get('key') or '<the task name>'
     head = f'CtrlB Relay (run {run}): {resource} was not marked finished: this run requires evidence.'
     test = refusal_test(answer)
-    if test and not (found and names_test(found.get('command'), test)):
+    matches = found and names_test(found.get('command'), test)
+    found, test = redact(found)[0], redact(test)[0]
+    if test and not matches:
         # The task's own test wins over whatever the agent ran last.
         ran = f" The last test command you ran, `{found['command']}`, is not it." if found else ''
         return context('PostToolUse', f'{head} The task\'s test command is `{test}`.{ran} Run it; when it passes, call '
@@ -404,7 +407,7 @@ def mark_relay(run, agent, sid):
 
 
 def _cut(s, n):
-    s = ' '.join(str(s or '').split())
+    s = ' '.join(redact(str(s or ''))[0].split())
     return s if len(s) <= n else s[:n - 3] + '...'
 
 
@@ -412,7 +415,7 @@ def handoff_text(rec, last_test=None):
     """The open handoff's text (decision 36), one paragraph from the hook's own record: the files edited in this
     session, the last test command it saw and its exit code, and the agent's last note."""
     parts = ['Session ended.']
-    edited = [os.path.basename(p) if len(p) > 80 else p for p in (rec.get('edited') or [])]
+    edited = [redact(os.path.basename(p) if len(p) > 80 else p)[0] for p in (rec.get('edited') or [])]
     if edited:
         shown = edited[-12:]
         more = f' and {len(edited) - len(shown)} more' if len(edited) > len(shown) else ''
@@ -424,15 +427,16 @@ def handoff_text(rec, last_test=None):
     if last_test and (not test or (last_test.get('ts') or 0) > (test.get('ts') or 0)):
         test = last_test
     if test:
+        test = redact(test)[0]
         code = test.get('exit_code')
         line = f" (last line: {_cut(test.get('summary'), LINE_MAX)})" if test.get('summary') else ''
         parts.append(f"Last test: `{_cut(test.get('command'), 300)}` exit {code if code is not None else 'unknown'}{line}.")
     else:
         parts.append('Last test: none run.')
-    note = rec.get('note') or {}
+    note = redact(rec.get('note') or {})[0]
     if note.get('text'):
         parts.append('Last note: ' + _cut(note['text'], 400))
-    return _cut(' '.join(parts), HANDOFF_TEXT_MAX)
+    return redact(_cut(' '.join(parts), HANDOFF_TEXT_MAX))[0]
 
 
 def _evidence_of(args):
@@ -459,7 +463,8 @@ def _code(v):
 
 def witness(rec, tool_input):
     """Decision 38: the PreToolUse output for a done call, checked against this session's Bash record. A command
-    containing the evidence command (white space collapsed), with an equal exit code (newest first): allow, with
+    containing the raw evidence command, or whose redacted form equals it (white space collapsed), with an equal
+    exit code (newest first): allow, with
     witnessed true (and the exit code filled in from the record when the call left it out). No such command: deny,
     naming what the hook saw. No evidence command: None, unless the agent set witnessed itself (then it is dropped).
     The hook asserts only what it saw; it is as strong as the host it runs on."""
@@ -473,7 +478,8 @@ def witness(rec, tool_input):
         return None
     want = _code(ev.get('exit_code')) if ev.get('exit_code') is not None else None
     bash = rec.get('bash') or []
-    seen = [b for b in reversed(bash) if cmd in _norm(b.get('command'))]
+    seen = [b for b in reversed(bash) if cmd in _norm(b.get('command')) or
+            cmd == _norm(redact(b.get('command'))[0])]
     for b in seen:
         code = _code(b.get('exit_code'))
         if code is None:
@@ -502,4 +508,4 @@ def witness(rec, tool_input):
 
 
 def _allow(args):
-    return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'allow', 'updatedInput': args}}
+    return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'allow', 'updatedInput': redact(args)[0]}}

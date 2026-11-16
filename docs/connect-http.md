@@ -8,6 +8,8 @@ slug: connect-http
 
 Any agent or script can use the session store and CtrlB Relay over HTTP. These are the calls the Claude Code plugin and the Codex hooks make. Replace `<your CtrlB URL>` and `<your key>` and each command runs as written.
 
+Use the final HTTPS URL. The package's API client rejects redirects and permits plain HTTP only on loopback (`localhost`, `127.0.0.0/8`, `::1`), unless `CTRLB_ALLOW_HTTP=1` is set when configuring and running the agent. That opt-in permits remote self-hosted HTTP with unencrypted keys and session text; it applies to the Python client, while curl follows its own options.
+
 - Every call sends `Authorization: Bearer <your key>`. The key is your MCP key from the Connect page. It acts as you, with your roles and dataset grants.
 - Bodies and answers are JSON.
 - `agent_sessions` in the paths is the sessions dataset, the workspace default. Relay rows for it are kept in `_ctrlb_relay_agent_sessions`, which CtrlB creates on the first write.

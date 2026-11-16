@@ -25,6 +25,13 @@ def main():
               + (' (CTRLB_AGENT is set and wins)' if os.environ.get('CTRLB_AGENT') else '') + ', never as user_name')
     for var in ('CTRLB_MCP_URL', 'CTRLB_KEY'):
         print(f"{var} in the environment: {'yes' if os.environ.get(var) else 'NO (the ctrlb tools need it)'}")
+    for field in ('url', 'mcp_url'):
+        if cfg[field]:
+            try:
+                common.validate_url(cfg[field])
+            except ValueError as e:
+                print(f'Unsafe {field}: {e}')
+                return
     if cfg['off']:
         print('ctrlb-agent is OFF (CTRLB_OFF=1, or the URL or key is missing, or a bad dataset name): run bin/configure.py')
         return

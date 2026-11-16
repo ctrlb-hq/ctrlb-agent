@@ -354,6 +354,252 @@ def test_layout():
           and os.path.realpath(os.path.join(ROOT, 'plugin', 'bin')) == os.path.join(ROOT, 'bin'))
 
 
+def test_credential_redaction(seeker):
+    import copy
+    import rows_codex
+    marker = 'synthetic-' + 'credential-value-001'
+    shapes = [name + '=' + marker for name in ('TOKEN', 'KEY', 'SECRET', 'PASSWORD', 'token')]
+    shapes += [json.dumps({name: value}) for name, value in
+               [('token', marker), ('Authorization', 'Bearer ' + marker), ('x-api-key', marker)]]
+    shapes += ['password="prefix ' + marker + ' suffix"', "SECRET='prefix " + marker + " suffix'",
+               'cli --password "prefix ' + marker + ' suffix"', 'TOKEN=' + marker + '\n',
+               'password=' + json.dumps('prefix "' + marker + '" suffix'),
+               'PASSWORD="prefix ' + marker, 'Authorization: "prefix \'middle\' ' + marker + ' suffix"',
+               'password="[REDACTED] ' + marker + '"', 'password="sk-' + ('x' * 20) + ' ' + marker + '"',
+               'headers: ' + json.dumps({'Cookie': 'session=' + marker + '; theme=dark'})]
+    check('credential assignments, JSON headers and complete quoted values are redacted',
+          all(marker not in redact.redact(text)[0] and redact.redact(text)[1] for text in shapes))
+    keep = ['max_tokens=5', 'token_count = 1234', 'KEY_RE = re.compile("pattern")',
+            'input_tokens=1234', 'TOKEN=$VALUE', 'KEY=<your key>', 'token_count: 1234']
+    check('redaction preserves code identifiers, counts, placeholders and variable references',
+          all(redact.redact(text) == (text, 0) for text in keep))
+    nested = {'items': [{'token': 'prefix "' + marker + '" suffix', 'headers':
+                        {'Authorization': 'Bearer ' + marker, 'x-api-key': marker}}],
+              'input_tokens': 1234, 'token_count': 5, 'enabled': True, 'text': shapes[0]}
+    original = copy.deepcopy(nested)
+    cleaned, count = redact.redact(nested)
+    check('parsed credential dictionaries are redacted recursively without mutating the input',
+          marker not in json.dumps(cleaned) and count == 4 and nested == original
+          and cleaned['input_tokens'] == 1234 and cleaned['token_count'] == 5 and cleaned['enabled'] is True)
+    check('redaction is idempotent for structured and quoted credentials',
+          redact.redact(cleaned) == (cleaned, 0)
+          and all(redact.redact(redact.redact(text)[0])[1] == 0 for text in shapes))
+    home = os.path.join(WORK, 'home-credential-redaction')
+    shutil.rmtree(home, ignore_errors=True)
+    os.makedirs(home, exist_ok=True)
+    cfg = dict(url=seeker.url, key=KEY, dataset=common.DEFAULT_DATASET, run='', agent='')
+    claude = os.path.join(home, 'claude.jsonl')
+    with open(claude, 'w') as fh:
+        for i, text in enumerate(shapes):
+            fh.write(line('user', [dict(type='tool_result', tool_use_id=str(i), content=text)], '2026-11-03T10:00:00Z'))
+        fh.write(line('assistant', [dict(type='tool_use', id='write', name='Write', input=nested)], '2026-11-03T10:00:01Z'))
+        fh.write(line('assistant', [dict(type='tool_use', id='bash', name='Bash', input={'command': shapes[0]})],
+                      '2026-11-03T10:00:02Z'))
+    codex = os.path.join(home, 'codex.jsonl')
+    records = [dict(type='session_meta', payload={'id': 'credential-thread'})]
+    records += [dict(type='response_item', payload=dict(type='function_call_output', call_id=str(i), output=text))
+                for i, text in enumerate(shapes)]
+    records += [dict(type='response_item', payload=dict(type='function_call', name='tool', arguments=json.dumps(nested))),
+                dict(type='response_item', payload=dict(type='custom_tool_call', name='tool', input=nested)),
+                dict(type='response_item', payload=dict(type='function_call_output', output=nested)),
+                dict(type='response_item', payload=dict(type='function_call', name='exec_command',
+                                                      arguments=json.dumps({'cmd': shapes[0]})))]
+    with open(codex, 'w') as fh:
+        fh.write(''.join(json.dumps(rec) + '\n' for rec in records))
+    with mock.patch.object(common, 'HOME', home):
+        for parser, path, label in ((rows_claude, claude, 'Claude'), (rows_codex, codex, 'Codex')):
+            seeker.reset()
+            counts = parser.upload_file(cfg, path, time.time() + 5)
+            check(label + ' uploads redact credential text, command fields and parsed tool dictionaries',
+                  counts['rows'] >= len(shapes) + 2 and counts['redacted'] >= len(shapes) + 4
+                  and marker not in json.dumps(seeker.rows) and '[REDACTED]' in json.dumps(seeker.rows)
+                  and any('"input_tokens": 1234' in r['body'] for r in seeker.rows))
+    seeker.reset()
+
+
+def test_redaction_literals():
+    marker = 'abc' + '123456789'
+    names = ('SECRET_KEY_BASE', 'DB_PASSWORD_PROD', 'GITHUB_TOKEN_ENTERPRISE', 'API_TOKEN_V2',
+             'AWS_SECRET_ACCESS_KEY', 'DATABASE_PASSWORD', 'MY_API_KEY', 'CLIENT_SECRET', 'CTRLB_KEY')
+    for name in names:
+        text = name + '=' + marker
+        check('credential assignment suffix and prefix: ' + name,
+              redact.redact(text) == (name + '=[REDACTED]', 1))
+    # The original positive formats, alongside the new bare-name cases.
+    s = planted()
+    positives = s[:4] + ['github_pat_' + ('a' * 24), 'eyJ' + ('a' * 12) + '.' + ('b' * 12) + '.' + ('c' * 12),
+                        '-----BEGIN PRIVATE KEY-----\n' + marker + '\n-----END PRIVATE KEY-----',
+                        'Authorization: Basic ' + s[5], 'Proxy-Authorization: Bearer ' + s[5],
+                        'X-API-Key: alphabeticcredential', 'Cookie: session=' + marker + '; theme=dark',
+                        'https://bob:' + marker + '@example.test', 'cli --token ' + marker,
+                        'cli --api-key=' + marker, 'cli --password "prefix ' + marker + ' suffix"',
+                        'aws_secret_access_key = "' + marker + '"', 'db_password: ' + marker]
+    check('original credential formats remain redacted', all(redact.redact(t)[1] for t in positives))
+    negatives = ['token = tokens[i]', 'self.token = token',
+                 'csrf_token = request.form["csrf"]', '- token = get_token()', 'TOKEN = Token(kind, text)',
+                 'PRIMARY_KEY = "id"', 'MONKEY = "banana"', 'HOTKEY = "ctrl+s"',
+                 '{"KEY": "SORT"}', '{"token": null}', '{"cookie": true}',
+                 'log {"token": false, "password": null, "cookie": true}']
+    for text in negatives:
+        check('ordinary code and data preserved: ' + text, redact.redact(text) == (text, 0))
+    typed = {'token': None, 'cookie': True, 'password': False, 'SECRET': 1234, 'API_KEY': 1.5, 'KEY': 'SORT'}
+    check('parsed credential keys mask numbers and preserve null, boolean and ordinary key values',
+          redact.redact(typed) == (dict(typed, SECRET='[REDACTED]', API_KEY='[REDACTED]'), 2))
+    for secret in (marker, 'S'):
+        escaped = ['echo "TOKEN=\\"' + secret + '\\""',
+                   'log {\\"password\\": \\"' + secret + '\\"}',
+                   '{\\"x-api-key\\": \\"' + secret + '\\"}']
+        for text in escaped:
+            cleaned, n = redact.redact(text)
+            check('escaped credential quotes are redacted: ' + text.split('=')[0].split(':')[0],
+                  ('\\"' + secret + '\\"') not in cleaned and '\\"[REDACTED]\\"' in cleaned and n == 1
+                  and redact.redact(cleaned) == (cleaned, 0))
+    tail = '\nordinary code\nprint("keep this")\nend of file'
+    for value in ("'it", '"it', '\\"it'):
+        cleaned, n = redact.redact('PASSWORD=' + value + tail)
+        check('unclosed credential quote preserves all following lines: ' + value,
+              cleaned.endswith(tail) and 'it\n' not in cleaned and n == 1)
+
+
+def test_redaction_assignment_safety():
+    for text, expected, count in (
+            ('{"password": 12345678}', '{"password": "[REDACTED]"}', 1),
+            ('"password":12345678,', '"password":[REDACTED],', 1),
+            ('{"db": {"password": 987654}}', '{"db": {"password": "[REDACTED]"}}', 1),
+            ('"pin_password": 1234', '"pin_password": [REDACTED]', 1),
+            ('log {"token": false, "password": 1234, "cookie": true}',
+             'log {"token": false, "password": [REDACTED], "cookie": true}', 1)):
+        check('numeric credential values are masked in JSON text and fragments',
+              redact.redact(text) == (expected, count) and redact.redact(expected) == (expected, 0))
+    original = {'db': {'password': 987654}, 'pin_password': 1234, 'input_tokens': 1234,
+                'token': [0, -42, 1.5, None, True, False]}
+    expected = {'db': {'password': '[REDACTED]'}, 'pin_password': '[REDACTED]', 'input_tokens': 1234,
+                'token': ['[REDACTED]', '[REDACTED]', '[REDACTED]', None, True, False]}
+    check('parsed numeric credentials are masked recursively without changing ordinary numbers or inputs',
+          redact.redact(original) == (expected, 5) and original['db']['password'] == 987654
+          and original['token'] == [0, -42, 1.5, None, True, False]
+          and redact.redact(expected) == (expected, 0))
+    for expression in ('resp.get("NextToken")', "resp.get('NextToken')"):
+        text = 'next_token = ' + expression
+        check('new credential names preserve spaced calls with quoted identifier arguments',
+              redact.redact(text) == (text, 0))
+        for prefix in ('next_token=', 'next_token: ', 'password = ', 'API_TOKEN = '):
+            cleaned, n = redact.redact(prefix + expression)
+            check('quoted call arguments do not exempt compact, YAML or legacy assignments',
+                  cleaned == prefix + '[REDACTED]' + expression[len('resp.get('):] and n == 1)
+    literals = ['DB_PASSWORD=Xy7!kq#2zz', 'POSTGRES_PASSWORD=S3cure@Pass', 'REDIS_PASSWORD=p@ssw0rd',
+                'export API_TOKEN=abc@123!xyz', 'password: P@ssw0rd!',
+                'spring.datasource.password=Xy7!kq#2', 'password=hunter', 'password: changeme',
+                'db_password = correcthorse', 'api_key = AbCdEfGhIjKlMnOp',
+                'SECRET_KEY = django_insecure_xyz', 'PASSWORD=foo.bar', 'SECRET=a.b.c',
+                'API_KEY=sk_live_xxx(', 'token: string;', 'token = token', 'TOKEN = token',
+                'token=get_token()', 'token=tokens[i]', 'token=request.token', 'A_KEY=alphabetic',
+                'token = abc!@#$%^&*', 'password=abc;def', 'API_TOKEN=abc,def', 'API_TOKEN=abc}def',
+                'password=abc\\def', 'foo..password=hunter', 'a.b.token = request.token',
+                'service.private_key = keys[index]', 'MAX_TOKENS = 4096']
+    for text in literals:
+        prefix = re.split('[:=]', text, maxsplit=1)[0]
+        separator = text[len(prefix):len(prefix) + 1]
+        gap = ' ' if text[len(prefix) + 1:].startswith(' ') else ''
+        cleaned, n = redact.redact(text)
+        check('credential literals are masked regardless of punctuation or spacing: ' + prefix.strip(),
+              cleaned == prefix + separator + gap + '[REDACTED]' and n == 1
+              and redact.redact(cleaned) == (cleaned, 0))
+    check('short generic key literals retain the original threshold with an incomplete quote',
+          redact.redact('A_KEY="abcd') == ('A_KEY="[REDACTED]"', 1))
+    check('token URL names retain conservative masking',
+          redact.redact('TOKEN_URL = "https://example.test"') == ('TOKEN_URL = "[REDACTED]"', 1))
+    for expression in ('get_token ()', 'tokens [i]'):
+        check('ambiguous spaced expressions still mask the value',
+              redact.redact('token = ' + expression) == ('token = [REDACTED] ' + expression.split(' ', 1)[1], 1))
+    for name in ('password', 'api_key', 'db_password', 'API_TOKEN', 'PRIMARY_KEY'):
+        for expression in ('get_token()', 'tokens[index]', 'request.token'):
+            text = name + ' = ' + expression
+            check('existing credential names mask code-shaped values: ' + name + ' ' + expression,
+                  redact.redact(text) == (name + ' = [REDACTED]', 1))
+    for name in ('token', 'csrf_token', 'private_key'):
+        for expression in ('get_token()', 'tokens[index]', 'request.token', 'request.form["csrf"]'):
+            text = name + ' = ' + expression
+            check('new credential names preserve clearly spaced code: ' + name + ' ' + expression,
+                  redact.redact(text) == (text, 0))
+    tail = '\nordinary code\nprint("keep this")\nend of file'
+    for separator in (':\n  ', '=\n\t', ' :\r\n  '):
+        for value in ('"S"', "'S'", '\\"S\\"', '"S', "'S", '\\"S'):
+            cleaned, n = redact.redact('password' + separator + value + tail)
+            quote = '\\"' if value.startswith('\\"') else value[0]
+            check('credential separators cross lines while quoted values stop at their line',
+                  cleaned == 'password' + separator + quote + '[REDACTED]' + quote + tail and n == 1
+                  and redact.redact(cleaned) == (cleaned, 0))
+    for name in ('TOKEN', 'DB_PASSWORD', 'password', 'token', 'api_key', 'Authorization'):
+        for operator in ('==', '!=', '<=', '>='):
+            for text in ('if ' + name + ' ' + operator + ' "abc": pass', 'if ' + name + operator + 'abcdefgh: pass'):
+                check('comparisons are preserved: ' + name + ' ' + operator, redact.redact(text) == (text, 0))
+    for text in ('notauthorization: abcdefgh', 'Authorization: abcdefgh anotherword',
+                 'Authorization: Negotiate abcdefgh', 'Authorization: Digest abcdefgh',
+                 'X-Api-Key: $VARIABLE', 'X-Api-Key: <placeholder>'):
+        cleaned, n = redact.redact(text)
+        check('header coverage includes legacy shapes',
+              n > 0 and 'abcdefgh' not in cleaned and '$VARIABLE' not in cleaned and '<placeholder>' not in cleaned)
+    for key, value in (('token', ['s3cretvalue']), ('X-Api-Key', ['S']), ('token', {'v': 'S'}),
+                       ('foo..password', 'hunter')):
+        original = {key: value}
+        expected = {key: ['[REDACTED]'] if isinstance(value, list) else
+                    {'v': '[REDACTED]'} if isinstance(value, dict) else '[REDACTED]'}
+        for text in (original, json.dumps(original)):
+            cleaned, n = redact.redact(text)
+            check('credential containers mask string leaves: ' + key,
+                  (json.loads(cleaned) if isinstance(cleaned, str) else cleaned) == expected and n == 1
+                  and redact.redact(cleaned) == (cleaned, 0) and original == {key: value})
+    original = {'token': ['firstsecret', None, True, False, 1234, 1.5,
+                          {'v': 'S', 'nested': ['lastsecret', False]}], 'ordinary': ['keep']}
+    expected = {'token': ['[REDACTED]', None, True, False, '[REDACTED]', '[REDACTED]',
+                          {'v': '[REDACTED]', 'nested': ['[REDACTED]', False]}], 'ordinary': ['keep']}
+    for text in (original, json.dumps(original)):
+        cleaned, n = redact.redact(text)
+        check('credential containers preserve nulls, booleans and shape without mutating inputs',
+              (json.loads(cleaned) if isinstance(cleaned, str) else cleaned) == expected and n == 5
+              and original['token'][0] == 'firstsecret' and original['token'][-1]['v'] == 'S')
+    original = {'password=hunter': 'ordinary', 'nested': {'API_TOKEN=abc@123!xyz': 1234}}
+    expected = {'password=[REDACTED]': 'ordinary', 'nested': {'API_TOKEN=[REDACTED]': 1234}}
+    for text in (original, json.dumps(original)):
+        cleaned, n = redact.redact(text)
+        check('embedded assignments in JSON keys are sanitized',
+              (json.loads(cleaned) if isinstance(cleaned, str) else cleaned) == expected and n == 2
+              and original['password=hunter'] == 'ordinary')
+
+
+def test_codex_tool_input_preservation():
+    import rows_codex
+    cfg = dict(run='', agent='')
+    ids = dict(sid='test-thread', parent='', agent_id='', run_id='', agent='test')
+    st = dict(cwd='/work/example', branch='', names={}, prev_ts=0)
+
+    def row(payload):
+        rec = dict(type='response_item', payload=payload)
+        r = rows_codex.rows_from(rec, 1, st, ids, cfg, 'test-host')[0]
+        return rows_claude._finish(r, {'redacted': 0})
+
+    raw = '{  "message" : "café 日本語", "count":2 }'
+    r = row(dict(type='function_call', name='tool', arguments=raw))
+    check('Codex function arguments retain original spacing and Unicode when unchanged', r['body'] == raw)
+    marker = 'synthetic-' + 'tool-value-001'
+    raw = '{  "message" : "café 日本語", "token":"' + marker + '" }'
+    r = row(dict(type='function_call', name='tool', arguments=raw))
+    check('Codex redacted function arguments keep Unicode characters',
+          marker not in r['body'] and 'café 日本語' in r['body'] and json.loads(r['body'])['token'] == '[REDACTED]')
+    patch = '*** Begin Patch\n*** Update File: src/café.py\n@@\n-x\n+y\n*** End Patch\n'
+    command = 'pytest -q tests/'
+    raw = {'nested': {'cmd': command, 'patch': patch}}
+    r = row(dict(type='custom_tool_call', name='exec', input=raw))
+    check('Codex dict custom input retains exec commands and nested patch paths',
+          r['command'] == command and json.loads(r['paths']) == ['src/café.py'] and 'café.py' in r['body'])
+    r = row(dict(type='custom_tool_call', name='apply_patch', input={'patch': patch}))
+    check('Codex dict apply_patch input retains patch paths', json.loads(r['paths']) == ['src/café.py'])
+    r = row(dict(type='custom_tool_call', name='exec', input={'cmd': command, 'patch': patch}))
+    check('Codex dict custom input scans command fields as well as strings',
+          r['command'] == command and json.loads(r['paths']) == ['src/café.py'])
+
+
 def test_no_secrets_in_repo():
     # this file is left out: it builds its fake secrets by concatenation and passes fake keys to the hooks
     files = [os.path.join(d, n) for d, ds, ns in os.walk(ROOT) for n in ns]    # os.walk sees dot files; glob does not
@@ -659,7 +905,7 @@ def test_pre_tool(seeker):
     check('post-tool claim: no output, no Seeker call', p.returncode == 0 and not p.stdout.strip() and not seeker.calls)
     run('allow')
     body = seeker.calls[0]['body'] if seeker.calls else {}
-    check('pre-tool sends the token of the held task for its file', body.get('tokens') == {'src/panels/Latency.tsx': 'tok-round-1'},
+    check('pre-tool sends the token of the held task for its file', body.get('tokens') == {'src/panels/Latency.tsx': '<hold nonce>'},
           json.dumps(body))
     hook('post-tool', I['post_tool_release'], env)
     run('allow')
@@ -2035,6 +2281,82 @@ def test_round6_hooks(seeker):
           and 'Codex' in calls[0]['body'].get('text', ''), json.dumps(calls)[:300])
 
 
+def test_handoff_redaction(seeker):
+    import hooks_shared as shared
+    marker = 'synthetic-' + 'handoff-value-001'
+    other = 'synthetic-' + 'handoff-value-002'
+    command = 'pytest --api-key=' + marker
+    summary = 'PASSWORD="prefix ' + marker + ' suffix"'
+    note = 'TOKEN=' + marker
+    run, agent = 'run-redacted-handoff', 'agent-1'
+    home = os.path.join(WORK, 'home-redacted-handoff')
+    shutil.rmtree(home, ignore_errors=True)
+    env = base_env(seeker.url, home, CTRLB_RUN=run, CTRLB_AGENT=agent)
+    base = dict(session_id=SID, cwd='/work/dash', transcript_path='')
+    post = dict(base, hook_event_name='PostToolUse')
+    hook('post-tool', dict(post, tool_name='Bash', tool_input={'command': command},
+                           tool_response={'exit_code': 0, 'stdout': summary}), env)
+    hook('post-tool', dict(post, tool_name='mcp__ctrlb__post', tool_input={'text': note},
+                           tool_response={'ok': True}), env)
+    with mock.patch.object(common, 'HOME', home):
+        rec = common.SessionRecord(run, agent).get(SID)
+        check('session record retains raw commands locally for witness comparison', rec['bash'][0]['command'] == command)
+        text = shared.handoff_text(rec)
+        check('handoff text redacts recorded commands, output and notes before shortening',
+              marker not in text and text.count('[REDACTED]') == 3 and 'suffix' not in text)
+        long = dict(rec, note={'text': 'PASSWORD="' + ('word ' * 60) + marker + '"'})
+        check('handoff shortening does not expose part of a quoted credential',
+              'word' not in shared.handoff_text(long) and marker not in shared.handoff_text(long))
+    seeker.reset()
+    p, _ = hook('session-end', dict(base, hook_event_name='SessionEnd'), env)
+    calls = [c for c in seeker.calls if c['path'].endswith('/handoffs')]
+    check('automatic session-end handoff sends only redacted recorded text',
+          p.returncode == 0 and len(calls) == 1 and marker not in json.dumps(calls[0]['body'])
+          and calls[0]['body']['text'].count('[REDACTED]') == 3)
+    cfg = dict(url=seeker.url, key=KEY, dataset=common.DEFAULT_DATASET)
+    seeker.reset()
+    common.handoff_all(cfg, run, agent, command + '\n' + summary + '\n' + note)
+    check('shared handoff sender redacts text for either harness',
+          len(seeker.calls) == 1 and marker not in json.dumps(seeker.calls[0]['body']))
+    pre = dict(base, hook_event_name='PreToolUse', tool_name='mcp__ctrlb__done')
+    evidence = {'command': command, 'summary': summary}
+    o = out_of(hook('pre-tool', dict(pre, tool_input={'resource': 'task', 'evidence': evidence}), env)[0])
+    check('witness compares the raw command and returns redacted evidence with the observed exit code',
+          o.get('permissionDecision') == 'allow' and o['updatedInput'].get('witnessed') is True
+          and o['updatedInput']['evidence']['exit_code'] == 0 and marker not in json.dumps(o))
+    for ev in ({'command': command.replace(marker, other), 'exit_code': 0},
+               {'command': command, 'exit_code': 3}):
+        o = out_of(hook('pre-tool', dict(pre, tool_input={'resource': 'task', 'evidence': ev}), env)[0])
+        check('witness rejects a different raw credential or exit code and redacts its refusal',
+              o.get('permissionDecision') == 'deny' and marker not in json.dumps(o) and other not in json.dumps(o))
+    for test in ('', command, 'pytest --api-key=' + other):
+        refusal = {'done': False, 'reason': 'evidence_required', 'resource': 'task', 'test': test}
+        p, _ = hook('post-tool', dict(post, tool_name='mcp__ctrlb__done', tool_input={'resource': 'task'},
+                                     tool_response=refusal), env)
+        context = out_of(p).get('additionalContext', '')
+        check('evidence hints redact the task test, recorded command and output',
+              bool(context) and marker not in context and other not in context and '[REDACTED]' in context)
+    # Follow the actual hint's suggested evidence into the witness, using both its task-test branches.
+    command = 'API_TOKEN=' + marker + ' pytest -q tests/'
+    with mock.patch.object(common, 'HOME', home):
+        shared.record_test(run, agent, command, 0, summary)
+        shared.record_bash(run, agent, SID, command, 0, summary)
+        rec = common.SessionRecord(run, agent).get(SID)
+        for test in ('', 'pytest -q tests/'):
+            hint = shared.evidence_hint(run, agent, {'reason': 'evidence_required', 'resource': 'task', 'test': test})
+            text = hint['hookSpecificOutput']['additionalContext']
+            suggested = json.JSONDecoder().raw_decode(text.split('evidence=', 1)[1])[0]
+            result = shared.witness(rec, {'resource': 'task', 'evidence': suggested})['hookSpecificOutput']
+            check('redacted evidence hint is accepted by the witness: ' + (test or 'last test'),
+                  marker not in text and suggested['command'] == 'API_TOKEN=[REDACTED] pytest -q tests/'
+                  and result.get('permissionDecision') == 'allow' and result['updatedInput']['witnessed'] is True
+                  and result['updatedInput']['evidence']['exit_code'] == 0 and marker not in json.dumps(result))
+        for ev in ({'command': 'API_TOKEN=[REDACTED] pytest -q tests/', 'exit_code': 3},
+                   {'command': 'API_TOKEN=[REDACTED] pytest -q other/', 'exit_code': 0}):
+            result = shared.witness(rec, {'evidence': ev})['hookSpecificOutput']
+            check('redacted witness still rejects a different command or exit code', result['permissionDecision'] == 'deny')
+
+
 def _wait_for(pred, timeout=6.0):
     t = time.time()
     while time.time() - t < timeout:
@@ -2791,13 +3113,167 @@ def test_local_request_proxy():
                   and all(c[2] == 'Bearer ' + KEY for c in direct))
             common.request(dict(mode='hosted', url=f'http://127.0.0.1:{target.server_address[1]}', key=KEY),
                            'GET', '/hosted')
-            common.request(dict(mode='local', url='http://example.test', key=KEY), 'GET', '/remote')
+            with mock.patch.dict(os.environ, CTRLB_ALLOW_HTTP='1'):
+                common.request(dict(mode='local', url='http://example.test', key=KEY), 'GET', '/remote')
             check('local request proxy: hosted and non-loopback requests retain proxy behavior',
                   len(proxied) == 2 and proxied[0][1].endswith('/hosted') and proxied[1][1].endswith('/remote'))
     finally:
         for httpd in (target, proxy):
             httpd.shutdown()
             httpd.server_close()
+
+
+def test_request_transport():
+    import contextlib
+    import io
+    import runpy
+    state, source_calls, target_calls = {}, [], []
+
+    def server(calls, redirect=False):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                calls.append((self.command, self.path))
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                self.send_response(state['status'] if redirect else 200)
+                if redirect:
+                    self.send_header('Location', state['location'])
+                self.end_headers()
+                self.wfile.write(b'{}')
+
+            do_POST = do_GET
+
+        httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        return httpd
+
+    source, target = server(source_calls, True), server(target_calls)
+    source_url = f'http://127.0.0.1:{source.server_address[1]}'
+    target_url = f'http://127.0.0.1:{target.server_address[1]}'
+    try:
+        for mode in ('hosted', 'local'):
+            rejected = []
+            for status in (301, 302, 303, 307, 308):
+                for location in (target_url + '/target', source_url + '/same-origin'):
+                    for method in ('GET', 'POST'):
+                        state.update(status=status, location=location)
+                        before = len(source_calls)
+                        try:
+                            common.request(dict(url=source_url, key=KEY, mode=mode), method, '/records',
+                                           body={'text': 'synthetic'} if method == 'POST' else None)
+                            rejected.append(False)
+                        except common.SeekerError as e:
+                            rejected.append(e.status == status and 'redirects are not allowed' in str(e)
+                                            and len(source_calls) == before + 1 and source_calls[-1] == (method, '/records'))
+            check(mode + ' API calls reject same-origin and cross-origin redirects without replaying or changing methods',
+                  all(rejected) and not target_calls and len(rejected) == 20)
+    finally:
+        for httpd in (source, target):
+            httpd.shutdown()
+            httpd.server_close()
+    with mock.patch.dict(os.environ, {}, clear=True):
+        allowed = ['https://example.test', 'http://localhost:7531', 'http://127.0.0.1', 'http://127.0.0.2',
+                   'http://127.255.255.254', 'http://[::1]:7531']
+        for url in allowed:
+            common.validate_url(url)
+        check('HTTPS and HTTP on localhost, the IPv4 loopback range and IPv6 loopback are allowed', True)
+        unsafe = ['http://example.test', 'http://192.0.2.1', 'http://localhost.example.test',
+                  'http://128.0.0.1', 'http://[::2]', 'http://127.0.0.1@example.test']
+        rejected = []
+        with mock.patch.object(common.urllib.request, 'build_opener') as build:
+            for mode in ('hosted', 'local'):
+                for url in unsafe:
+                    try:
+                        common.request(dict(url=url, key=KEY, mode=mode), 'POST', '/records', body={})
+                        rejected.append(False)
+                    except ValueError as e:
+                        rejected.append('CTRLB_ALLOW_HTTP=1' in str(e))
+            check('remote HTTP is rejected before network access in both modes', all(rejected) and not build.called)
+        for opt in ('', '0', 'true', '1'):
+            env = dict(CTRLB_URL='http://192.0.2.1', CTRLB_KEY=KEY, CTRLB_ALLOW_HTTP=opt)
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(common, '_file_config', return_value={}), \
+                    mock.patch.object(common.urllib.request, 'build_opener') as build:
+                build.return_value.open.return_value.__enter__.return_value.read.return_value = b'{}'
+                try:
+                    common.request(common.config(), 'POST', '/records', body={})
+                    accepted = True
+                except ValueError:
+                    accepted = False
+                check('environment HTTP configuration requires the exact opt-in value ' + repr(opt),
+                      accepted == (opt == '1') and build.called == accepted)
+        configure = runpy.run_path(os.path.join(ROOT, 'bin', 'configure.py'))['main']
+        for opt in ('', '1'):
+            home = os.path.join(WORK, 'home-http-configure-' + (opt or 'default'))
+            shutil.rmtree(home, ignore_errors=True)
+            argv = ['configure.py', '--url', 'http://192.0.2.1:7531', '--dataset', 'agent_sessions',
+                    '--run', '', '--key-stdin']
+            with mock.patch.dict(os.environ, {'CTRLB_ALLOW_HTTP': opt}, clear=True), \
+                    mock.patch.object(common, 'HOME', home), mock.patch.object(common, 'runs', return_value={}) as runs, \
+                    mock.patch.object(sys, 'argv', argv), mock.patch.object(sys, 'stdin', io.StringIO(KEY + '\n')), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    configure()
+                    error = ''
+                except SystemExit as e:
+                    error = str(e)
+            saved = os.path.isfile(os.path.join(home, 'config.json'))
+            check('configure remote HTTP ' + ('with opt-in saves the URL' if opt else 'requires HTTPS or the opt-in'),
+                  (saved and runs.called and not error) if opt else
+                  (not saved and not runs.called and 'HTTPS' in error and 'CTRLB_ALLOW_HTTP=1' in error))
+
+
+def test_mcp_url_transport():
+    import contextlib
+    import io
+    import runpy
+    urls = ['https://example.test/mcp', 'http://localhost:7531/mcp', 'http://127.0.0.2/mcp',
+            'http://[::1]:7531/mcp', 'http://192.0.2.1/mcp', 'http://localhost.example.test/mcp']
+    home = os.path.join(WORK, 'mcp-transport')
+    shutil.rmtree(home, ignore_errors=True)
+    os.makedirs(home)
+    path = os.path.join(home, 'config.toml')
+    original = 'model = "example"\n'
+    with open(path, 'w') as fh:
+        fh.write(original)
+    for source in ('flag', 'environment', 'file'):
+        for opt in ('', 'true', '1'):
+            for url in urls:
+                accepted = url in urls[:4] or opt == '1'
+                env = {'CTRLB_ALLOW_HTTP': opt}
+                args = ['--mcp-url', url] if source == 'flag' else []
+                if source == 'environment':
+                    env['CTRLB_MCP_URL'] = url
+                stored = {'mcp_url': url} if source == 'file' else {}
+                with mock.patch.object(common, '_file_config', return_value=stored):
+                    # Run main in process so file configuration is isolated too; it performs no network I/O.
+                    main = runpy.run_path(INSTALL)['main']
+                    with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(io.StringIO()), \
+                            contextlib.redirect_stderr(io.StringIO()) as err:
+                        code = main(args + ['--config', path])
+                new = read(path).decode()
+                check('MCP installer transport: ' + source + ' opt=' + repr(opt) + ' ' + url,
+                      (code == 0 and url in new) if accepted else
+                      (code == 2 and new == original and 'HTTPS' in err.getvalue() and 'CTRLB_ALLOW_HTTP=1' in err.getvalue()))
+                with open(path, 'w') as fh:
+                    fh.write(original)
+    status = runpy.run_path(os.path.join(ROOT, 'bin', 'status.py'))['main']
+    for field in ('url', 'mcp_url'):
+        for mode in ('hosted', 'local'):
+            for opt in ('', 'true', '1'):
+                cfg = dict(url='https://example.test', mcp_url='https://example.test/mcp', key=KEY,
+                           dataset=common.DEFAULT_DATASET, user='', run='', agent='', enforce='', mode=mode, off=False)
+                cfg[field] = 'http://192.0.2.1' + ('/mcp' if field == 'mcp_url' else '')
+                with mock.patch.dict(os.environ, {'CTRLB_ALLOW_HTTP': opt}, clear=True), \
+                        mock.patch.object(common, 'HOME', home), mock.patch.object(common, 'config', return_value=cfg), \
+                        mock.patch.object(common, 'runs', return_value={}) as runs, \
+                        mock.patch.object(common, 'local_health', return_value=200) as health, \
+                        mock.patch.object(common, 'ctrlb_binary', return_value=None), contextlib.redirect_stdout(io.StringIO()) as out:
+                    status()
+                check('status checks ' + field + ' transport in ' + mode + ' opt=' + repr(opt),
+                      (runs.called or health.called) == (opt == '1')
+                      and (opt == '1' or ('Unsafe ' + field in out.getvalue() and 'CTRLB_ALLOW_HTTP=1' in out.getvalue())))
 
 
 def test_local_health_answers(seeker):
@@ -3400,6 +3876,10 @@ def main():
     seeker = Seeker()
     test_layout()
     test_no_secrets_in_repo()
+    test_credential_redaction(seeker)
+    test_redaction_literals()
+    test_redaction_assignment_safety()
+    test_codex_tool_input_preservation()
     test_hooks(seeker)
     test_batches(seeker)
     test_pre_tool(seeker)
@@ -3412,6 +3892,7 @@ def main():
     test_takeover_wording()
     test_done_evidence(seeker)
     test_round6_hooks(seeker)
+    test_handoff_redaction(seeker)
     test_round8_hooks(seeker)
     test_failure_safety(seeker)
     test_config_and_status(seeker)
@@ -3423,6 +3904,8 @@ def main():
     test_local_startup(seeker)
     test_local_startup_concurrent()
     test_local_request_proxy()
+    test_request_transport()
+    test_mcp_url_transport()
     test_local_health_answers(seeker)
     test_local_binary_path()
     test_local_configure_status(seeker)

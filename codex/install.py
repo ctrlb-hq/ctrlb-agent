@@ -235,6 +235,10 @@ def main(argv=None):
                 raise InstallError('no MCP URL: pass --mcp-url "<your CtrlB URL>/mcp", set CTRLB_MCP_URL, or run bin/configure.py')
             if not re.match(r'^https?://[^\s"]+$', mcp_url):
                 raise InstallError(f'--mcp-url must be an http(s) URL, got {mcp_url!r}')
+            try:
+                common.validate_url(mcp_url)
+            except ValueError as e:
+                raise InstallError(f'--mcp-url: {e}') from None
             headers = parse_headers(a.otel_header)
             if a.otel and not a.otel_endpoint:
                 raise InstallError('--otel needs --otel-endpoint "<lake>/api/<org>/<stream>/_otel/v1/logs"')

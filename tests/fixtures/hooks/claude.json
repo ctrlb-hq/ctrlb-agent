@@ -162,7 +162,7 @@
   "tool_response": [
    {
     "type": "text",
-    "text": "{\"held\": true, \"resource\": \"task 07 latency\", \"key\": \"name:task 07 latency\", \"lease_until\": 1793000600000000, \"paths\": [\"path:src/panels/Latency.tsx\"], \"token\": \"tok-round-1\"}"
+    "text": "{\"held\": true, \"resource\": \"task 07 latency\", \"key\": \"name:task 07 latency\", \"lease_until\": 1793000600000000, \"paths\": [\"path:src/panels/Latency.tsx\"], \"token\": \"<hold nonce>\"}"
    }
   ]
  },
