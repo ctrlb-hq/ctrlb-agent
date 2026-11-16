@@ -213,7 +213,7 @@ def parse_headers(items):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description='Write the CtrlB MCP server, hooks and optional OTEL export into Codex config.toml.')
-    ap.add_argument('--mcp-url', default='', help="Seeker's /mcp URL (default: CTRLB_MCP_URL, or CTRLB_URL + /mcp)")
+    ap.add_argument('--mcp-url', default='', help='the CtrlB URL + /mcp (default: CTRLB_MCP_URL, or CTRLB_URL + /mcp)')
     ap.add_argument('--codex-home', default='', help='Codex home (default: $CODEX_HOME, else ~/.codex)')
     ap.add_argument('--config', default='', help='config.toml to edit (default: <codex home>/config.toml)')
     ap.add_argument('--otel', action='store_true', help='also write [otel]: Codex log export to the lake OTLP endpoint')
