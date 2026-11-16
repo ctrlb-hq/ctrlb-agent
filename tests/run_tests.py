@@ -81,6 +81,15 @@ def load(name):
 
 # ---------------------------------------------------------------- fake CtrlB
 
+class StubHTTPServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 64
+
+
+class StubRequestHandler(http.server.BaseHTTPRequestHandler):
+    timeout = 2
+
+
 class Seeker:
     """Answers the routes ctrlb-agent calls from tests/fixtures/seeker/. state['check'] picks the check answer;
     'slow' sleeps 5 s before answering."""
@@ -94,7 +103,7 @@ class Seeker:
                           artifacts='ok')
         outer = self
 
-        class H(http.server.BaseHTTPRequestHandler):
+        class H(StubRequestHandler):
             def log_message(self, *a):
                 pass
 
@@ -179,8 +188,7 @@ class Seeker:
             def do_DELETE(self):
                 self._handle('DELETE')
 
-        self.httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H)
-        self.httpd.daemon_threads = True
+        self.httpd = StubHTTPServer(('127.0.0.1', 0), H)
         self.url = f'http://127.0.0.1:{self.httpd.server_address[1]}'
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
@@ -3023,8 +3031,18 @@ def local_stub(home):
     """Synthetic ctrlb executable; writes only test state and serves health until the test stops it."""
     path = os.path.join(home, 'bin', 'ctrlb')
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    source = '''import http.server, json, os, sys, time
+    source = '''import json, os, sys, threading, time
 home = os.environ['CTRLB_HOME']
+log_mutex = threading.RLock()
+def log(event, **fields):
+    entry = dict(event=event, pid=os.getpid(), time=round(time.monotonic(), 3))
+    entry.update(fields)
+    with log_mutex, open(os.path.join(home, 'startup.jsonl'), 'a') as fh:
+        fh.write(json.dumps(entry) + '\\n')
+def exception(exc_type, exc, tb):
+    log('exception', type=exc_type.__name__, errno=getattr(exc, 'errno', None))
+sys.excepthook = exception
+log('starting')
 if sys.argv[1] == 'serve':
     with open(os.path.join(home, 'serve-invocations.jsonl'), 'a') as fh:
         fh.write(json.dumps(dict(pid=os.getpid(), cwd=os.getcwd())) + '\\n')
@@ -3043,13 +3061,37 @@ if sys.argv[1] == 'init':
                        dataset='agent_sessions', mode='local'), fh)
     os.chmod(os.path.join(home, 'config.json'), 0o600)
 elif sys.argv[1] == 'serve' and not os.environ.get('STUB_NO_HEALTH'):
+    import http.server
     time.sleep(float(os.environ.get('STUB_START_DELAY', '0')))
     class H(http.server.BaseHTTPRequestHandler):
+        timeout = 2
         def log_message(self, *args): pass
+        def log_request(self, code='-', size='-'):
+            log('request', method=self.command if self.command in ('GET', 'POST', 'DELETE') else 'other',
+                route='healthz' if self.path == '/healthz' else 'other', status=code)
+        def log_error(self, fmt, *args):
+            exc = next((arg for arg in args if isinstance(arg, BaseException)), None)
+            log('handler_error', type=type(exc).__name__ if exc else 'HTTPError')
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
-    http.server.HTTPServer(('127.0.0.1', int(os.environ['STUB_PORT'])), H).serve_forever()
+    class Server(http.server.ThreadingHTTPServer):
+        daemon_threads = True
+        request_queue_size = 64
+        def server_bind(self):
+            super().server_bind()
+            log('bound', host=self.server_address[0], port=self.server_address[1])
+        def server_activate(self):
+            super().server_activate()
+            log('listening', backlog=self.request_queue_size)
+        def get_request(self):
+            request, address = super().get_request()
+            log('accepted', port=address[1])
+            return request, address
+        def handle_error(self, request, address):
+            exception(*sys.exc_info())
+    with Server(('127.0.0.1', int(os.environ['STUB_PORT'])), H) as server:
+        server.serve_forever()
 '''
     with open(path, 'w') as fh:
         fh.write('#!' + sys.executable + '\n' + source)
@@ -3073,6 +3115,50 @@ def wait_local_health(url, timeout=8.0):
         except (OSError, common.urllib.error.URLError) as exc:
             detail = f'{type(exc).__name__}: {exc}'
         time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+
+
+def local_startup_diagnostics(home, url):
+    """Only synthetic state: never dump config, request headers, bodies or exception messages."""
+    print('Startup diagnostics:')
+    marker = os.path.join(home, 'serve-invocations.jsonl')
+    try:
+        invocations = [json.loads(line) for line in read(marker).decode().splitlines()]
+        for info in invocations:
+            pid = info['pid']
+            try:
+                os.kill(pid, 0)
+                alive = True
+            except ProcessLookupError:
+                alive = False
+            print(f'  stub pid={pid} alive={alive}')
+        if not invocations:
+            print('  stub pid=unknown (no invocation recorded)')
+    except (OSError, ValueError, KeyError) as exc:
+        print(f'  stub pid=unknown ({type(exc).__name__})')
+    try:
+        if common.loopback_url(dict(url=url)):
+            target = common.urllib.parse.urlsplit(url)
+            with socket.create_connection((target.hostname, target.port or 80), timeout=0.5):
+                outcome = 'connected'
+        else:
+            outcome = 'skipped (non-loopback URL)'
+    except ConnectionRefusedError:
+        outcome = 'refused'
+    except socket.timeout:
+        outcome = 'timeout'
+    except (OSError, ValueError) as exc:
+        outcome = type(exc).__name__
+    print(f'  raw socket connect: {outcome}')
+    try:
+        print('  startup.jsonl:\n' + read(os.path.join(home, 'startup.jsonl')).decode())
+    except OSError as exc:
+        print(f'  startup.jsonl unavailable ({type(exc).__name__})')
+
+
+def check_local_startup(name, ok, home, url, detail=''):
+    check(name, ok, detail)
+    if not ok:
+        local_startup_diagnostics(home, url)
 
 
 def stop_local_stub(home):
@@ -3099,6 +3185,67 @@ def test_local_health_retry():
           not healthy and 'URLError' in detail and 'timed out' in detail)
 
 
+def test_local_stub_idle_connections():
+    import contextlib
+    import io
+    home = os.path.join(WORK, 'home-start-idle')
+    binary = local_stub(home)
+    port = closed_port()
+    url = f'http://127.0.0.1:{port}'
+    env = base_env(url, home, STUB_PORT=str(port))
+    process = subprocess.Popen([binary, 'serve'], cwd=home, env=env, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    idle = []
+    try:
+        healthy, detail = wait_local_health(url)
+        check_local_startup('local stub: initial health answers', healthy, home, url, detail)
+        if not healthy:
+            return
+        try:
+            # More than the old backlog of five: none of these clients sends a request line.
+            for _ in range(12):
+                idle.append(socket.create_connection(('127.0.0.1', port), timeout=1))
+            healthy, detail = wait_local_health(url, timeout=1.5)
+        except OSError as exc:
+            healthy, detail = False, type(exc).__name__
+        check_local_startup('local stub: health answers while twelve idle clients remain connected',
+                            healthy, home, url, detail)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), mock.patch.dict(check.__globals__, results=[]):
+            check_local_startup('synthetic startup failure', False, home, url)
+        diagnostics = output.getvalue()
+        check('startup diagnostics: failed checks show live pid, connected socket and startup/request events',
+              'FAIL synthetic startup failure' in diagnostics and f'pid={process.pid} alive=True' in diagnostics
+              and 'raw socket connect: connected' in diagnostics
+              and all('"event": "' + event + '"' in diagnostics for event in ('bound', 'listening', 'request'))
+              and KEY not in diagnostics and 'Authorization' not in diagnostics)
+        expired = False
+        if idle:
+            idle[0].settimeout(4)
+            try:
+                expired = idle[0].recv(1) == b''
+            except OSError:
+                pass
+        check_local_startup('local stub: idle request lines expire without a client close', expired, home, url)
+    finally:
+        for client in idle:
+            client.close()
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=5)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        local_startup_diagnostics(home, url)
+    check('startup diagnostics: stopped stub shows dead pid and refused socket',
+          f'pid={process.pid} alive=False' in output.getvalue() and 'raw socket connect: refused' in output.getvalue())
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output), mock.patch.object(socket, 'create_connection', side_effect=socket.timeout):
+        local_startup_diagnostics(home + '-missing', url)
+    check('startup diagnostics: socket timeout and missing startup state are reported without raising',
+          'raw socket connect: timeout' in output.getvalue() and 'stub pid=unknown' in output.getvalue()
+          and 'startup.jsonl unavailable' in output.getvalue())
+
+
 def test_local_startup(seeker):
     for call, label, sid in ((hook, 'Claude', SID), (chook, 'Codex', CSID)):
         home = os.path.join(WORK, 'home-start-' + label)
@@ -3108,20 +3255,21 @@ def test_local_startup(seeker):
         env = base_env(seeker.url, home, CTRLB_MODE='local', CTRLB_BIN=binary)
         os.chmod(home, 0o755)
         p, dt = call('session-start', inp, env)
-        check(f'{label} startup: healthy server is not started', p.returncode == 0 and not os.path.exists(marker) and dt < 3.0)
-        check(f'{label} startup: existing CTRLB_HOME is private even with a healthy server',
-              stat.S_IMODE(os.stat(home).st_mode) == 0o700)
+        check_local_startup(f'{label} startup: healthy server is not started',
+                            p.returncode == 0 and not os.path.exists(marker) and dt < 3.0, home, env['CTRLB_URL'])
+        check_local_startup(f'{label} startup: existing CTRLB_HOME is private even with a healthy server',
+                            stat.S_IMODE(os.stat(home).st_mode) == 0o700, home, env['CTRLB_URL'])
         port = closed_port()
         env.update(CTRLB_URL=f'http://127.0.0.1:{port}', STUB_PORT=str(port))
         try:
             p, dt = call('session-start', inp, env)
             healthy, detail = wait_local_health(env['CTRLB_URL'])
             info = json.loads(read(marker)) if os.path.exists(marker) else {}
-            check(f'{label} startup: detached serve retains CTRLB_HOME, null stdin, becomes healthy',
+            check_local_startup(f'{label} startup: detached serve retains CTRLB_HOME, null stdin, becomes healthy',
                   p.returncode == 0 and info.get('argv') == ['serve'] and info.get('detached') and info.get('stdin') == ''
-                  and dt < 5.5 and healthy, f'{dt:.2f}s; {detail}')
-            check(f'{label} startup: detached serve uses CtrlB home as its working directory',
-                  os.path.realpath(info.get('cwd', '')) == os.path.realpath(home))
+                  and dt < 5.5 and healthy, home, env['CTRLB_URL'], f'{dt:.2f}s; {detail}')
+            check_local_startup(f'{label} startup: detached serve uses CtrlB home as its working directory',
+                  os.path.realpath(info.get('cwd', '')) == os.path.realpath(home), home, env['CTRLB_URL'])
         finally:
             stop_local_stub(home)
             if os.path.exists(marker):
@@ -3130,22 +3278,23 @@ def test_local_startup(seeker):
         seeker.state['health'] = 'slow'
         try:
             p, dt = call('session-start', inp, env, timeout=8)
-            check(f'{label} startup: slow health gives up within hook timeout, keeps recall context',
+            check_local_startup(f'{label} startup: slow health gives up within hook timeout, keeps recall context',
                   p.returncode == 0 and 3 <= dt < 5.5 and 'search_sessions' in out_of(p).get('additionalContext', '')
-                  and 'health check did not answer in time' in _log(home), f'{dt:.2f}s')
+                  and 'health check did not answer in time' in _log(home), home, env['CTRLB_URL'], f'{dt:.2f}s')
         finally:
             seeker.state.pop('health', None)
         if os.path.exists(marker):
             os.unlink(marker)
         env['CTRLB_URL'] = 'http://192.0.2.1:7531'
         p, dt = call('session-start', inp, env)
-        check(f'{label} startup: non-loopback URL is skipped', p.returncode == 0 and not os.path.exists(marker) and dt < 3.0)
+        check_local_startup(f'{label} startup: non-loopback URL is skipped',
+                            p.returncode == 0 and not os.path.exists(marker) and dt < 3.0, home, env['CTRLB_URL'])
         # Isolate PATH so no installed ctrlb can interfere with the missing-binary case.
         os.unlink(binary)
         env.update(CTRLB_URL=f'http://localhost:{closed_port()}', PATH=home)
         p, dt = call('session-start', inp, env)
-        check(f'{label} startup: missing binary logs one line and continues', p.returncode == 0 and dt < 3.0
-              and _log(home).count('ctrlb executable not found') == 1 and 'search_sessions' in p.stdout)
+        check_local_startup(f'{label} startup: missing binary logs one line and continues', p.returncode == 0 and dt < 3.0
+              and _log(home).count('ctrlb executable not found') == 1 and 'search_sessions' in p.stdout, home, env['CTRLB_URL'])
 
     home = os.path.join(WORK, 'home-binary-lookup')
     binary = local_stub(home)
@@ -3171,11 +3320,12 @@ def test_local_startup_delayed():
                        STUB_PORT=str(port), STUB_START_DELAY='4')
         try:
             p, dt = call('session-start', dict(session_id=sid, hook_event_name='SessionStart'), env, timeout=8)
-            check(f'{label} startup: cold server outlives poll budget while recall context is returned',
+            check_local_startup(f'{label} startup: cold server outlives poll budget while recall context is returned',
                   p.returncode == 0 and 3 <= dt < 5.5 and 'search_sessions' in out_of(p).get('additionalContext', '')
-                  and 'health check did not answer in time' in _log(home), f'{dt:.2f}s')
+                  and 'health check did not answer in time' in _log(home), home, env['CTRLB_URL'], f'{dt:.2f}s')
             healthy, detail = wait_local_health(env['CTRLB_URL'])
-            check(f'{label} startup: cold server becomes healthy after the hook returns', healthy, detail)
+            check_local_startup(f'{label} startup: cold server becomes healthy after the hook returns',
+                                healthy, home, env['CTRLB_URL'], detail)
         finally:
             stop_local_stub(home)
 
@@ -3199,13 +3349,13 @@ def test_local_startup_concurrent():
         answers = [p.communicate(timeout=8) for p in processes]
         healthy, detail = wait_local_health(env['CTRLB_URL'])
         invocations = [json.loads(line) for line in read(marker).decode().splitlines()] if os.path.exists(marker) else []
-        check('local startup concurrent: two processes spawn one healthy server from CtrlB home',
+        check_local_startup('local startup concurrent: two processes spawn one healthy server from CtrlB home',
               all(p.returncode == 0 for p in processes) and all(a == (b'', b'') for a in answers)
               and len(invocations) == 1 and os.path.realpath(invocations[0]['cwd']) == os.path.realpath(home)
-              and healthy, detail)
+              and healthy, home, env['CTRLB_URL'], detail)
         mutex = os.path.join(home, 'serve.lo' + 'ck')
-        check('local startup concurrent: spawn mutex is private', os.path.isfile(mutex)
-              and stat.S_IMODE(os.stat(mutex).st_mode) == 0o600)
+        check_local_startup('local startup concurrent: spawn mutex is private', os.path.isfile(mutex)
+              and stat.S_IMODE(os.stat(mutex).st_mode) == 0o600, home, env['CTRLB_URL'])
     finally:
         for p in processes:
             if p.poll() is None:
@@ -3216,7 +3366,7 @@ def test_local_startup_concurrent():
 
 def test_local_request_proxy():
     def server(calls):
-        class H(http.server.BaseHTTPRequestHandler):
+        class H(StubRequestHandler):
             def log_message(self, *args):
                 pass
 
@@ -3229,7 +3379,7 @@ def test_local_request_proxy():
 
             do_POST = do_DELETE = do_GET
 
-        httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H)
+        httpd = StubHTTPServer(('127.0.0.1', 0), H)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         return httpd
 
@@ -3268,7 +3418,7 @@ def test_request_transport():
     state, source_calls, target_calls = {}, [], []
 
     def server(calls, redirect=False):
-        class Handler(http.server.BaseHTTPRequestHandler):
+        class Handler(StubRequestHandler):
             def log_message(self, *args):
                 pass
 
@@ -3283,7 +3433,7 @@ def test_request_transport():
 
             do_POST = do_GET
 
-        httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        httpd = StubHTTPServer(('127.0.0.1', 0), Handler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         return httpd
 
@@ -3753,7 +3903,7 @@ def test_local_install_download_errors():
     body = b'x' * (64 * 1024 + 1)
     manifest = (hashlib.sha256(body).hexdigest() + '  ' + filename + '\n').encode()
 
-    class H(http.server.BaseHTTPRequestHandler):
+    class H(StubRequestHandler):
         def log_message(self, *args):
             pass
 
@@ -3780,7 +3930,7 @@ def test_local_install_download_errors():
                 self.wfile.write(manifest if is_manifest else body)
             self.close_connection = True
 
-    httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H)
+    httpd = StubHTTPServer(('127.0.0.1', 0), H)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
         with tempfile.TemporaryDirectory(prefix='download-errors-', dir=WORK) as temporary:
@@ -4667,6 +4817,7 @@ def main():
     run_test(test_local_session_context, seeker)
     run_test(test_local_relay, seeker)
     run_test(test_local_health_retry)
+    run_test(test_local_stub_idle_connections)
     run_test(test_local_startup, seeker)
     run_test(test_local_startup_delayed)
     run_test(test_local_startup_concurrent)
