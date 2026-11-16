@@ -6,7 +6,7 @@ slug: relay-hooks
 
 # Relay hooks
 
-The plugin's hooks run `python3 -I plugin/hooks/hook.py <mode>` (Codex: `codex/hook.py`) with the hook's JSON on stdin. A hook never fails a session: every error goes to `~/.ctrlb/hooks.log` and the hook exits 0. Every round 8 hook is built to fail open: when Seeker is slow, down or answers an error, the session goes on as if the hook were not there. This page lists, per hook, the event, the input fields it relies on, what it writes and its time budget. The field names and budgets are from the Claude Code hooks reference (code.claude.com/docs/en/hooks.md; sections cited by name below).
+The plugin's hooks run `python3 -I plugin/hooks/hook.py <mode>` (Codex: `codex/hook.py`) with the hook's JSON on stdin. A hook never fails a session: every error goes to `~/.ctrlb/hooks.log` and the hook exits 0. Every round 8 hook is built to fail open: when CtrlB is slow, down or answers an error, the session goes on as if the hook were not there. This page lists, per hook, the event, the input fields it relies on, what it writes and its time budget. The field names and budgets are from the Claude Code hooks reference (code.claude.com/docs/en/hooks.md; sections cited by name below).
 
 ## Fields the hooks rely on
 
@@ -35,7 +35,7 @@ A hook "is in a relay run" as the session-end handoff decides it: `CTRLB_RUN` is
 
 ## The hooks
 
-| Hook (mode) | Event, matcher | `timeout` | Runs | Seeker calls | Fails |
+| Hook (mode) | Event, matcher | `timeout` | Runs | CtrlB calls | Fails |
 |---|---|---|---|---|---|
 | Spawn registers a task (`pre-agent`, decision 43) | PreToolUse, `Agent\|Task` | 5 s | synchronous, all writes inside 2.5 s (alarm at 3 s) | `POST /ai/relay/{dataset}/runs/{run}/briefs` (task), again for the contract | open: prints nothing, ever; the spawn goes ahead unchanged |
 | Artefacts (`post-tool`, decision 44) | PostToolUse, `Edit\|Write\|MultiEdit\|NotebookEdit\|...` | 5 s | the checks inline, the post detached (10 s) | `POST .../posts` with `key` and `hash` | open: no output; a failed post is retried on the next write |
@@ -45,11 +45,11 @@ A hook "is in a relay run" as the session-end handoff decides it: `CTRLB_RUN` is
 | autoSlots release (`post-tool`, `post-tool-failure`, decision 47) | PostToolUse and PostToolUseFailure, edit tools | 5 s | synchronous, inside 1 s | `DELETE .../claims` `{resource: "slot:<path>"}` | the slot lapses (a slot's lease is two minutes) |
 | Session-end handoff (`session-end`, decision 36) | SessionEnd | 10 s (the 1.5 s budget applies) | synchronous, 0.8 s | `POST .../handoffs` `{all: true, to: ""}` | nothing written |
 
-Every call goes to Seeker under the agent's key (`Authorization: Bearer`), as every other hook call does.
+Every call goes to the CtrlB URL under the agent's key (`Authorization: Bearer`), as every other hook call does.
 
 ### Spawning a sub-agent registers a task (decision 43)
 
-PreToolUse on the `Agent` tool (`Task` is its earlier name), in a relay run. The hook registers `task <n> <description>`: `n` is the next number of a per-run counter on this machine (two digits), the description is `tool_input.description` with `/` and `\` made spaces (so the name is never keyed as a path), at most 80 characters. The task's text is `tool_input.prompt` with the plugin's secret patterns redacted, cut at 2,000 bytes. Its paths are every path the prompt names (a token with a `/` or a file extension; `src/app.py:12` names `src/app.py`) that resolves to a file or directory under the workspace (`cwd`), relative to it, at most 32; URLs and paths outside the workspace are left out. When the prompt quotes a test command in backticks or a fenced block (`pytest`, `python -m unittest`, `go test`, `npm test`, `cargo test`, `make test`), it is the task's `test`. A prompt that names no workspace path registers nothing (Seeker needs at least one path), with a line in the hook log.
+PreToolUse on the `Agent` tool (`Task` is its earlier name), in a relay run. The hook registers `task <n> <description>`: `n` is the next number of a per-run counter on this machine (two digits), the description is `tool_input.description` with `/` and `\` made spaces (so the name is never keyed as a path), at most 80 characters. The task's text is `tool_input.prompt` with the plugin's secret patterns redacted, cut at 2,000 bytes. Its paths are every path the prompt names (a token with a `/` or a file extension; `src/app.py:12` names `src/app.py`) that resolves to a file or directory under the workspace (`cwd`), relative to it, at most 32; URLs and paths outside the workspace are left out. When the prompt quotes a test command in backticks or a fenced block (`pytest`, `python -m unittest`, `go test`, `npm test`, `cargo test`, `make test`), it is the task's `test`. A prompt that names no workspace path registers nothing (CtrlB needs at least one path), with a line in the hook log.
 
 If the prompt carries an interface, it is posted as a contract named `<task name> <heading>` on the same paths: a section under a heading that names one (API, contract, interface, shape, schema, fields, signature; a markdown heading or a short line ending in `:`), up to the next heading, or a fenced block whose language is `json`, `typescript`, `proto`, `graphql` or `openapi`, or whose language or preceding line names an interface.
 
@@ -82,9 +82,9 @@ SessionStart creates `scratchDir` (mode 0700) and the rule text names it: "Put h
 
 ### Hook-managed slots (decision 47)
 
-For an edit of a file `autoSlots` lists (matched by its path relative to `cwd`), in a relay run, the PreToolUse hook claims `slot:<path>` with the file (`paths: [<path>]`), so the agent spends no turn on it; Seeker's `slot:` prefix is a valid key kind with a two-minute lease. The claim's token is kept like any claim's. When the answer is `held: false` with another agent as `held_by`, the edit is denied with `CtrlB Relay: REGISTRY.md is held by agent-b, try again in a moment.` The PostToolUse hook (and PostToolUseFailure, for an edit that failed) releases the slot when the hook holds it.
+For an edit of a file `autoSlots` lists (matched by its path relative to `cwd`), in a relay run, the PreToolUse hook claims `slot:<path>` with the file (`paths: [<path>]`), so the agent spends no turn on it; CtrlB's `slot:` prefix is a valid key kind with a two-minute lease. The claim's token is kept like any claim's. When the answer is `held: false` with another agent as `held_by`, the edit is denied with `CtrlB Relay: REGISTRY.md is held by agent-b, try again in a moment.` The PostToolUse hook (and PostToolUseFailure, for an edit that failed) releases the slot when the hook holds it.
 
-Fail-open: a claim that errors or does not answer inside 1.5 s lets the edit go ahead, with no edit check, and a line in the hook log. A slow Seeker must not stall every edit of a shared file; the cost is that two agents may write it at once while Seeker is slow, which `Edit`'s own exact-match replacement mostly catches. Only a definite answer that another agent holds the slot denies.
+Fail-open: a claim that errors or does not answer inside 1.5 s lets the edit go ahead, with no edit check, and a line in the hook log. A slow CtrlB must not stall every edit of a shared file; the cost is that two agents may write it at once while CtrlB is slow, which `Edit`'s own exact-match replacement mostly catches. Only a definite answer that another agent holds the slot denies.
 
 ## Codex
 
@@ -96,8 +96,8 @@ Fail-open: a claim that errors or does not answer inside 1.5 s lets the edit go 
 | autoSlots (47) | No: with no hook after a patch, a slot claimed before it could not be released after it. Codex agents claim `slot:REGISTRY.md` themselves (see [Relay tools](relay-tools.md#slots)). |
 | Session-end handoff (36) | Yes, with a fixed text. |
 
-## Seeker reads and writes this needs
+## CtrlB reads and writes this needs
 
 - `POST .../posts` takes `key` (`artifact:<clean relative path>`) and `hash` (at most 80 characters) for an artefact and keeps its text whole up to 32,768 bytes (longer is refused with 400, never cut); it answers `201 {"ok": true, "key": "artifact:..."}`. Peers leaves artefact notes out of its feed.
 - `GET .../artifacts?agent=<agent>` answers `{agent, artifacts: [{key, path, agent, hash, ts, text}]}`: the newest artefact of each path of that agent, newest first, with its full text.
-- A Seeker without the artifacts read (404) leaves the artefacts to the local copies of what this machine posted.
+- A CtrlB server without the artifacts read (404) leaves the artefacts to the local copies of what this machine posted.

@@ -39,11 +39,11 @@ def main():
             t0 = time.time()
             r = common.runs(cfg, limit=5, timeout=15)
             ms = (time.time() - t0) * 1000
-            print(f"Seeker answered: OK ({ms:.0f} ms); latest runs in {cfg['dataset']}:")
+            print(f"CtrlB answered: OK ({ms:.0f} ms); latest runs in {cfg['dataset']}:")
             for x in r.get('runs') or []:
                 print(f"  {x.get('run_id')}  agents {x.get('agents')}  live {x.get('live')}  done {x.get('done')}")
         except Exception as e:
-            print(f'Seeker check failed: {str(e)[:300]}')
+            print(f'CtrlB check failed: {str(e)[:300]}')
     states = os.path.join(common.HOME, 'state')
     n = len([f for f in os.listdir(states) if f.endswith('.json')]) if os.path.isdir(states) else 0
     print(f'transcript files tracked: {n}')

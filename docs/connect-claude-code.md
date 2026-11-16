@@ -110,7 +110,7 @@ git clone https://github.com/ctrlb-hq/ctrlb-agent.git ~/ctrlb-agent
 python3 -I ~/ctrlb-agent/bin/configure.py
 ```
 
-It asks for the URL, the sessions dataset, an optional name and run id, and the key. The key prompt hides what you type. It writes `~/.ctrlb/config.json` with mode 0600, and checks that CtrlB answers. The hooks read that file when `CTRLB_URL` or `CTRLB_KEY` is not set. The MCP server still reads `CTRLB_MCP_URL` and `CTRLB_KEY` from the environment, because Claude Code expands them in `.mcp.json`.
+It asks for the CtrlB URL, the sessions dataset, an optional run id, and the key. The key prompt hides what you type. It writes `~/.ctrlb/config.json` with mode 0600, and checks that CtrlB answers. The hooks read that file when `CTRLB_URL` or `CTRLB_KEY` is not set. The MCP server still reads `CTRLB_MCP_URL` and `CTRLB_KEY` from the environment, because Claude Code expands them in `.mcp.json`.
 
 ## Project instructions (optional)
 

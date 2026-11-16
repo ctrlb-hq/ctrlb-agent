@@ -3,10 +3,10 @@
 CtrlB's agent package for Claude Code and Codex. It does three things:
 
 - It uploads every session, including subagents, to the session store in CtrlB. One row per message, thinking block, tool call and tool result, with secrets redacted first.
-- It tells each agent its CtrlB Relay run id and agent id at session start. The relay tools (`peers`, `post`, `claim`, `release`) and the recall tools (`search_sessions`, `find_command`, `next_actions`, `fetch_records`) come from Seeker's hosted MCP server at `/mcp`.
+- It tells each agent its CtrlB Relay run id and agent id at session start. The relay tools (`peers`, `post`, `claim`, `release`) and the recall tools (`search_sessions`, `find_command`, `next_actions`, `fetch_records`) come from CtrlB's hosted MCP server, at the CtrlB URL plus `/mcp`.
 - It checks each edit against the run's claims before the edit runs. Claims are advisory unless the workspace turns on `enforce`.
 
-Everything goes to Seeker with your MCP key. Nothing talks to the lake directly. Standard library Python 3.9 or newer; nothing else is installed.
+Everything goes to the CtrlB URL with your MCP key. Nothing talks to the lake directly. Standard library Python 3.9 or newer; nothing else is installed.
 
 For Recall and Relay on one machine with a standalone binary and SQLite, see [Local mode](docs/local-mode.md). It includes installation, agent setup, coordinating several agents, limits and moving your records to hosted CtrlB.
 
@@ -51,7 +51,7 @@ python3 -I install.py --codex
 
 `--dry-run` prints the change to `~/.codex/config.toml` and writes nothing. The installer then writes one block between two marker comments:
 
-- `[mcp_servers.ctrlb]` with Seeker's `/mcp` URL and `bearer_token_env_var = "CTRLB_KEY"`. Codex reads the key from the environment; the key is never written into the file. `env_http_headers` sends `CTRLB_RUN` and `CTRLB_AGENT` as `X-CtrlB-Run` and `X-CtrlB-Agent` when they are set.
+- `[mcp_servers.ctrlb]` with the CtrlB URL plus `/mcp` and `bearer_token_env_var = "CTRLB_KEY"`. Codex reads the key from the environment; the key is never written into the file. `env_http_headers` sends `CTRLB_RUN` and `CTRLB_AGENT` as `X-CtrlB-Run` and `X-CtrlB-Agent` when they are set.
 - `[[hooks.<Event>]]` tables for `SessionStart`, `SubagentStart`, `PreCompact`, `SessionEnd`, `Stop`, `SubagentStop` and `PreToolUse` (matcher `apply_patch`). Each calls `codex/hook.py` in the clone, so keep the clone where it is.
 
 It copies the old file to `config.toml.ctrlb-backup-<time>` before it writes. Running it again changes nothing. It refuses to run when `config.toml` already has an MCP server named `ctrlb`. Codex skips new or changed hooks until you trust them: start Codex and run `/hooks` once.
@@ -96,7 +96,7 @@ A `PreToolUse` hook runs before `Edit`, `Write`, `MultiEdit` and `NotebookEdit` 
 | `advisory` (default) | The agent gets a note naming the holder and the claim call to make. The edit goes ahead. |
 | `enforce` | The edit is refused. The reason names the holder and the claim call to make. |
 
-The hook gives up after two seconds. On a timeout, an unreachable Seeker or any other error, the edit goes ahead and the error goes to `~/.ctrlb/hooks.log`. Set `CTRLB_ENFORCE=off` to skip the check on one machine.
+The hook gives up after two seconds. On a timeout, CtrlB not reachable, or any other error, the edit goes ahead and the error goes to `~/.ctrlb/hooks.log`. Set `CTRLB_ENFORCE=off` to skip the check on one machine.
 
 ## What is uploaded
 
@@ -112,9 +112,9 @@ Before upload, text that looks like a secret is replaced with `[REDACTED]`. That
 
 | Variable | `~/.ctrlb/config.json` key | Meaning |
 |---|---|---|
-| `CTRLB_URL` | `url` | Seeker's URL |
+| `CTRLB_URL` | `url` | The CtrlB URL (the Connect page shows it) |
 | `CTRLB_KEY` | `key` | your MCP key |
-| `CTRLB_MCP_URL` | `mcp_url` | Seeker's `/mcp` URL, for the MCP server |
+| `CTRLB_MCP_URL` | `mcp_url` | The CtrlB URL plus `/mcp`, for the MCP server |
 | `CTRLB_RUN` | `run` | run id for every session (default: each session is its own run) |
 | `CTRLB_AGENT` | | agent label (default: the session id) |
 | | `user` | the key's user (its `email` claim), written by `bin/configure.py`; `user_name` on the rows is always this user, decoded from the key in use |
@@ -143,12 +143,12 @@ plugin/lib, plugin/bin            symlinks to lib/ and bin/; a plugin install co
 install.py                        python3 -I install.py --codex runs codex/install.py with the options that follow
 codex/install.py                  writes the Codex config.toml block
 codex/hook.py                     the Codex hooks
-lib/common.py                     config, the Seeker client, upload state, log
+lib/common.py                     config, the CtrlB client, upload state, log
 lib/rows_claude.py                Claude Code transcript to session rows
 lib/rows_codex.py                 Codex rollout to session rows
 lib/hooks_shared.py               the injected rules and the edit check, shared by both hooks
 lib/redact.py                     the redaction patterns
-lib/paths.py                      resource keys, identical to Seeker's (tests/fixtures/keys.json); edit paths sent relative to cwd
+lib/paths.py                      resource keys, identical to CtrlB's (tests/fixtures/keys.json); edit paths sent relative to cwd
 bin/                              configure.py, status.py, backfill.py
 tests/run_tests.py                python3 -I tests/run_tests.py
 docs/connect-*.md                 the docs-site pages: Claude Code, Codex, OTEL only, HTTP
@@ -160,4 +160,4 @@ docs/connect-*.md                 the docs-site pages: Claude Code, Codex, OTEL 
 python3 -I tests/run_tests.py
 ```
 
-The tests run against a local fake Seeker that answers with the responses in `tests/fixtures/seeker/`. Those responses are synthetic: they are written by hand, not recorded. When `claude` is installed, the tests also run `claude plugin validate` on the marketplace and the plugin. When `codex` is installed, they load the installer's output with `codex mcp list` in a temporary Codex home. The tests never touch `~/.codex/config.toml`.
+The tests run against a local fake CtrlB server that answers with the responses in `tests/fixtures/seeker/`. Those responses are synthetic: they are written by hand, not recorded. When `claude` is installed, the tests also run `claude plugin validate` on the marketplace and the plugin. When `codex` is installed, they load the installer's output with `codex mcp list` in a temporary Codex home. The tests never touch `~/.codex/config.toml`.

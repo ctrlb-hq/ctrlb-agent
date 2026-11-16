@@ -47,7 +47,8 @@ Even in `enforce` mode:
 
 - A claim lasts `leaseSeconds` (600 by default, 60 to 86,400) from its `HOLD` row, unless released. A claim's answer gives the end as `lease_until`.
 - Claiming the key again before the lease runs out renews it. When the lease runs out the claim is gone, and another agent can claim the key.
-- A `release` after the lease ran out writes nothing: it answers `released: 0`, and the key is not done. Claim it again, then release it.
+- A `release` after the lease ran out, on a file path, a slot or with `finished=false`, writes nothing: it answers `released: 0`, and the key is not done. Claim it again, then release it.
+- On a task name with `finished=true`, a `release` after the lease ran out still finishes the task when your hold of its current round was never released, the round is not finished, and nobody else holds the task now. It answers `released: 1, finished: true, finished_after_lease: true`. `done` follows the same rule and answers `done: true, finished_after_lease: true`; its evidence rule still applies. When another agent holds the task now, nothing is written, and the `message` names that agent.
 - A crashed or killed agent's claim lasts until its lease runs out.
 - For work that takes longer than the lease, raise `leaseSeconds` in the workspace's Relay settings.
 

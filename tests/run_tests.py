@@ -302,7 +302,7 @@ def recall_rule(text, sid):
 
 def test_layout():
     pj = load('../../plugin/.claude-plugin/plugin.json')
-    check('plugin.json: name ctrlb-agent, version 0.2.0', pj.get('name') == 'ctrlb-agent' and pj.get('version') == '0.2.0')
+    check('plugin.json: name ctrlb-agent, version 0.2.1', pj.get('name') == 'ctrlb-agent' and pj.get('version') == '0.2.1')
     mk = load('../../.claude-plugin/marketplace.json')
     ent = mk.get('plugins') or []
     check('marketplace.json: one entry, ctrlb-agent at ./plugin', len(ent) == 1 and ent[0]['name'] == 'ctrlb-agent'
@@ -314,8 +314,21 @@ def test_layout():
     ok = set(hk) == set(events) and all(hk[e][0]['hooks'][0]['command'].endswith('hook.py" ' + m) for e, m in events.items())
     check('hooks.json: the six hooks plus PreToolUse, PostToolUse and PostToolUseFailure, each with its mode (SessionEnd: session-end)',
           ok, ','.join(sorted(hk)))
-    check('hooks.json: PostToolUse matcher is the ctrlb claim, handoff and release tools',
-          hk['PostToolUse'][0].get('matcher') == 'mcp__ctrlb__claim|mcp__ctrlb__handoff|mcp__ctrlb__release')
+    check('hooks.json: PostToolUse matcher is the ctrlb claim, handoff and release tools, under both server names',
+          hk['PostToolUse'][0].get('matcher') == 'mcp__ctrlb__claim|mcp__plugin_ctrlb-agent_ctrlb__claim|mcp__ctrlb__handoff|'
+          'mcp__plugin_ctrlb-agent_ctrlb__handoff|mcp__ctrlb__release|mcp__plugin_ctrlb-agent_ctrlb__release')
+    # A plugin install names the tools mcp__plugin_ctrlb-agent_ctrlb__<tool>; a server added by hand, mcp__ctrlb__<tool>.
+    # Every matcher that names one must name the other, or the hook never runs on that kind of install.
+    twins = []
+    for e in hk.values():
+        for g in e:
+            names = (g.get('matcher') or '').split('|')
+            for n in names:
+                for short, long_ in (('mcp__ctrlb__', 'mcp__plugin_ctrlb-agent_ctrlb__'),
+                                     ('mcp__plugin_ctrlb-agent_ctrlb__', 'mcp__ctrlb__')):
+                    if n.startswith(short) and long_ + n[len(short):] not in names:
+                        twins.append(n)
+    check('hooks.json: every ctrlb tool in a matcher is listed under both server names', not twins, ','.join(twins))
     check('hooks.json: PreToolUse matcher Edit|Write|MultiEdit|NotebookEdit',
           hk['PreToolUse'][0].get('matcher') == 'Edit|Write|MultiEdit|NotebookEdit')
     check('hooks.json: every command runs python3 -I', all(h['command'].startswith('python3 -I ') for e in hk.values() for g in e for h in g['hooks']))
@@ -872,10 +885,10 @@ def test_config_and_status(seeker):
     check('configure.py never prints the key', secret not in p.stdout + p.stderr)
     check('configure.py prints the env lines with the key placeholder', 'export CTRLB_KEY="<your key>"' in p.stdout
           and f'export CTRLB_MCP_URL="{seeker.url}/mcp"' in p.stdout)
-    check('configure.py: Seeker check fails with the fixture key, and says so', 'Seeker check failed: HTTP 401' in p.stdout)
+    check('configure.py: the CtrlB check fails with the fixture key, and says so', 'CtrlB check failed: HTTP 401' in p.stdout)
     p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'status.py')], capture_output=True, text=True,
                        env=dict(env, CTRLB_KEY=KEY), timeout=30)
-    check('status.py: Seeker answers with the latest runs; key masked', 'Seeker answered: OK' in p.stdout and 'relay-demo-1' in p.stdout
+    check('status.py: CtrlB answers with the latest runs; key masked', 'CtrlB answered: OK' in p.stdout and 'relay-demo-1' in p.stdout
           and KEY not in p.stdout and 'CTRLB_MCP_URL in the environment: NO' in p.stdout, p.stdout[-300:])
     check("status.py: says the key carries no user when it has no email claim", "key's user (written as user_name): (none in the key" in p.stdout)
 
@@ -895,7 +908,7 @@ def test_config_and_status(seeker):
         c = json.load(fh)
     check("configure.py stores the key's user as user, and ignores --user", p.returncode == 0 and c.get('user') == KEY_USER
           and '--user is ignored' in p.stdout, p.stdout[-300:] + p.stderr[-200:])
-    check('configure.py with a JWT key: Seeker answers, and the key is never printed', 'Seeker answered: OK' in p.stdout
+    check('configure.py with a JWT key: CtrlB answers, and the key is never printed', 'CtrlB answered: OK' in p.stdout
           and JWT_KEY not in p.stdout + p.stderr and JWT_KEY.split('.')[1] not in p.stdout + p.stderr)
     p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'status.py')], capture_output=True, text=True,
                        env=dict(env2, CTRLB_USER='seeker-t15-build'), timeout=30)
@@ -1864,6 +1877,16 @@ def test_done_evidence(seeker):
         {'done': True, 'resource': 'task 07 latency', 'key': 'name:task 07 latency', 'paths': ['path:src/panels/Latency.tsx']})}]), env)
     gone = tokens().get('path:src/panels/Latency.tsx')
     check('post-tool done: no output, the task\'s tokens dropped', not p.stdout.strip() and had and not gone, f'{had} {gone}')
+    # The same claim and release under the plugin install's tool names keep and drop the token the same way.
+    hook('post-tool', dict(base, tool_name='mcp__plugin_ctrlb-agent_ctrlb__claim', tool_use_id='c2', tool_input={'resource': 'task 08 plugin'},
+                           tool_response=[{'type': 'text', 'text': json.dumps({'held': True, 'key': 'name:task 08 plugin',
+                                                                               'paths': ['path:src/panels/Plugin.tsx'], 'token': 'tok-10'})}]), env)
+    had = tokens().get('path:src/panels/Plugin.tsx')
+    hook('post-tool', dict(base, tool_name='mcp__plugin_ctrlb-agent_ctrlb__release', tool_use_id='r2', tool_input={'resource': 'task 08 plugin'},
+                           tool_response=[{'type': 'text', 'text': json.dumps({'released': 1, 'key': 'name:task 08 plugin',
+                                                                               'paths': ['path:src/panels/Plugin.tsx']})}]), env)
+    gone = tokens().get('path:src/panels/Plugin.tsx')
+    check('post-tool: claim and release under the plugin tool names keep and drop the token', had == 'tok-10' and not gone, f'{had} {gone}')
     hk = load('../../plugin/hooks/hooks.json')['hooks']['PostToolUse']
     check('hooks.json: a second PostToolUse group for Bash and the done tool', len(hk) == 3
           and hk[1].get('matcher') == 'Bash|mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'

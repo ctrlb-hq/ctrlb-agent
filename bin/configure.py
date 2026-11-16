@@ -105,7 +105,7 @@ def main():
             old = json.load(fh)
     except Exception:
         old = {}
-    c = dict(url=ask('Seeker URL (the CtrlB URL the Connect page shows)', old.get('url', ''), a.url).rstrip('/'),
+    c = dict(url=ask('CtrlB URL (shown on the Connect page)', old.get('url', ''), a.url).rstrip('/'),
              dataset=ask('Sessions dataset', old.get('dataset', common.DEFAULT_DATASET), a.dataset),
              run=ask('Run id for every session (Enter: each session is its own run, which is usual)', old.get('run', ''), a.run))
     if a.key_stdin:
@@ -134,9 +134,9 @@ def main():
     cfg = common.config()
     try:
         common.runs(cfg, limit=1, timeout=15)
-        print('Seeker answered: OK')
+        print('CtrlB answered: OK')
     except Exception as e:
-        print(f'Seeker check failed: {str(e)[:300]}')
+        print(f'CtrlB check failed: {str(e)[:300]}')
     print('The ctrlb tools in Claude Code read two environment variables. Add these to your shell profile:')
     print(f'  export CTRLB_MCP_URL="{c["mcp_url"]}"')
     print('  export CTRLB_KEY="<your key>"')

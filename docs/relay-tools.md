@@ -235,7 +235,7 @@ Give a claim back, or mark a task done. Finish tasks, just release files.
 | `cwd` | The working directory the claim was made with, if any. |
 | `run_id`, `agent` | Required, or from the headers. |
 
-Answer: `{released, finished, resource, key, message?, paths?}`. `paths` lists the files of a task (or of a claim made with `paths`) handed back with it. `released` counts your live holds on the key. It is 0 when you held none, for example after the lease ran out; then nothing is written and the key is not done. Claim it again, then release it. On a file path `finished` is always `false`, and when you asked for `finished=true` the `message` says the file was handed back instead.
+Answer: `{released, finished, resource, key, message?, paths?}`. `paths` lists the files of a task (or of a claim made with `paths`) handed back with it. `released` counts your live holds on the key. It is 0 when you held none, for example after the lease ran out; then nothing is written and the key is not done. Claim it again, then release it. One case differs: on a task name with `finished=true`, a release after the lease ran out still finishes the task when your hold of its current round was never released, the round is not finished, and nobody else holds the task now. The answer is then `released: 1, finished: true, finished_after_lease: true`. When another agent holds the task now, nothing is written, and the `message` names that agent. On a file path `finished` is always `false`, and when you asked for `finished=true` the `message` says the file was handed back instead.
 
 If you claimed an absolute path with `cwd`, release it with the same `cwd`, or release the `key` the claim answered, for example `path:src/app.py`.
 
@@ -260,7 +260,7 @@ done(resource="task 03 median", evidence={"command": "python3 -m pytest tests/te
 
 When your test passes, call `done` with the evidence and `next=true`: one call finishes the task and claims your next one.
 
-Answer: `{done, resource, key, evidence?, finished_after_lease?, paths?, message?, test?}`. `done: true` finishes the task: later claims are refused with `finished_by` unless they pass `reopen=true`, and its files are handed back with it (`paths`). The evidence is stored with the finish, and `tasks` and the run view show it. A done whose command is not the task's test is still accepted; the run view records `evidence_matches_test: false` for it and counts the tasks finished with their own test as `done_with_task_test`.
+Answer: `{done, resource, key, evidence?, finished_after_lease?, paths?, message?, test?}`. `done: true` finishes the task: later claims are refused with `finished_by` unless they pass `reopen=true`, and its files are handed back with it (`paths`). `finished_after_lease: true` says your lease had run out and the task was still finished, by the same rule as a `release` with `finished=true`. The evidence is stored with the finish, and `tasks` and the run view show it. A done whose command is not the task's test is still accepted; the run view records `evidence_matches_test: false` for it and counts the tasks finished with their own test as `done_with_task_test`.
 
 When the workspace requires evidence (the `evidenceRequired` setting), a done that does not name the command is refused, and nothing is written:
 
@@ -399,7 +399,7 @@ When you finish an interface others will build on (a type, a route, a config sha
 
 | Argument | |
 |---|---|
-| `name` | Required. The interface's name, for example `seeker-4 routes`. It is keyed `contract:<name>`. |
+| `name` | Required. The interface's name, for example `billing api routes`. It is keyed `contract:<name>`. |
 | `text` | Required. The shape in a few lines. Cut at 2,000 characters. |
 | `paths` | Required. The files that define it, at least one, at most 32. |
 | `cwd` | Your working directory, for absolute paths. |
