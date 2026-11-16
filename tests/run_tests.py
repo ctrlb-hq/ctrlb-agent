@@ -2891,7 +2891,7 @@ def test_local_install():
     import io
     import pathlib
     import tempfile
-    from contextlib import redirect_stdout
+    from contextlib import redirect_stderr, redirect_stdout
     from unittest import mock
     import local_install
 
@@ -2980,9 +2980,6 @@ def test_local_install():
         p, home = run('unsafe-http', ['--download-url', 'http://192.0.2.1/releases'])
         check('local install: HTTP on a non-loopback host refuses before downloading',
               p.returncode != 0 and 'must use HTTPS' in p.stderr and not home.exists())
-        p, home = run('no-base', [])
-        check('local install: no download address gives a clear error without installing',
-              p.returncode != 0 and '--download-url or CTRLB_DOWNLOAD_URL' in p.stderr and not home.exists())
 
         manifest.write_text(checksum + '  ' + filename + '\n')
         p, home = run('init-failure', ['--download-url', base], STUB_INIT_FAIL='1')
@@ -3002,6 +2999,16 @@ def test_local_install():
         except local_install.InstallError:
             rejected = True
         check('local install: redirects cannot bypass the HTTPS policy', rejected)
+        redirects = []
+        for target, allowed in [('https://files.example.test/ctrlb?sp=r&sig=abc', True),
+                                ('https://user@files.example.test/ctrlb?sig=abc', False),
+                                ('file:///etc/hostname', False)]:
+            try:
+                local_install.validate_url(target, redirect=True)
+                redirects.append(allowed)
+            except local_install.InstallError:
+                redirects.append(not allowed)
+        check('local install: a redirect may carry a query, but no user name and no file address', all(redirects))
         versions = []
         for args, version in [([], 'latest'), (['--version', 'v1.2.3'], 'v1.2.3')]:
             with mock.patch.object(local_install, 'install_binary') as download, \
@@ -3010,6 +3017,26 @@ def test_local_install():
                 code = local_install.main(args)
             versions.append(code == 0 and download.call_args.args[0] == base + '/' + version)
         check('local install: URL templates substitute the requested version or latest', all(versions))
+        releases = 'https://github.com/ctrlb-hq/ctrlb-agent/releases'
+        defaults = []
+        environment = {k: v for k, v in os.environ.items() if k != 'CTRLB_DOWNLOAD_URL'}
+        for args, expected in [([], releases + '/latest/download'),
+                               (['--version', ''], releases + '/latest/download'),
+                               (['--version', 'v1.2.3'], releases + '/download/v1.2.3')]:
+            with mock.patch.object(local_install, 'install_binary') as download, \
+                    mock.patch.dict(os.environ, environment, clear=True), \
+                    redirect_stdout(io.StringIO()):
+                code = local_install.main(args)
+            defaults.append(code == 0 and download.call_args.args[0] == expected)
+        check('local install: no download address uses the GitHub release, newest or named', all(defaults))
+        refused = []
+        for version in ('../v1', '..', '.', 'v1 beta', 'v1/x', 'v1?x'):
+            stderr = io.StringIO()
+            with mock.patch.object(local_install, 'install_binary') as download, \
+                    mock.patch.dict(os.environ, environment, clear=True), redirect_stderr(stderr):
+                code = local_install.main(['--version', version])
+            refused.append(code == 1 and not download.called and '--version must be a release tag' in stderr.getvalue())
+        check('local install: a version that is not one release tag is refused before any download', all(refused))
 
 
 def test_local_install_streams():
@@ -3090,9 +3117,19 @@ def test_local_install_download_errors():
             pass
 
         def do_GET(self):
-            case, name = self.path.strip('/').split('/')
+            path, _, query = self.path.partition('?')
+            case, name = path.strip('/').split('/')
             is_manifest = name == 'SHA256SUMS'
-            if case == ('manifest-status' if is_manifest else 'binary-status'):
+            if case in ('signed-redirect', 'plain-http-redirect'):
+                # A release host answers with a redirect to a signed file address.
+                host = '127.0.0.1' if case == 'signed-redirect' else '127.0.0.2'
+                self.send_response(302)
+                self.send_header('Location', f'http://{host}:{self.server.server_address[1]}/signed/{name}?sp=r&sig=abc')
+                self.end_headers()
+            elif case == 'signed' and query != 'sp=r&sig=abc':
+                self.send_response(403)
+                self.end_headers()
+            elif case == ('manifest-status' if is_manifest else 'binary-status'):
                 self.connection.sendall(b'garbage status line\r\n\r\n')
             elif case == ('manifest-chunk' if is_manifest else 'binary-chunk'):
                 self.connection.sendall(b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10\r\ncut')
@@ -3127,6 +3164,27 @@ def test_local_install_download_errors():
                       p.returncode != 0 and message in p.stderr and 'nothing installed' in p.stderr
                       and 'Traceback' not in p.stderr and destination.read_bytes() == b'previous installation'
                       and not list((home / 'bin').glob('.ctrlb-download-*')))
+            for case in ('signed-redirect', 'plain-http-redirect'):
+                home = pathlib.Path(temporary, case)
+                (home / 'bin').mkdir(parents=True)
+                destination = home / 'bin' / 'ctrlb'
+                destination.write_bytes(b'previous installation')
+                launcher = ('import platform, runpy; platform.system = lambda: "Linux"; '
+                            'platform.machine = lambda: "x86_64"; '
+                            'runpy.run_path(' + repr(os.path.join(ROOT, 'install.py')) + ', run_name="__main__")')
+                base = f'http://127.0.0.1:{httpd.server_address[1]}/{case}'
+                p = subprocess.run([sys.executable, '-I', '-c', launcher, '--local', '--download-url', base],
+                                   capture_output=True, text=True, env=base_env('', str(home)), timeout=10)
+                if case == 'signed-redirect':
+                    # The fixture is not a program, so init fails after the verified replacement.
+                    check('local install download: a redirect to a signed address with a query is followed',
+                          destination.read_bytes() == body and 'ctrlb init' in p.stderr
+                          and 'Traceback' not in p.stderr, p.stderr[-200:])
+                else:
+                    check('local install download: a redirect to plain HTTP on another host is refused',
+                          p.returncode != 0 and 'redirected to an address that is not allowed' in p.stderr
+                          and 'Traceback' not in p.stderr and destination.read_bytes() == b'previous installation'
+                          and not list((home / 'bin').glob('.ctrlb-download-*')), p.stderr[-200:])
     finally:
         httpd.shutdown()
         httpd.server_close()
