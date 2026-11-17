@@ -17,6 +17,8 @@ import hashlib
 import json
 import os
 import re
+import secrets
+import stat
 import subprocess
 import tempfile
 import sys
@@ -458,6 +460,38 @@ def read_record(cfg, run, agent, budget=RECORD_S):
     return parts, stale
 
 
+def _restore(root, rel, text):
+    """Walk through stable directory descriptors and create only an absent file. No pathname check can make
+    a later replace safe: another session can create work or swap a directory between the two operations."""
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in rel.split('/')[:-1]:
+            try:
+                os.mkdir(part, mode=0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        name = rel.split('/')[-1]
+        tmp = '.' + name + '.' + secrets.token_hex(8) + '.ctrlb-tmp'
+        dest = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        try:
+            with os.fdopen(dest, 'w') as fh:
+                fh.write(text)
+            try:
+                # link publishes the complete inode exclusively; replace would destroy concurrent work.
+                os.link(tmp, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+            except FileExistsError:
+                return stat.S_ISREG(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode)
+        finally:
+            os.unlink(tmp, dir_fd=fd)
+        return True
+    finally:
+        os.close(fd)
+
+
 def restore_artifacts(parts, run, agent, scratch):
     """Write this agent's artefacts into the scratch directory, those it does not have yet: from Seeker's answer, else
     from the local copies of the artefacts this machine posted. Returns the relative paths now there."""
@@ -481,17 +515,12 @@ def restore_artifacts(parts, run, agent, scratch):
                     except (OSError, UnicodeDecodeError):
                         pass
     for rel, text in sorted(texts.items()):
-        dest = _confined(scratch, rel)
-        if not dest:
-            common.log(f"artifact not restored: {rel}: a directory on its path is a link or leaves the scratch directory")
-            continue
         try:
-            if not os.path.lexists(dest):
-                if redact.redact(text)[1]:
-                    common.log(f"artifact not restored: {rel}: matches a secret pattern")
-                    continue
-                _write(dest, text)
-            have.append(rel)
+            if redact.redact(text)[1]:
+                common.log(f"artifact not restored: {rel}: matches a secret pattern")
+                continue
+            if _restore(scratch, rel, text):
+                have.append(rel)
         except OSError as e:
             common.log(f"artifact not restored: {rel}: {type(e).__name__}")
     return have

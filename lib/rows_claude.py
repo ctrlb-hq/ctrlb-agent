@@ -12,7 +12,7 @@ Beyond the content blocks:
   cost_usd        on block_type "result" rows: the increase of the session's cumulative cost since the previous
                   cost record (a transcript "cost-state" record, or a stream-json "result" record), so the sum of
                   cost_usd over a session's rows is its cost. Float; 0.0 elsewhere"""
-import datetime, glob, json, os, time
+import copy, datetime, glob, json, os, time
 import common
 from paths import edit_paths as normalise_edit_paths
 from redact import redact
@@ -199,57 +199,94 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
     moves forward after Seeker accepts the rows, so a failed upload is retried next time. ids and rows_fn default to
     the Claude Code parser; rows_codex passes its own (rows_fn(rec, seq, state, ids, cfg, hostname) -> [row])."""
     counts = dict(rows=0, lines=0, redacted=0)
-    if not path or not os.path.isfile(path):
+    until = time.monotonic() + max(0, deadline - time.time())
+    if not path or not os.path.isfile(path) or time.monotonic() >= until:
         return counts
     ids = ids if ids is not None else ids_for_file(cfg, path)
     rows_fn = rows_fn or rows_from
     hostname = common.host()
     with common.FileState(path, deadline) as fs:
-        st = fs.data
-        size = os.path.getsize(path)
-        if size < st['offset']:            # file replaced or truncated: start again
+        if os.path.getsize(path) < fs.data['offset']:
             fs.reset()
-        if size == st['offset']:
-            return counts
-        with open(path, 'rb') as fh:
-            fh.seek(st['offset'])
-            chunk = fh.read()
-        end = chunk.rfind(b'\n')
-        if end < 0:
-            return counts
-        batch, nbytes = [], 0
-        offset, line = st['offset'], st['line']
-        first_line = line
+        pending = copy.deepcopy(fs.data)
+        first_line = pending['line']
+        batch, nbytes = [], 2             # JSON array brackets; each row includes its separator
+
+        def checkpoint(state):
+            fs.data = copy.deepcopy(state)
+            fs.save()
+            counts['lines'] = state['line'] - first_line
 
         def send(rows):
-            common.ingest_records(cfg, rows, timeout=max(2, deadline - time.time()))
+            remaining = until - time.monotonic()
+            if remaining <= 0:
+                return False
+            common.ingest_records(cfg, rows, timeout=remaining)
             counts['rows'] += len(rows)
+            return True
 
-        for raw in chunk[:end + 1].split(b'\n')[:-1]:
-            try:
-                rec = json.loads(raw)
-            except Exception:
-                rec = None
-            line_rows = [_finish(r, counts) for r in rows_fn(rec, line, st, ids, cfg, hostname)] if isinstance(rec, dict) else []
-            size = sum(len(json.dumps(r)) + 1 for r in line_rows)
-            if batch and (len(batch) + len(line_rows) > BATCH_ROWS or nbytes + size > BATCH_BYTES):
-                send(batch)                    # everything before this line: the offset may move to its start
-                batch, nbytes = [], 0
-                st['offset'], st['line'] = offset, line
-                fs.save()
-            batch += line_rows
-            nbytes += size
-            while len(batch) > BATCH_ROWS:     # one line alone over the row cap
-                send(batch[:BATCH_ROWS])
-                batch = batch[BATCH_ROWS:]
-                nbytes = sum(len(json.dumps(r)) + 1 for r in batch)
-            line += 1
-            offset += len(raw) + 1
-        if batch:
-            send(batch)
-        counts['lines'] = line - first_line
-        st['offset'], st['line'] = offset, line
-        fs.save()
+        with open(path, 'rb') as fh:
+            fh.seek(pending['offset'])
+            while time.monotonic() < until:
+                # Read bounded chunks, checking the budget even within a very long line. An incomplete last
+                # line stays at its old offset until a later hook sees its terminating newline.
+                pieces = []
+                while time.monotonic() < until:
+                    raw = fh.readline(1024 * 1024)
+                    if not raw:
+                        break
+                    pieces.append(raw)
+                    if raw.endswith(b'\n'):
+                        break
+                if not pieces or not pieces[-1].endswith(b'\n') or time.monotonic() >= until:
+                    break
+                raw = b''.join(pieces)
+                candidate = copy.deepcopy(pending)
+                try:
+                    rec = json.loads(raw)
+                except ValueError:
+                    rec = None
+                line_rows = [_finish(r, counts) for r in rows_fn(rec, pending['line'], candidate, ids, cfg, hostname)] if isinstance(rec, dict) else []
+                sizes = []
+                for r in line_rows:
+                    size = len(json.dumps(r).encode()) + 2
+                    if size + 2 > BATCH_BYTES:
+                        # Body truncation normally suffices; a shell command or metadata can also be huge.
+                        for k, v in r.items():
+                            if isinstance(v, str):
+                                r[k] = v.encode()[:BODY_CAP].decode(errors='ignore')
+                        r['truncated'] = True
+                        size = len(json.dumps(r).encode()) + 2
+                        while size + 2 > BATCH_BYTES:
+                            k = max((k for k, v in r.items() if isinstance(v, str)),
+                                    key=lambda k: len(json.dumps(r[k])))
+                            r[k] = r[k][:len(r[k]) // 2]
+                            size = len(json.dumps(r).encode()) + 2
+                    sizes.append(size)
+                start = pending.get('row', 0)
+                line_rows, sizes = line_rows[start:], sizes[start:]
+                if batch and (len(batch) + len(line_rows) > BATCH_ROWS or nbytes + sum(sizes) > BATCH_BYTES):
+                    if not send(batch):
+                        return counts
+                    checkpoint(pending)   # candidate has not entered this acknowledged batch
+                    batch, nbytes = [], 2
+                candidate.update(offset=fh.tell(), line=pending['line'] + 1, row=0)
+                for i, (r, size) in enumerate(zip(line_rows, sizes)):
+                    if batch and (len(batch) == BATCH_ROWS or nbytes + size > BATCH_BYTES):
+                        if not send(batch):
+                            return counts
+                        # A line can span batches. Keep its pre-parse state and a row cursor until every row
+                        # has been accepted, so retries neither lose usage state nor resend accepted blocks.
+                        pending['row'] = start + i
+                        checkpoint(pending)
+                        batch, nbytes = [], 2
+                    batch.append(r)
+                    nbytes += size
+                pending = candidate
+            if batch:
+                if not send(batch):
+                    return counts
+            checkpoint(pending)
     return counts
 
 

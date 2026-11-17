@@ -29,7 +29,7 @@ Even in `enforce` mode:
 - Only these tools are checked: `Edit`, `Write`, `MultiEdit` and `NotebookEdit` in Claude Code, `apply_patch` in Codex. A shell command that writes a file (`sed -i`, `>`, `git checkout`, a script) is not checked.
 - The check fails open. If CtrlB does not answer within two seconds, or answers with an error, the edit goes ahead and the error is written to `~/.ctrlb/hooks.log`.
 - A key without the `relay.write` permission (a Viewer) gets `403` from the check, and the edit goes ahead.
-- `CTRLB_ENFORCE=off` on a machine skips the check there. `CTRLB_OFF=1` turns every hook off.
+- `CTRLB_ENFORCE=off` on a machine skips edit checks, including automatic slot claims. Done evidence witnessing still runs and can refuse unmatched evidence. `CTRLB_OFF=1` turns every hook off.
 - Agents connected only through OTEL, or through HTTP without a hook, are not checked.
 - Codex skips new or changed hooks until you trust them with `/hooks`.
 

@@ -98,7 +98,7 @@ A `PreToolUse` hook runs before `Edit`, `Write`, `MultiEdit` and `NotebookEdit` 
 | `advisory` (default) | The agent gets a note naming the holder and the claim call to make. The edit goes ahead. |
 | `enforce` | The edit is refused. The reason names the holder and the claim call to make. |
 
-The hook gives up after two seconds. On a timeout, CtrlB not reachable, or any other error, the edit goes ahead and the error goes to `~/.ctrlb/hooks.log`. Set `CTRLB_ENFORCE=off` to skip the check on one machine.
+The hook gives up after two seconds. On a timeout, CtrlB not reachable, or any other error, the edit goes ahead and the error goes to `~/.ctrlb/hooks.log`. Set `CTRLB_ENFORCE=off` to skip edit checks, including automatic slot claims, on one machine. Done evidence witnessing still runs and can refuse unmatched evidence.
 
 ## What is uploaded
 
@@ -123,7 +123,7 @@ Before upload, text that looks like a secret is replaced with `[REDACTED]`. That
 | | `user` | the key's user (its `email` claim), written by `bin/configure.py`; `user_name` on the rows is always this user, decoded from the key in use |
 | `CTRLB_USER` | | read for compatibility: the agent label when `CTRLB_AGENT` is unset; never `user_name` |
 | `CTRLB_DATASET` | `dataset` | sessions dataset (default `agent_sessions`) |
-| `CTRLB_ENFORCE` | `enforce` | `off` skips the edit check on this machine |
+| `CTRLB_ENFORCE` | `enforce` | `off` skips edit checks and automatic slot claims on this machine; done evidence witnessing still runs |
 | `CTRLB_OFF=1` | | turns every hook off |
 | `CTRLB_HOME` | | where the config, log and upload state live (default `~/.ctrlb`) |
 

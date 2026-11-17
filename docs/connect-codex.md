@@ -13,6 +13,8 @@ The installer writes CtrlB into Codex's `config.toml`. After that, Codex does wh
 - At session start the agent is told its run id and agent id. Before each `apply_patch`, the files the patch names are checked against the run's claims.
 
 It needs Codex CLI 0.166 or newer and Python 3.9 or newer. Nothing else is installed.
+On Python 3.9 and 3.10, the installer uses `codex mcp list` with an isolated temporary home to validate TOML;
+keep `codex` on `PATH`, or run the installer with Python 3.11 or newer. It refuses to write unvalidated TOML.
 
 For local setup, see [Local mode](local-mode.md).
 

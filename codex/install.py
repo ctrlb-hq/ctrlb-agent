@@ -16,11 +16,12 @@ The MCP URL defaults to CTRLB_MCP_URL, or CTRLB_URL + /mcp, or the url in ~/.ctr
 The block sits between two marker comments. A run replaces the block, so running it twice changes nothing; a run
 that would change nothing writes nothing. Before writing, the old file is copied to config.toml.ctrlb-backup-<time>.
 --dry-run prints the diff and writes nothing. Codex skips new or changed hooks until you trust them with /hooks."""
-import argparse, datetime, difflib, json, os, re, shutil, sys, tempfile
+import argparse, datetime, difflib, json, os, re, shutil, subprocess, sys, tempfile
 sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'lib'))
 import common  # noqa: E402
+import redact  # noqa: E402
 
 BEGIN = '# >>> ctrlb-agent: written by codex/install.py; run it again to change this block, --uninstall to remove it'
 END = '# <<< ctrlb-agent'
@@ -44,7 +45,7 @@ class InstallError(Exception):
 
 def q(s):
     """A TOML basic string (JSON string escaping is valid TOML)."""
-    return json.dumps(s)
+    return json.dumps(s, ensure_ascii=False)
 
 
 def sh_dq(s):
@@ -141,6 +142,26 @@ def validate(text):
     try:
         import tomllib                              # Python 3.11+
     except ImportError:
+        # Older supported Pythons have no TOML parser. Ask Codex to parse an isolated copy, or refuse rather
+        # than assume our conflict scanner understands every valid spelling of the user's configuration.
+        cli = shutil.which('codex')
+        if not cli:
+            raise InstallError('TOML validation requires Python 3.11+ or the Codex CLI on PATH; nothing written')
+        with tempfile.TemporaryDirectory(prefix='ctrlb-toml-') as home:
+            with open(os.path.join(home, 'config.toml'), 'w', encoding='utf-8') as fh:
+                fh.write(text)
+            env = {k: v for k, v in os.environ.items() if not k.startswith('CTRLB_')}
+            env.update(HOME=home, CODEX_HOME=home, CTRLB_HOME=home)
+            try:
+                result = subprocess.run([cli, 'mcp', 'list'], env=env, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                raise InstallError('could not validate TOML with Codex; use Python 3.11+; nothing written') from None
+            if result.returncode:
+                detail = result.stderr.decode('utf-8', errors='replace')
+                detail = ' '.join(redact.redact(hide_header_values(detail))[0].split())[:500]
+                raise InstallError('Codex could not parse the resulting config.toml; nothing written'
+                                   + (': ' + detail if detail else ''))
         return
     try:
         doc = tomllib.loads(text)
@@ -158,15 +179,24 @@ def backup_path(path):
     return p
 
 
+def has_credentials(text):
+    return bool(re.search(r'''(?:^|[\s.{,])(?:["']?(?:headers|http_headers|bearer_token)["']?\s*(?:=|\.)|\[[^\]\n]*\.headers\])''', text))
+
+
 def write(path, text):
-    """Back up the old file, then replace it atomically, keeping its mode. Returns the backup path ('' when the file
+    """Back up the old file, then replace it atomically, restricting credentials to 0600. Returns the backup path ('' when the file
     did not exist)."""
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     backup, mode = '', 0o600
     if os.path.exists(path):
         backup = backup_path(path)
         shutil.copy2(path, backup)
+        with open(path) as fh:
+            if has_credentials(fh.read()):
+                os.chmod(backup, 0o600)
         mode = os.stat(path).st_mode & 0o777
+    if has_credentials(text):
+        mode = 0o600
     # a new temporary file each time, created 0600 (mkstemp), so nothing is written through an existing file or link
     # and the new text (which can hold OTEL headers) is never readable by others; the old mode is applied before the
     # replace
@@ -185,18 +215,42 @@ def write(path, text):
     return backup
 
 
-HEADERS_LINE = re.compile(r'^([ +\-]\s*headers\s*=\s*\{)(.*)(\}\s*)$')
+HEADERS_LINE = re.compile(r'''(?:^|[\s.{,])(?:["']?headers["']?)\s*(?:=|\.)''')
+HEADER_ITEM = re.compile(r'''\s*((?:"(?:\\.|[^"\\])*"|'[^']*'|[A-Za-z0-9_-]+))\s*=\s*(?:"(?:\\.|[^"\\])*"|'[^']*')\s*(?:,|$)''')
 
 
-def hide_header_values(diff):
-    """The diff with every value in a `headers = { ... }` line replaced by "<hidden>": the OTEL headers usually carry
-    a credential, and a dry run prints to a terminal or an agent's transcript."""
+def hide_header_values(text):
+    """Hide header assignments before diffing. Suppress the rest of their table too, so multiline literal strings
+    and inline tables cannot leak through a later diff hunk."""
     out = []
-    for line in diff.splitlines(keepends=True):
-        m = HEADERS_LINE.match(line.rstrip('\n'))
+    hidden, multiline = False, ''
+    for line in text.splitlines(keepends=True):
+        m = HEADER_RE.match(line) if not multiline else None
         if m:
-            body = re.sub(r'(=\s*)"(?:[^"\\]|\\.)*"', r'\1"<hidden>"', m.group(2))
-            line = m.group(1) + body + m.group(3) + ('\n' if line.endswith('\n') else '')
+            hidden = _name(m.group(2)).endswith('.headers')
+            out.append(line)
+            continue
+        if HEADERS_LINE.search(line):
+            hidden = True
+            body = line.partition('=')[2].strip()
+            if body.startswith('{') and body.endswith('}') and '"""' not in body and "'''" not in body:
+                body, keys, pos = body[1:-1].strip(), [], 0
+                for item in HEADER_ITEM.finditer(body):
+                    if item.start() != pos:
+                        break
+                    keys.append(item.group(1))
+                    pos = item.end()
+                if pos == len(body):
+                    out.append(line.partition('=')[0] + '= { ' + ', '.join(k + ' = "<hidden>"' for k in keys)
+                               + ' }' + ('\n' if line.endswith('\n') else ''))
+                    continue
+        if hidden:
+            for quote in re.findall(r'''(?<!\\)(?:"""|\x27\x27\x27)''', line):
+                if not multiline:
+                    multiline = quote
+                elif quote == multiline:
+                    multiline = ''
+            line = '# headers = <hidden>' + ('\n' if line.endswith('\n') else '')
         out.append(line)
     return ''.join(out)
 
@@ -262,16 +316,21 @@ def main(argv=None):
         print(f'codex/install.py: {e}', file=sys.stderr)
         return 2
     if new == old:
+        if not a.dry_run and has_credentials(new):
+            os.chmod(path, 0o600)
+            print('config.toml contains credentials; permissions set to 0600')
         print(f'{path}: already up to date, nothing written')
         return 0
-    diff = ''.join(difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
-                                        fromfile=path, tofile=path + ' (new)'))
     if a.dry_run:
-        diff = hide_header_values(diff)
+        diff = ''.join(difflib.unified_diff(hide_header_values(old).splitlines(keepends=True),
+                                          hide_header_values(new).splitlines(keepends=True),
+                                          fromfile=path, tofile=path + ' (new)'))
         print(diff, end='' if diff.endswith('\n') else '\n')
         print('dry run: nothing written')
         return 0
     backup = write(path, new)
+    if has_credentials(new):
+        print('config.toml contains credentials; permissions set to 0600')
     print(f'{"removed the ctrlb-agent block from" if a.uninstall else "wrote the ctrlb-agent block to"} {path}')
     print(f'backup of the previous file: {backup}' if backup else 'there was no config.toml before; created it')
     if not a.uninstall:
