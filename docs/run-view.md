@@ -22,7 +22,7 @@ A table of runs in the time range, newest started first.
 | Started, duration | From the run's first row to its last |
 | Posts | `post` calls |
 | Claims held / refused | Claims answered `held: true`, and claims refused |
-| Done | Task names released with `finished=true` (file paths are never done) |
+| Done | Task names finished with `done` and evidence (file paths are never done) |
 | Open claims | Holds live now: not released, not done, lease not run out |
 | Duplicate edits | Keys edited by more than one agent |
 | Silent agents | Agents with no row for a while during a live run |

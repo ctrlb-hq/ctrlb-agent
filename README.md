@@ -164,3 +164,5 @@ python3 -I tests/run_tests.py
 ```
 
 The tests run against a local fake CtrlB server that answers with the responses in `tests/fixtures/seeker/`. Those responses are synthetic: they are written by hand, not recorded. When `claude` is installed, the tests also run `claude plugin validate` on the marketplace and the plugin. When `codex` is installed, they load the installer's output with `codex mcp list` in a temporary Codex home. The tests never touch `~/.codex/config.toml`.
+
+See [Contributing](CONTRIBUTING.md) for development and testing, [Releases](CONTRIBUTING.md#releases) for versioning and plugin updates, and [Security](SECURITY.md) for private vulnerability reporting.

@@ -1,7 +1,7 @@
 """Run this yourself in a terminal, not through an agent:  python3 -I bin/configure.py
-Asks for Seeker's URL, the sessions dataset, an optional run id, and your key (hidden input), reads the key's user
-from the key (its "email" claim, the one Seeker reads), writes ~/.ctrlb/config.json (mode 0600, readable only by you)
-and checks that Seeker answers. Environment variables CTRLB_* override the file. Flags (for scripts): --url,
+Asks for CtrlB's URL, the sessions dataset, an optional run id, and your key (hidden input), reads the key's user
+from the key (its "email" claim, the one CtrlB reads), writes ~/.ctrlb/config.json (mode 0600, readable only by you)
+and checks that CtrlB answers. Environment variables CTRLB_* override the file. Flags (for scripts): --url,
 --dataset, --run, --key-stdin (read the key from one line of stdin instead of a hidden prompt; the key is never taken
 from the command line). --user is accepted and ignored: the name on the rows is the key's user.
 --local [--port N] runs ctrlb init without prompts and prints exports that read the key from config.json."""

@@ -1,8 +1,8 @@
-"""Resource keys of CtrlB Relay, identical to Seeker's internal/pkg/relay Key. Both
-sides pass the same table, tests/fixtures/keys.json (copied from Seeker's tests/fixtures/keys.json).
+"""Resource keys of CtrlB Relay. lib/keys.json defines the resource kinds and examples;
+tests/fixtures/keys.json checks the same protocol cases. See tests/fixtures/README.md for proposing changes.
 
 key(resource, cwd) -> (key, kind). The resource is trimmed of surrounding whitespace. One that already carries a prefix
-of the kinds table (lib/keys.json, the same file Seeker embeds: "path:", "name:", "slot:", "contract:", case-sensitive)
+of the kinds table (lib/keys.json: "path:", "name:", "slot:", "contract:", case-sensitive)
 is keyed as that kind again, so key(key(r)) is key(r): a path body is cleaned as a path, any other body as a name. A
 prefix with nothing after it is invalid and keyed ('', ''). One containing a
 '/' or ending in a file extension is a path: cleaned as Go's path.Clean does ("./" stripped, "//" and "/./" collapsed,
@@ -12,7 +12,7 @@ collapsed to one space.
 
 edit_paths(paths, cwd) is what the package sends for the files an edit tool touches, in the check call of the pre-tool
 hooks and in the paths column of session rows: each path cleaned and made relative to cwd as key() does, once per key,
-and written so that Seeker's Key(p, cwd) keys it as a path even when the file name has no extension ("Makefile" is sent
+and written so that the CtrlB server recognises it as a path even when the file name has no extension ("Makefile" is sent
 as "./Makefile", so an edit of it is keyed path:Makefile from both harnesses)."""
 import json
 import os
@@ -21,7 +21,7 @@ import re
 PATH, NAME, SLOT, CONTRACT = 'path:', 'name:', 'slot:', 'contract:'
 
 # The kinds table: what each key prefix is (leasable, finishable, reopenable, checked_by_hook, default_lease_s).
-# lib/keys.json is Seeker's tests/fixtures/keys.json byte for byte.
+# lib/keys.json defines the resource kinds used by the client and the CtrlB server.
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'keys.json'), encoding='utf-8') as _fh:
     KINDS = json.load(_fh)['kinds']
 
@@ -30,7 +30,7 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'keys.json'),
 GO_SPACE = ('\t\n\v\f\r \x85\xa0            '
             '    　')
 _FIELDS = re.compile('[' + re.escape(GO_SPACE) + ']+')
-# Seeker's extensionPattern. RE2's \S is ASCII-only ([^\t\n\f\r ]) and its $ is the end of the text.
+# File extensions use the same pattern as the CtrlB server. RE2's \S is ASCII-only ([^\t\n\f\r ]) and its $ is the end of the text.
 _EXT = re.compile(r'[^\t\n\f\r ]*\.[A-Za-z0-9_-]*[A-Za-z][A-Za-z0-9_-]*\Z')
 
 

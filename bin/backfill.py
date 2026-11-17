@@ -1,5 +1,5 @@
 """Upload past Claude Code sessions (and their subagents) from ~/.claude/projects, or past Codex sessions from
-$CODEX_HOME/sessions (default ~/.codex/sessions), to CtrlB through Seeker.
+$CODEX_HOME/sessions (default ~/.codex/sessions), to CtrlB.
 Usage: backfill.py [--codex] [--project TEXT] [--count] [--yes]
   --codex         Codex rollouts instead of Claude Code transcripts
   --project TEXT  only project folders whose name contains TEXT (e.g. the repo name); with --codex, only sessions

@@ -1,11 +1,11 @@
 """Claude Code transcript -> session rows, one per content block, and incremental upload to
-Seeker with redaction. seq is the line number in the transcript file, so a row can be traced back to its place.
+CtrlB with redaction. seq is the line number in the transcript file, so a row can be traced back to its place.
 
 Beyond the content blocks:
-  run_id, agent   decision 4 (common.run_id, common.agent_name)
-  user_name       only the key's own user (common.key_user); omitted when the key carries none, and Seeker fills it
+  run_id, agent   resolved by common.run_id and common.agent_name
+  user_name       only the key's own user (common.key_user); omitted when the key carries none, and CtrlB fills it
   paths           JSON array text of the file paths an edit tool touched (Edit, Write, MultiEdit, NotebookEdit),
-                  on tool_use rows, normalised against the row's cwd by paths.edit_paths so Seeker keys them as the
+                  on tool_use rows, normalised against the row's cwd by paths.edit_paths so CtrlB keys them as the
                   claims are keyed; '' on every other row
   input_tokens,   from message.usage, once per message id (Claude Code repeats the usage on every block line of one
   output_tokens   message); input_tokens includes cache reads and cache writes. Floats; 0.0 elsewhere
@@ -22,7 +22,7 @@ SKIP_TYPES = {'mode', 'permission-mode', 'bridge-session', 'custom-title', 'agen
               'file-history-snapshot', 'file-history-delta', 'last-prompt', 'atis-latch', 'tools-used', 'attachment'}
 EDIT_TOOLS = ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
 BODY_CAP = 64 * 1024
-BATCH_ROWS, BATCH_BYTES = 500, 3_500_000   # Seeker takes at most 500 rows or 4 MB per records call
+BATCH_ROWS, BATCH_BYTES = 500, 3_500_000   # CtrlB takes at most 500 rows or 4 MB per records call
 
 
 def micros(ts):
@@ -95,7 +95,7 @@ def _base(cfg, ids, hostname, rec, ts, seq, parent, role, summ):
              block_type='', tool_name='', tool_use_id='', command='', paths='', body='', is_error=False,
              is_summary=summ, cwd=rec.get('cwd') or '', git_branch=rec.get('gitBranch') or '',
              cost_usd=0.0, input_tokens=0.0, output_tokens=0.0)
-    if cfg.get('user'):   # the key's own user (common.key_user), never CTRLB_USER; without it Seeker fills user_name
+    if cfg.get('user'):   # the key's own user (common.key_user), never CTRLB_USER; without it CtrlB fills user_name
         r['user_name'] = cfg['user']
     return r
 
@@ -196,7 +196,7 @@ def _finish(r, counts):
 
 def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
     """Send the complete lines of path added since the last upload. Returns {rows, lines, redacted}. The offset only
-    moves forward after Seeker accepts the rows, so a failed upload is retried next time. ids and rows_fn default to
+    moves forward after CtrlB accepts the rows, so a failed upload is retried next time. ids and rows_fn default to
     the Claude Code parser; rows_codex passes its own (rows_fn(rec, seq, state, ids, cfg, hostname) -> [row])."""
     counts = dict(rows=0, lines=0, redacted=0)
     until = time.monotonic() + max(0, deadline - time.time())

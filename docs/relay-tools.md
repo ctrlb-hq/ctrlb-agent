@@ -97,7 +97,7 @@ Answer: `{session_id, rows: [{ts, seq, block_idx, role, block_type, tool_name, t
 
 ### peers
 
-What the other agents in the run have posted, claimed and released, newest first. Call it before choosing a task.
+What the other agents in the run have posted, claimed and released, newest first. Call `peers` only when you are waiting for an answer or a handoff, or need context from the run's record; do not poll before each task. Start with `claim(next=true)`.
 
 | Argument | |
 |---|---|
@@ -226,7 +226,7 @@ Answer to `claim(resource="slugify", reopen=true)` on that finished task:
 
 ### release
 
-Give a claim back, or mark a task done. Finish tasks, just release files.
+Give a claim back: use `release` with `finished=false` to give a task back; release standalone files and slots when done with them. Finish tasks with `done` and evidence. The `finished=true` behavior below is retained for compatibility and is deprecated.
 
 | Argument | |
 |---|---|
@@ -452,9 +452,9 @@ release(resource="slot:devserver")  # after
 These are the rules for agents that share a run, worded for the relay tools. Paste them into the agent's system prompt or `AGENTS.md`, or run `/ctrlb-agent:relay <run id>` in Claude Code, which loads them as a skill.
 
 ```text
-1. Other agents are working in this same directory right now. Before starting a task, look at the task's files to see whether it is already done or in progress, and pick one that is not.
-2. Other agents are working in this same directory right now and share a relay with you (the ctrlb tools). Before starting a task, call peers to see what others have taken or finished, then post the task you are taking, do it, and post when it is done. Never take a task another agent has posted.
-3. Other agents are working in this same directory right now and share a relay with you (the ctrlb tools). Claim the task by the name your orchestrator registered (for example claim(resource="task 03 median"); tasks lists them). Its files come with it. If held is false, pick another task. Work only while you hold it. When the task is done, release it with finished=true. A file that belongs to no task is claimed by its path.
+1. Other agents may be working in the same files. Start with claim(next=true); once held, inspect the task's files and notes before changing them.
+2. Call peers only when you are waiting for an answer or a handoff, or need context from the run's record; do not poll before each task. Use post for status that no coordination tool covers.
+3. Claim the task by the name your orchestrator registered when you need a specific task (for example claim(resource="task 03 median"); tasks lists them). Its files come with it. If held is false, pick another free task; if none are free, post a note saying you have no task and stop. Work only while you hold it. Run the task's test command; when it passes, call done on the task name with that command, its exit code and its last output line as the evidence, and next=true. When the task has no test command, give the check you ran. A file that belongs to no task is claimed by its path. Use release with finished=false to give a task back; release standalone files and slots when done with them.
 ```
 
 For a script that starts several agents in one run, save the rules to `relay-rules.txt` and give every agent the same run id:
@@ -468,7 +468,7 @@ done
 wait
 ```
 
-Rule 3 is the one that stops two agents doing the same task. Register the run's tasks first, from the orchestrator or the script that starts the agents (`task(name, text, paths)` for each, or `POST .../briefs` with `paths`): a claim of a registered task then takes the task and its files in one step, so no two agents can each hold half of it, and a misspelled task name is refused with the registered one as `suggestion`. The files are handed back when the task is released, so another agent can edit them later; the task, released with `finished=true`, is what stops another agent from doing it again.
+Rule 3 is the one that stops two agents doing the same task. Register the run's tasks first, from the orchestrator or the script that starts the agents (`task(name, text, paths)` for each, or `POST .../briefs` with `paths`): a claim of a registered task then takes the task and its files in one step, so no two agents can each hold half of it, and a misspelled task name is refused with the registered one as `suggestion`. When your test passes, call `done` with the evidence and `next=true`: its files are handed back and the next free task is claimed in the same call. The finished task is what stops another agent from doing it again.
 
 To have agents share what they read, add this paragraph to the rules:
 

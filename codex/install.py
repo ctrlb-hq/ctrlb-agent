@@ -1,6 +1,6 @@
 """Connect Codex to CtrlB. Writes one block into $CODEX_HOME/config.toml (default ~/.codex/config.toml):
 
-  [mcp_servers.ctrlb]   Seeker's /mcp URL; the key is read from the CTRLB_KEY environment variable
+  [mcp_servers.ctrlb]   CtrlB's /mcp URL; the key is read from the CTRLB_KEY environment variable
                         (bearer_token_env_var), never written into the file; X-CtrlB-Run and X-CtrlB-Agent are sent
                         from CTRLB_RUN and CTRLB_AGENT when they are set (env_http_headers)
   [[hooks.<Event>]]     SessionStart, SubagentStart, PreCompact, SessionEnd, Stop, SubagentStop and PreToolUse

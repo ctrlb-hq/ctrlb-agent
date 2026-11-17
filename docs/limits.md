@@ -37,7 +37,7 @@ Even in `enforce` mode:
 
 - The first live hold on a key wins. Every other claim on it is refused with `held_by`, until the holder releases it or its lease runs out.
 - An agent that claims a key it already holds renews it: `held: true, renewed: true`, with the `lease_until` of the new hold.
-- Only a task name can be done. A task released with `finished=true` is refused to every later claim with `finished_by` and `finished_at`, until a claim passes `reopen=true` and starts a new round of work on it.
+- Only a task name can be done. Finish it with `done` and evidence of the passing check. A finished task is refused to every later claim with `finished_by` and `finished_at`, until a claim passes `reopen=true` and starts a new round of work on it.
 - A file path is never done. Releasing it always hands it back, whatever `finished` says, so it can be edited again in a later round. A `DONE` row already on a path, from before this rule, blocks nothing.
 - Claims are decided on the key, not on the text you pass. Paths are keyed relative to `cwd` and keep their case; names are lower-cased with their whitespace collapsed. A file with no extension, such as `Makefile`, is a name unless you claim `path:Makefile`.
 - Two spellings of one task are two keys. When the orchestrator registers the run's tasks, a claim of any other task name is refused with `unknown_task` and the registered name as `suggestion`; without registered tasks, claim the task name exactly as the task list gives it.
@@ -48,7 +48,7 @@ Even in `enforce` mode:
 - A claim lasts `leaseSeconds` (600 by default, 60 to 86,400) from its `HOLD` row, unless released. A claim's answer gives the end as `lease_until`.
 - Claiming the key again before the lease runs out renews it. When the lease runs out the claim is gone, and another agent can claim the key.
 - A `release` after the lease ran out, on a file path, a slot or with `finished=false`, writes nothing: it answers `released: 0`, and the key is not done. Claim it again, then release it.
-- On a task name with `finished=true`, a `release` after the lease ran out still finishes the task when your hold of its current round was never released, the round is not finished, and nobody else holds the task now. It answers `released: 1, finished: true, finished_after_lease: true`. `done` follows the same rule and answers `done: true, finished_after_lease: true`; its evidence rule still applies. When another agent holds the task now, nothing is written, and the `message` names that agent.
+- After the lease ran out, `done` still finishes a task when your hold of its current round was never released, the round is not finished, and nobody else holds the task now. It answers `done: true, finished_after_lease: true`; its evidence rule still applies. The deprecated `release(finished=true)` flow has the same lease rule. When another agent holds the task now, nothing is written, and the `message` names that agent.
 - A crashed or killed agent's claim lasts until its lease runs out.
 - For work that takes longer than the lease, raise `leaseSeconds` in the workspace's Relay settings.
 

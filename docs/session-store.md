@@ -23,7 +23,7 @@ In [local mode](local-mode.md), the session store lives in SQLite on this machin
 | **Key** | The normalised name a claim is decided on. A path becomes `path:<path>`, relative to the agent's working directory. Anything else becomes `name:<lower-cased name>`. `./src//app.py` and `src/app.py` are one key. |
 | **Claim** | An exclusive hold on a key (`claim`). The answer is `held: true` or `held: false` with the holder. |
 | **Lease** | How long a claim lasts unless released: 10 minutes by default. A crashed agent's claim ends when its lease runs out. |
-| **Done** | A task name released with `finished=true`. A done task is refused to later claims in the run, with `finished_by`, until a claim passes `reopen=true`. A file path is never done: releasing it always hands it back. |
+| **Done** | A task name finished with `done` and evidence of the check that passed. Use `next=true` to claim the next free task in the same call. A done task is refused to later claims in the run, with `finished_by`, until a claim passes `reopen=true`. A file path is never done: releasing it always hands it back. |
 | **Round** | One stretch of work on a task name, from its first claim, or from a `REOPEN`, to its `DONE`. A claim with `reopen=true` on a done task starts the next round. |
 | **Check** | Before an edit, the plugin's hook asks whether another agent holds the file. The answer depends on the workspace's `enforce` setting. |
 
@@ -32,7 +32,7 @@ Claims are advisory unless the workspace sets `enforce` to `enforce`. Relay reco
 ## How rows get there
 
 - The Claude Code plugin and the Codex hooks upload session rows to CtrlB at the end of each turn, before compaction and at session end. Secrets are redacted first. See [Connect Claude Code](connect-claude-code.md) and [Connect Codex](connect-codex.md).
-- Relay rows are written by CtrlB when an agent calls `post`, `claim`, `release`, or when an edit check finds a conflict. Each row is written through to the lake before CtrlB answers, so the next read by any agent sees it.
+- Relay rows are written by CtrlB when an agent calls `post`, `claim`, `done`, `release`, or when an edit check finds a conflict. Each row is written through to the lake before CtrlB answers, so the next read by any agent sees it.
 - Nothing is updated or deleted. A release is a new row; a claim's state is read from the rows.
 - Both datasets are ordinary logs datasets. Data Explorer, alerts and SQL see them.
 
@@ -72,7 +72,7 @@ agent-a                        relay dataset                        agent-b
 - A live hold is a `HOLD` (or `REOPEN`) row of the key's current round with no `RELEASE` or `DONE` row for its nonce, younger than the lease.
 - Holds are ordered by time, then agent, then nonce. Every reader sees the same rows in the same order, so both agents agree on the first.
 - The wait covers the time a written row takes to become readable. On the lake that is a few milliseconds; the default wait is 20 ms.
-- `release` writes `DONE` (`finished=true` on a task name) or `RELEASE` (`finished=false`, and always on a file path) for the caller's live holds on the key.
+- `done` writes `DONE` with evidence for a task name. `release` writes `RELEASE` for a file or slot, or a task with `finished=false`. The older `release(finished=true)` task completion flow is deprecated and refused when evidence is required; use `done`.
 - A claim with `reopen=true` on a done task writes a `REOPEN` row instead of a `HOLD` and follows the same steps, so two agents that reopen at once agree on one holder. Only rows from that `REOPEN` on decide the key; the earlier rounds stay in the record.
 - `check` is step 3 for each path, with no hold written.
 

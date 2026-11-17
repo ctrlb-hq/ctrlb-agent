@@ -19,7 +19,7 @@ A rollout is ~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<time>-<thread id>.jsonl
 
 session_meta gives the ids, cwd and git branch; turn_context updates cwd. A rollout whose session_meta names a
 parent_thread_id is a subagent: parent_session is that id, agent_id its own thread id, and it joins its parent's
-run (decision 4). Upload is incremental by byte offset with FileState, through rows_claude.upload_file."""
+run. Upload is incremental by byte offset with FileState, through rows_claude.upload_file."""
 import functools, glob, json, os, re, shlex
 import common, rows_claude
 from paths import edit_paths as normalise_edit_paths
@@ -186,7 +186,7 @@ def _row(cfg, ids, st, hostname, ts, seq, role):
              block_type='', tool_name='', tool_use_id='', command='', paths='', body='', is_error=False,
              is_summary=False, cwd=st.get('cwd') or '', git_branch=st.get('branch') or '', cost_usd=0.0,
              input_tokens=0.0, output_tokens=0.0)
-    if cfg.get('user'):   # the key's own user (common.key_user), never CTRLB_USER; without it Seeker fills user_name
+    if cfg.get('user'):   # the key's own user (common.key_user), never CTRLB_USER; without it CtrlB fills user_name
         r['user_name'] = cfg['user']
     return r
 

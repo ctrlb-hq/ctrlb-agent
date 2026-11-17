@@ -162,10 +162,10 @@ The `key` is what the claim is decided on. A resource with a `/` or a file exten
 curl -sS -X DELETE "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/claims" \
   -H "Authorization: Bearer <your key>" \
   -H "Content-Type: application/json" \
-  -d '{"agent": "agent-a", "resource": "slugify", "finished": true}'
+  -d '{"agent": "agent-a", "resource": "slugify", "finished": false}'
 ```
 
-Answer: `{"released": 1, "finished": true, "resource": "slugify", "key": "name:slugify"}`. `released` is 0 when the agent held no live claim on the key, for example after its lease ran out; then nothing is written. On a task name, `finished: true` (the default) marks it done, and later claims are refused with `finished_by` unless they pass `"reopen": true`. `finished: false` hands it back for another agent to claim. After the lease ran out, a release with `finished: true` on a task name still finishes it when the agent's hold of the current round was never released, the round is not finished, and nobody else holds the task now; the answer then has `"released": 1` and `"finished_after_lease": true`. When another agent holds it now, nothing is written and the `message` names that agent (see [Relay tools](relay-tools.md#release)). A file path is always handed back, whatever `finished` says: release `src/app.py` and the answer is `finished: false`, with a `message` saying so.
+Answer: `{"released": 1, "finished": false, "resource": "slugify", "key": "name:slugify"}`. `finished: false` hands the task back for another agent to claim. `released` is 0 when the agent held no live claim on the key, for example after its lease ran out; then nothing is written. A file path is always handed back, whatever `finished` says. Finish tasks through the MCP `done` tool with evidence of the passing check and `next=true`, as described in [Relay tools](relay-tools.md#done-finish-a-task). The older `finished: true` release flow is deprecated and refused when evidence is required; its compatibility behavior is documented under [release](relay-tools.md#release).
 
 ### Check paths before an edit
 
