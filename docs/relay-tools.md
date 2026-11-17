@@ -190,7 +190,7 @@ Claims do not wait. A claim that sends `wait_s` is refused (HTTP 400): `wait_s i
 Answer to `claim(resource="task 03 median", takeover=true)` when agent-b stopped while holding it (`tasks` showed it `stalled`): you hold it and its files. Read its evidence and notes (`tasks`, `briefs`, `peers`) and continue it.
 
 ```json
-{"held": true, "resource": "task 03 median", "key": "name:task 03 median", "lease_until": 1793000900000000, "paths": ["path:src/median.py"], "token": "9f2c...", "taken_over_from": "agent-b", "stall": {"holder": "agent-b", "last_activity": "edit", "last_activity_ts": 1793000200000000, "idle_s": 310, "stall_after_s": 300}}
+{"held": true, "resource": "task 03 median", "key": "name:task 03 median", "lease_until": 1793000900000000, "paths": ["path:src/median.py"], "token": "<hold nonce>", "taken_over_from": "agent-b", "stall": {"holder": "agent-b", "last_activity": "edit", "last_activity_ts": 1793000200000000, "idle_s": 310, "stall_after_s": 300}}
 ```
 
 Answer when the holder is still working: nothing is written. Pick other work.

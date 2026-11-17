@@ -3,6 +3,7 @@
 Config comes from environment variables, falling back to ~/.ctrlb/config.json (written by bin/configure.py, mode 0600):
 
   CTRLB_URL      Seeker's URL                                   file key "url"
+  CTRLB_ALLOW_HTTP=1  allow plain HTTP to a non-loopback server (HTTPS is the default requirement)
   CTRLB_KEY      the user's MCP key, sent as Authorization: Bearer   file key "key"
   (no variable)  the key's user: the "email" claim of the key, as Seeker reads it; the only source of user_name
                                                                  file key "user" (written by bin/configure.py)
@@ -23,7 +24,8 @@ Config comes from environment variables, falling back to ~/.ctrlb/config.json (w
   CTRLB_HOME     where config.json, hooks.log and upload state live (default ~/.ctrlb)
 
 Everything is off when the URL or the key is missing or the dataset name is not letters, digits and _."""
-import base64, fcntl, hashlib, json, os, re, shutil, socket, subprocess, time, urllib.error, urllib.parse, urllib.request
+import base64, fcntl, hashlib, ipaddress, json, os, re, shutil, socket, subprocess, time, urllib.error, urllib.parse, urllib.request
+from redact import redact
 
 VERSION = '0.2.1'
 HOME = os.environ.get('CTRLB_HOME') or os.path.expanduser('~/.ctrlb')
@@ -110,6 +112,33 @@ def loopback_url(cfg):
         return url.scheme in ('http', 'https') and url.hostname in ('127.0.0.1', 'localhost')
     except ValueError:
         return False
+
+
+def _loopback_host(host):
+    if host == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_url(url):
+    """API traffic requires HTTPS, loopback HTTP, or an explicit environment opt-in for remote HTTP."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        valid = parsed.scheme in ('http', 'https') and bool(parsed.hostname)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError('the URL must start with http:// or https:// and include a host')
+    if parsed.scheme == 'http' and not _loopback_host(parsed.hostname) and os.environ.get('CTRLB_ALLOW_HTTP') != '1':
+        raise ValueError('HTTPS is required for non-loopback URLs; set CTRLB_ALLOW_HTTP=1 to allow remote plain HTTP')
+
+
+class _NoAPIRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
 
 
 class _NoHealthRedirect(urllib.request.HTTPRedirectHandler):
@@ -273,6 +302,7 @@ def request(cfg, method, path, body=None, query=None, timeout=10):
     """One call to Seeker. Returns the decoded JSON answer ({} when empty). Raises SeekerError on an HTTP error and
     OSError / TimeoutError when Seeker cannot be reached."""
     url = cfg['url'] + path
+    validate_url(url)
     if query:
         url += '?' + urllib.parse.urlencode({k: v for k, v in query.items() if v is not None and v != ''})
     data = json.dumps(body).encode() if body is not None else None
@@ -280,12 +310,16 @@ def request(cfg, method, path, body=None, query=None, timeout=10):
         'Content-Type': 'application/json', 'Accept': 'application/json',
         'Authorization': 'Bearer ' + cfg['key'], 'User-Agent': 'ctrlb-agent/' + VERSION})
     try:
-        open_request = urllib.request.urlopen
-        if local_mode(cfg) and loopback_url(cfg):
-            open_request = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+        handlers = [_NoAPIRedirect()]
+        if local_mode(cfg) and _loopback_host(urllib.parse.urlsplit(url).hostname):
+            handlers.append(urllib.request.ProxyHandler({}))
+        open_request = urllib.request.build_opener(*handlers).open
         with open_request(req, timeout=timeout) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as e:
+        if 300 <= e.code < 400:
+            e.close()
+            raise SeekerError(e.code, 'API redirects are not allowed; configure the final server URL') from None
         raise SeekerError(e.code, e.read()[:300].decode(errors='replace')) from None
     try:
         return json.loads(raw or b'{}')
@@ -424,7 +458,7 @@ def handoff_all(cfg, run, agent, text, cwd='', timeout=0.8):
     """POST /ai/relay/{dataset}/runs/{run}/handoffs with all=true and no receiver (Seeker decision 36): every hold the
     agent has in the run is handed off openly (a task: RELEASE plus a NOTE with text) or released (a path, a slot), in
     one write."""
-    body = dict(agent=agent, all=True, to='', text=text)
+    body = dict(agent=agent, all=True, to='', text=redact(text)[0])
     if cwd:
         body['cwd'] = cwd
     return request(cfg, 'POST', f"/ai/relay/{_seg(cfg['dataset'])}/runs/{_seg(run)}/handoffs", body, timeout=timeout)

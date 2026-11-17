@@ -30,6 +30,8 @@ export CTRLB_KEY="<your key>"
 
 `CTRLB_URL` and `CTRLB_KEY` are what the hooks use to upload rows and check edits. `CTRLB_MCP_URL` is the MCP server's address. Claude Code expands it, and the key, in the plugin's `.mcp.json` when it starts.
 
+Use the final HTTPS URL; the hooks reject API redirects. Plain HTTP is allowed on loopback (`localhost`, `127.0.0.0/8`, `::1`). To use a remote self-hosted HTTP server, export `CTRLB_ALLOW_HTTP=1` before running `bin/configure.py` and Claude Code. This sends the key and session text without encryption.
+
 ## 2. Install the plugin
 
 ```sh

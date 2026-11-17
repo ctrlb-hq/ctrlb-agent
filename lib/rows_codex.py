@@ -128,16 +128,18 @@ def _text(o):
     if isinstance(o, list):
         return '\n'.join(x.get('text') or '' for x in o if isinstance(x, dict) and x.get('type') in TEXT_ITEMS)
     if isinstance(o, dict):
-        return o.get('content') if isinstance(o.get('content'), str) else json.dumps(o)
+        return o.get('content') if isinstance(o.get('content'), str) else o
     return ''
 
 
 def _failed(o, text):
     if isinstance(o, dict) and o.get('success') is False:
         return True
-    if text.startswith('Script failed'):
+    if isinstance(text, dict):
+        text = json.dumps(text)
+    if isinstance(text, str) and text.startswith('Script failed'):
         return True
-    if text.startswith('{'):
+    if isinstance(text, str) and text.startswith('{'):
         try:
             meta = json.loads(text).get('metadata') or {}
             return bool(meta.get('exit_code'))
@@ -167,24 +169,25 @@ def _num(v):
 def _tool_use(r, p, st):
     t = p.get('type')
     if t == 'custom_tool_call':
-        name, raw = p.get('name') or '', p.get('input') if isinstance(p.get('input'), str) else json.dumps(p.get('input'))
-        r['command'] = '\n'.join(exec_commands(raw)) if name == 'exec' else ''
+        name, raw = p.get('name') or '', p.get('input')
+        scan = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+        r['command'] = '\n'.join(exec_commands(scan)) if name == 'exec' else ''
         r['body'] = raw
-        paths = patch_paths(raw)
+        paths = input_paths(raw)
     elif t == 'function_call':
         name, raw = p.get('name') or '', p.get('arguments') or ''
         try:
             args = json.loads(raw) if isinstance(raw, str) else raw
         except ValueError:
-            args = {}
+            args = raw
         r['command'] = shell_command(args) if name in SHELL_TOOLS or name.endswith('exec_command') else ''
-        r['body'] = r['command'] or (raw if isinstance(raw, str) else json.dumps(raw))
+        r['body'] = r['command'] or raw
         paths = input_paths(args) if isinstance(args, (dict, list)) else patch_paths(raw)
     else:                                   # local_shell_call
         name = 'local_shell'
         action = p.get('action') or {}
         r['command'] = shell_command(action)
-        r['body'] = r['command'] or json.dumps(action)
+        r['body'] = r['command'] or action
         paths = []
     r['block_type'], r['tool_name'] = 'tool_use', name
     r['tool_use_id'] = p.get('call_id') or p.get('id') or ''
@@ -223,7 +226,7 @@ def rows_from(rec, seq, st, ids, cfg, hostname):
         if rid:
             mids.append(rid)
         r = _row(cfg, ids, st, hostname, ts, seq, 'system')
-        r.update(block_type='result', body=json.dumps(u), input_tokens=_num(u.get('input_tokens')),
+        r.update(block_type='result', body=u, input_tokens=_num(u.get('input_tokens')),
                  output_tokens=_num(u.get('output_tokens')))
         return [r]
     if t != 'response_item':

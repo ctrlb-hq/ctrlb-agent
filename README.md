@@ -8,6 +8,8 @@ CtrlB's agent package for Claude Code and Codex. It does three things:
 
 Everything goes to the CtrlB URL with your MCP key. Nothing talks to the lake directly. Standard library Python 3.9 or newer; nothing else is installed.
 
+Use an HTTPS CtrlB URL. The hooks and `bin/configure.py` allow plain HTTP for loopback (`localhost`, `127.0.0.0/8`, `::1`). For a self-hosted server on another host, set `CTRLB_ALLOW_HTTP=1` in the environment when configuring and running your agent to opt into plain HTTP; the key and session text then travel unencrypted. API requests reject redirects, so configure the final server URL.
+
 For Recall and Relay on one machine with a standalone binary and SQLite, see [Local mode](docs/local-mode.md). It includes installation, agent setup, coordinating several agents, limits and moving your records to hosted CtrlB.
 
 Local mode has five recall tools: `search_sessions`, `find_command`, `next_actions`, `fetch_records` and `session_index`. `session_index` lists the caller's recent sessions. All five read only stored records and make no model call, and are listed with or without `CTRLB_RUN`. Local mode writes no running notes or memories; those need a model.
@@ -113,6 +115,7 @@ Before upload, text that looks like a secret is replaced with `[REDACTED]`. That
 | Variable | `~/.ctrlb/config.json` key | Meaning |
 |---|---|---|
 | `CTRLB_URL` | `url` | The CtrlB URL (the Connect page shows it) |
+| `CTRLB_ALLOW_HTTP=1` | | allow plain HTTP to a non-loopback server; HTTPS is required otherwise |
 | `CTRLB_KEY` | `key` | your MCP key |
 | `CTRLB_MCP_URL` | `mcp_url` | The CtrlB URL plus `/mcp`, for the MCP server |
 | `CTRLB_RUN` | `run` | run id for every session (default: each session is its own run) |

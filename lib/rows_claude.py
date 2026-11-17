@@ -117,7 +117,7 @@ def _cost_row(rec, seq, st, ids, cfg, hostname):
         r['body'] = str(rec.get('result') or '')
         r['is_error'] = bool(rec.get('is_error'))
     else:
-        r['body'] = json.dumps({k: v for k, v in rec.items() if k not in ('type', 'sessionId')})
+        r['body'] = {k: v for k, v in rec.items() if k not in ('type', 'sessionId')}
     return [r]
 
 
@@ -156,7 +156,7 @@ def rows_from(rec, seq, st, ids, cfg, hostname):
             r['command'] = str(inp.get('command', '')) if r['tool_name'] == 'Bash' else ''
             p = normalise_edit_paths(edit_paths(r['tool_name'], inp), r['cwd'])
             r['paths'] = json.dumps(p) if p else ''
-            r['body'] = r['command'] or json.dumps(inp)
+            r['body'] = r['command'] or inp
         elif bt == 'tool_result':
             r['tool_use_id'] = b.get('tool_use_id') or ''
             r['tool_name'] = st['names'].get(r['tool_use_id'], '')
@@ -182,6 +182,8 @@ def _finish(r, counts):
     n = 0
     for k in ('body', 'command', 'paths'):
         r[k], k_n = redact(r[k])
+        if not isinstance(r[k], str):
+            r[k] = json.dumps(r[k], ensure_ascii=False)
         n += k_n
     counts['redacted'] += n
     raw = r['body'].encode()

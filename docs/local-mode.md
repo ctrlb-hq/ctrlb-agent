@@ -14,6 +14,8 @@ All five tools read only stored records and make no model call. They are listed 
 
 Local mode writes no running notes or memories; those need a model.
 
+The Python hooks allow plain HTTP on loopback (`localhost`, `127.0.0.0/8`, `::1`). Other server URLs require HTTPS unless you set `CTRLB_ALLOW_HTTP=1` when configuring and running the agent to allow unencrypted remote HTTP. API redirects are rejected; use the final server URL. This setting does not change the binary download policy.
+
 ## Install
 
 Use Python 3.9 or newer on macOS or Linux, with an arm64 or amd64 processor. From a clone of this repository:
