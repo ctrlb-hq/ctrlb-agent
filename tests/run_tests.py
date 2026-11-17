@@ -350,7 +350,7 @@ def recall_rule(text, sid):
 
 def test_layout():
     pj = load('../../plugin/.claude-plugin/plugin.json')
-    check('plugin.json: name ctrlb-agent, version 0.2.1', pj.get('name') == 'ctrlb-agent' and pj.get('version') == '0.2.1')
+    check('plugin.json: name ctrlb-agent, version 0.2.2', pj.get('name') == 'ctrlb-agent' and pj.get('version') == '0.2.2')
     mk = load('../../.claude-plugin/marketplace.json')
     ent = mk.get('plugins') or []
     check('marketplace.json: one entry, ctrlb-agent at ./plugin', len(ent) == 1 and ent[0]['name'] == 'ctrlb-agent'
