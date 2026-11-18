@@ -1071,24 +1071,24 @@ def test_briefs_wording():
     tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
     sections = re.findall(r'^### (\w+)$', tools, re.M)
     relay = sections[sections.index('peers'):] if 'peers' in sections else []
-    check('relay-tools: fourteen relay tools, handoff, ask and answer after release, then brief, briefs, task, tasks, history, contract, contracts',
-          relay == ['peers', 'post', 'claim', 'release', 'handoff', 'ask', 'answer', 'brief', 'briefs', 'task', 'tasks', 'history', 'contract', 'contracts'],
+    check('relay-tools: fifteen relay tools, read_text after peers, handoff, ask and answer after release, then brief, briefs, task, tasks, history, contract, contracts',
+          relay == ['peers', 'read_text', 'post', 'claim', 'release', 'handoff', 'ask', 'answer', 'brief', 'briefs', 'task', 'tasks', 'history', 'contract', 'contracts'],
           ','.join(relay))
     check('relay-tools: contract and contracts documented, instead of a CONTRACT note',
           '{contracts: [{name, key, agent, ts, age_s, text, paths, changed_since, text_since, text_changed_at?, changed_since_read?}], last_read?, read_at?}' in tools
           and 'instead of a `CONTRACT:` note' in tools
           and 'changed_since?}]}' in tools)
     check('relay-tools: peers kind and open, ask and answer documented',
-          '| `open` |' in tools and 'peers(kind="question", open=true)' in tools and 'answered: {agent, ts, text}' in tools
-          and 'Answer: `{id, run_id, agent}`' in tools and 'Do not post a QUESTION note' in tools)
+          '| `open` |' in tools and 'peers(kind="question", open=true)' in tools and 'answered: {agent, ts, text, row_id?, text_len?}' in tools
+          and 'Answer: `{id, run_id, agent, row_id, text_len, kept, whole, ref?, truncated?, note?}`' in tools and 'Do not post a QUESTION note' in tools)
     check('relay-tools: hold required, its four reasons and the claim token',
           '## Edits need a claim (hold required)' in tools and all(f'| `{r}` |' in tools for r in ('held', 'lapsed', 'unheld', 'stale_round'))
           and 'A held claim answers `token`' in tools)
     check('relay-tools: handoff documents to, handed and held_by',
           '| `to` |' in tools and '{handed: true, resource, key, to, lease_until, token, paths?}' in tools
           and '{handed: false, resource, key, to, held_by?, message}' in tools)
-    check('relay-tools: eighteen tools, the writes listed, briefs answers the newest brief per key',
-          'gives an agent eighteen tools' in tools and '`post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `task` and `contract` write' in tools
+    check('relay-tools: nineteen tools, the writes listed, briefs answers the newest brief per key',
+          'gives an agent nineteen tools' in tools and '`post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `task` and `contract` write' in tools
           and '{briefs: [{key, resource, agent, text, ts, age_s, paths?, changed_since?}]}' in tools and '`BRIEF` for a brief' in tools)
     check('relay-tools: the briefs paragraph for the rules', 'call briefs for it and read the brief first' in tools)
     check('relay-tools: rule 3 claims the registered task with its files, and finishes it', registered_rule(tools))

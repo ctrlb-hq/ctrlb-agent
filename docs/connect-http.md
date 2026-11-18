@@ -133,7 +133,7 @@ When `text_len` is larger than the text shown, read it with the row's `row_id` b
 ```sh
 curl -sS -G "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/text" \
   -H "Authorization: Bearer <your key>" \
-  --data-urlencode "row_id=<row id>"
+  --data-urlencode "row_id=6f1c2a9e0b7d4c3a8e5f1b2d9c0a7e64"
 ```
 
 Answer: `{texts: [{row_id, agent, kind, ts, text, text_len, whole, ref?}]}`, in requested order. `whole` is true when the text is everything sent. A row you cannot read, an unknown id or an id from another run answers `{row_id, error: "not found"}`. An empty list or more than 16 ids is refused. When a referenced session record is not readable yet, the answer carries the stored Relay text with `whole: false` and its `ref`; try again later. Text cut at write cannot be recovered.
