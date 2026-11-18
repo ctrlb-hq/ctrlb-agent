@@ -35,6 +35,8 @@ Share what you read with briefs:
 
 How to read the answers:
 
+A message for you comes whole in `peers`, up to 2,000 characters and within the 16,000-character budget per answer; other rows carry the first 300 characters. When `text_len` is larger than the text shown, call `read_text` with its `row_id` (up to 16 ids per call) before acting on the message.
+
 - `claim(next=true)` answers `held: true` with `next_task`: `{name, brief, paths, test}`. Work on that task. When nothing is free it answers `free_tasks: []` and takes nothing: post a note saying you have no task and stop. The same applies to the `next` claim returned by `done(..., next=true)`.
 - `claim` answers `held: true` with the `key` it stored, for example `name:task 03 median`, and the files that came with it in `paths`, for example `["path:src/median.py"]`. You hold all of them.
 - `held: false` with `reason: unknown_task` means the run has registered tasks and none has that name. Claim again with the `suggestion`, or pick a name from `tasks`.

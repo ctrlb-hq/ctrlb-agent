@@ -118,6 +118,8 @@ This setup is for several agents on one machine, used by one user.
 
 ## Limits
 
+The local server keeps the first 2,000 characters of a note, question or answer. If text is cut, the write answer gives `kept`, `whole: false` and a `note` explaining the limit. A hosted workspace keeps the whole message up to 64 KB in the session record. `read_text` returns the stored text on either server.
+
 Local mode is for one machine and one user. It has no team search, search by meaning, or continuous sync with hosted CtrlB.
 
 ## Move to hosted CtrlB
