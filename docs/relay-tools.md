@@ -120,7 +120,7 @@ Read the stored text of messages in this run, including text omitted from `peers
 
 | Argument | |
 |---|---|
-| `row_ids` | Required. An array of 1 to 16 row ids. |
+| `row_ids` | Required. A nonempty list of up to 16 row ids. |
 | `run_id`, `agent` | Optional, from the headers. |
 
 Answer: `{texts: [{row_id, agent, kind, ts, text, text_len, whole, ref?}]}`, in requested order. `whole` is true when `text` is everything the writer sent. When present, `ref: {session_id, seq}` points to the session record that `read_text` reads for you. If that record is not readable yet, the answer carries the stored Relay text and `whole: false`; try again later. Text cut at write cannot be recovered.
@@ -133,7 +133,7 @@ For `post`, `ask` and `answer`, the local server keeps the first 2,000 character
 
 Their write answers include `row_id`, `text_len` (characters sent), `kept` (characters stored) and `whole` (whether everything was stored). A longer message kept in the session record also has `ref: {session_id, seq}`. Text exceeding the hosted limit is cut at a character boundary and the answer has `truncated: true`. If the session record could not be written, Relay still keeps the first 2,000 characters and answers `whole: false`. A local cut also returns a `note` explaining the local limit.
 
-Briefs, contracts, tasks and handoff text stay limited to 2,000 characters. Their text write answers include `row_id` and `text_len`, with `kept` when cut; for handoffs these fields accompany an open handoff. Reads of briefs, contracts, tasks and history notes also include `row_id` and `text_len` when available.
+Briefs, contracts, tasks and handoff text stay limited to 2,000 characters. Their text write answers include `row_id` and `text_len`, with `kept` when cut. For open handoffs, these fields are absent when `all=true` hands off no task. Reads of briefs, contracts, tasks and history notes also include `row_id` and `text_len` when available.
 
 ### post
 

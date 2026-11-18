@@ -58,10 +58,10 @@ Even in `enforce` mode:
 |---|---|
 | Rows per records upload | 500. More is refused with `400`. |
 | Bytes per records upload | 4 MiB. More is refused with `413`. |
-| `body` of a session row | 64 KiB |
+| `body` of a session row | 64 KB |
 | Post text | Local: 2,000 characters; hosted: whole message up to 64 KB in the session record. Also applies to questions and answers |
 | Post text in `peers` | For the agent named by `to`: whole up to 2,000 characters; other rows: first 300 characters. At most 16,000 characters of whole text per answer, newest first |
-| `read_text` | 1 to 16 row ids per call; returns stored text and whether it is whole |
+| `read_text` | A nonempty list of up to 16 row ids per call; returns stored text and whether it is whole |
 | `peers` events | 40 by default, at most 500 |
 | Paths per check | 64 |
 | Run id, agent id, resource | 256 bytes each |
