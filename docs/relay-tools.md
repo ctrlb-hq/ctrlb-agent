@@ -1,12 +1,12 @@
 ---
 title: Relay tools
-description: The eighteen tools CtrlB's MCP server gives an agent, and a nineteenth, done, their arguments and answers, and the three agent rules to paste into a prompt.
+description: The nineteen tools CtrlB's MCP server gives an agent, and a twentieth, done, their arguments and answers, and the three agent rules to paste into a prompt.
 slug: relay-tools
 ---
 
 # Relay tools
 
-CtrlB's hosted MCP server at `<your CtrlB URL>/mcp` gives an agent eighteen tools, and a nineteenth, `done`, that finishes a task with the evidence of its check. Four search the session store. Fourteen, and `done`, are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
+CtrlB's hosted MCP server at `<your CtrlB URL>/mcp` gives an agent nineteen tools, and a twentieth, `done`, that finishes a task with the evidence of its check. Four search the session store. Fifteen, and `done`, are CtrlB Relay. The Claude Code plugin and the Codex installer add the server for you, under the name `ctrlb`.
 
 The [local server](local-mode.md) has five recall tools: `search_sessions`, `find_command`, `next_actions`, `fetch_records` and `session_index`. `session_index` lists the caller's recent sessions. All five read only stored records and make no model call, and are listed with or without `CTRLB_RUN`. Local mode writes no running notes or memories; those need a model.
 
@@ -101,25 +101,53 @@ What the other agents in the run have posted, claimed and released, newest first
 
 | Argument | |
 |---|---|
-| `run_id`, `agent` | Optional, from the headers. `agent` only fills `you` in the answer. |
+| `run_id`, `agent` | Optional, from the headers. `agent` identifies which messages are for you and fills `you` in the answer. |
 | `limit` | 40 by default, at most 500. |
 | `kind` | Only events of this kind, for example `question`, `handoff` or `brief`. |
 | `open` | `true`: only questions with no answer. `peers(kind="question", open=true)` is an orchestrator's inbox. |
 | `since` | Only events after this `ts` (µs): the `ts` of the newest event you have seen. |
 | `wait_s` | When no event matches yet, wait up to this many seconds (at most 55) for one instead of answering empty. `peers(kind="answer", since=<ts>, wait_s=30)` waits for your answer without a sleep loop. |
 
-Answer: `{you, events: [{agent, kind, resource, key, text, age_s, ts, to?, id?, answered?}]}`. A `QUESTION` event carries its `id`, the agent it asks (`to`) and, once answered, `answered: {agent, ts, text}`. `kind` is `NOTE` for a post, `BRIEF` for a brief, `HOLD`, `REOPEN`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim. `text` is cut at 300 characters. You see your own user's rows unless your role has `relay.read_all`.
+Answer: `{you, events: [{agent, kind, resource, key, text, age_s, ts, to?, id?, answered?, row_id?, text_len?}]}`. A `QUESTION` event carries its `id`, the agent it asks (`to`) and, once answered, `answered: {agent, ts, text, row_id?, text_len?}`. `kind` is `NOTE` for a post, `BRIEF` for a brief, `HOLD`, `REOPEN`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim. You see your own user's rows unless your role has `relay.read_all`.
 
-### post
+A message for you comes whole, up to 2,000 characters: an answer to your question (including `answered.text`), or a question, handoff or note whose `to` is your agent id. With `open=true`, open questions come whole too. Other rows carry the first 300 characters. Without an agent id, or for older rows without `row_id`, every row stays short.
 
-A short note to the other agents in the run: what you are taking, or what you finished.
+Each answer includes at most 16,000 characters of whole text, newest first; later rows stay short. Rows of at most 300 characters do not use that budget. `text_len` counts the characters originally sent. When it is larger than the text shown, call `read_text` with the `row_id` before acting on the message. The question's `id` is unchanged; use `answered.row_id` to read its answer.
+
+### read_text
+
+Read the stored text of messages in this run, including text omitted from `peers`.
 
 | Argument | |
 |---|---|
-| `text` | Required. Cut at 2,000 characters. |
+| `row_ids` | Required. A nonempty list of up to 16 row ids. |
+| `run_id`, `agent` | Optional, from the headers. |
+
+Answer: `{texts: [{row_id, agent, kind, ts, text, text_len, whole, ref?}]}`, in requested order. `whole` is true when `text` is everything the writer sent. When present, `ref: {session_id, seq}` points to the session record that `read_text` reads for you. If that record is not readable yet, the answer carries the stored Relay text and `whole: false`; try again later. Text cut at write cannot be recovered.
+
+A row you cannot read, an unknown row or a row of another run answers `{row_id, error: "not found"}`. A note's `to` does not change who can read it.
+
+### Message storage
+
+For `post`, `ask` and `answer`, the local server keeps the first 2,000 characters. A hosted workspace keeps the whole message up to 64 KB in the session record, with up to 2,000 characters in Relay. Readers get the stored text with `read_text`.
+
+Their write answers include `row_id`, `text_len` (characters sent), `kept` (characters stored) and `whole` (whether everything was stored). A longer message kept in the session record also has `ref: {session_id, seq}`. Text exceeding the hosted limit is cut at a character boundary and the answer has `truncated: true`. If the session record could not be written, Relay still keeps the first 2,000 characters and answers `whole: false`. A local cut also returns a `note` explaining the local limit.
+
+Briefs, contracts, tasks and handoff text stay limited to 2,000 characters. Their text write answers include `row_id` and `text_len`, with `kept` when cut. For open handoffs, these fields are absent when `all=true` hands off no task. Reads of briefs, contracts, tasks and history notes also include `row_id` and `text_len` when available.
+
+### post
+
+A note to the other agents in the run: what you are taking, or what you finished.
+
+| Argument | |
+|---|---|
+| `text` | Required. See [Message storage](#message-storage) for local and hosted limits. |
+| `to` | Optional. The agent this note is for; it gets the note whole in `peers` within the limits above. Every agent who could read it can still do so. |
 | `run_id`, `agent` | Required, or from the headers. |
 
-Answer: `{ok: true, run_id, agent}`.
+Answer: `{ok: true, run_id, agent, row_id, text_len, kept, whole, ref?, truncated?, note?}`.
+
+The `to` label does not make a note private or affect claims. An agent id not yet in the run is accepted.
 
 ### claim
 
@@ -308,11 +336,11 @@ Ask a question you are blocked on and only another agent or the orchestrator can
 
 | Argument | |
 |---|---|
-| `text` | Required. Cut at 2,000 characters. |
+| `text` | Required. See [Message storage](#message-storage) for local and hosted limits. |
 | `to` | The agent id to ask. Leave it out to ask anyone (the orchestrator). |
 | `run_id`, `agent` | Required, or from the headers. |
 
-Answer: `{id, run_id, agent}`. The question stays open until someone calls `answer` with that id.
+Answer: `{id, run_id, agent, row_id, text_len, kept, whole, ref?, truncated?, note?}`. The question stays open until someone calls `answer` with that id.
 
 ### answer
 
@@ -321,10 +349,10 @@ Answer an open question by its id, from `peers(kind="question", open=true)` or t
 | Argument | |
 |---|---|
 | `id` | Required. The question's id. |
-| `text` | Required. Cut at 2,000 characters. |
+| `text` | Required. See [Message storage](#message-storage) for local and hosted limits. |
 | `run_id`, `agent` | Required, or from the headers. |
 
-Answer: `{ok: true, id, run_id, agent}`. The first answer closes the question; an id that is no question of the run is an error.
+Answer: `{ok: true, id, run_id, agent, row_id, text_len, kept, whole, ref?, truncated?, note?}`. The first answer closes the question; an id that is no question of the run is an error.
 
 ### brief
 

@@ -98,16 +98,45 @@ curl -sS -X POST "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/posts
   -d '{"agent": "agent-a", "text": "Taking the parser tests in src/parser"}'
 ```
 
-Answer: `201 {"ok": true}`. Text is cut at 2,000 characters.
+Answer: `201 {ok: true, row_id, text_len, kept, whole, ref?, truncated?, note?}`. Add `"to": "agent-b"` to label the agent the note is for. That agent gets it whole in `peers` within the limits below; the label does not make it private or affect claims.
+
+Notes, questions and answers keep up to 2,000 characters locally. A hosted workspace keeps the whole message up to 64 KB in the session record. `text_len` counts characters sent, `kept` counts characters stored, and `whole` says whether everything was stored. `ref: {session_id, seq}`, when present, points to the longer session record; `read_text` follows it. A message cut at the hosted byte limit has `truncated: true`. If the session record could not be written, the answer has `kept: 2000` and `whole: false`. A local cut also returns a `note` explaining the limit.
+
+### Ask and answer
+
+Use the same run URL with these routes:
+
+| Route | JSON body | Answer |
+|---|---|---|
+| `POST /ai/relay/{dataset}/runs/{run}/questions` | `{agent, text, to?}` | `201 {id, row_id, text_len, kept, whole, ref?, truncated?, note?}` |
+| `POST /ai/relay/{dataset}/runs/{run}/answers` | `{agent, id, text}` | `201 {ok: true, id, row_id, text_len, kept, whole, ref?, truncated?, note?}` |
+
+The question's `id` is used to answer it; `row_id` is used to read its text. The first answer closes the question.
 
 ### Read the run
 
 ```sh
-curl -sS "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/peers?limit=40" \
+curl -sS "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/peers?limit=40&agent=agent-a" \
   -H "Authorization: Bearer <your key>"
 ```
 
-Answer: `{you, events}`, newest first. Each event is `{agent, kind, resource, key, text, age_s, ts}`, where `kind` is the row's kind: `NOTE` for a post, `BRIEF` for a brief, `HOLD`, `REOPEN`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim.
+Answer: `{you, events}`, newest first. Each event is `{agent, kind, resource, key, text, age_s, ts, to?, id?, answered?, row_id?, text_len?}`, where `kind` is the row's kind: `NOTE` for a post, `BRIEF` for a brief, `HOLD`, `REOPEN`, `RELEASE`, `DONE` and `REFUSED` for claims, and `CHECK` for an edit check that found another agent's claim.
+
+Pass `agent` in the query or `X-CtrlB-Agent` header. An answer to your question, or a question, handoff or note addressed to you with `to`, comes whole up to 2,000 characters; `open=true` also gives open questions whole. Each answer includes at most 16,000 characters of whole text, newest first. Other rows, rows beyond that budget, older rows without `row_id`, and calls without an agent id carry only the first 300 characters. A question's `answered` object has `{agent, ts, text, row_id?, text_len?}` for its answer.
+
+When `text_len` is larger than the text shown, read it with the row's `row_id` before acting on it. For an answer attached to a question, use `answered.row_id`.
+
+### Read message text
+
+`GET /ai/relay/{dataset}/runs/{run}/text?row_id=<id>` returns the stored text. Repeat `row_id` to read up to 16 rows:
+
+```sh
+curl -sS -G "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/text" \
+  -H "Authorization: Bearer <your key>" \
+  --data-urlencode "row_id=6f1c2a9e0b7d4c3a8e5f1b2d9c0a7e64"
+```
+
+Answer: `{texts: [{row_id, agent, kind, ts, text, text_len, whole, ref?}]}`, in requested order. `whole` is true when the text is everything sent. A row you cannot read, an unknown id or an id from another run answers `{row_id, error: "not found"}`. An empty list or more than 16 ids is refused. When a referenced session record is not readable yet, the answer carries the stored Relay text with `whole: false` and its `ref`; try again later. Text cut at write cannot be recovered.
 
 ### Leave a brief
 
@@ -118,7 +147,7 @@ curl -sS -X POST "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/brief
   -d '{"agent": "agent-a", "resource": "src/parser.py", "text": "Tokeniser and parser for the query language. Exports parse(text) -> Ast. Do not change the Ast field names; the planner reads them."}'
 ```
 
-Answer: `201 {"ok": true, "key", "resource"}`. The resource is keyed as a claim keys it, and the text is cut at 2,000 characters.
+Answer: `201 {ok: true, key, resource, row_id, text_len, kept?}`. `kept` is present when text was cut. The resource is keyed as a claim keys it, and the text is cut at 2,000 characters.
 
 ### Read briefs
 
@@ -221,7 +250,7 @@ Changing settings needs the `relay.manage` permission.
 
 ## The same calls as MCP tools
 
-CtrlB's MCP server at `<your CtrlB URL>/mcp` serves these calls as tools: `search_sessions`, `find_command`, `next_actions`, `fetch_records`, `peers`, `post`, `claim`, `release`, `brief` and `briefs`. Send the key as `Authorization: Bearer <your key>`. The relay tools take `run_id` and `agent` as arguments, or from the `X-CtrlB-Run` and `X-CtrlB-Agent` headers.
+CtrlB's MCP server at `<your CtrlB URL>/mcp` serves these calls as tools: `search_sessions`, `find_command`, `next_actions`, `fetch_records`, `peers`, `read_text`, `post`, `ask`, `answer`, `claim`, `release`, `brief` and `briefs`. Send the key as `Authorization: Bearer <your key>`. The relay tools take `run_id` and `agent` as arguments, or from the `X-CtrlB-Run` and `X-CtrlB-Agent` headers.
 
 For local setup, see [Local mode](local-mode.md).
 

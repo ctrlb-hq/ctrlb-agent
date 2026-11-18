@@ -24,7 +24,7 @@ Use Python 3.9 or newer on macOS or Linux, with an arm64 or amd64 processor. Fro
 python3 -I install.py --local
 ```
 
-This downloads the newest `ctrlb` release from this repository's [GitHub releases](https://github.com/ctrlb-hq/ctrlb-agent/releases). Add `--version v0.1.0` to install a named release; the version is the release tag, with its leading `v`. Each release holds `SHA256SUMS` and the raw binary named `ctrlb-<os>-<arch>`, where the OS is `darwin` or `linux` and the architecture is `arm64` or `amd64`.
+This downloads the newest `ctrlb` release from this repository's [GitHub releases](https://github.com/ctrlb-hq/ctrlb-agent/releases). Add `--version v0.2.0` to install a named release; the version is the release tag, with its leading `v`. Each release holds `SHA256SUMS` and the raw binary named `ctrlb-<os>-<arch>`, where the OS is `darwin` or `linux` and the architecture is `arm64` or `amd64`.
 
 To download from another place, supply the full release base URL with `--download-url` or `CTRLB_DOWNLOAD_URL`. The flag wins over the environment variable. No version is appended to that address. If it contains the literal `<version>`, the value of `--version` replaces it (`latest` when the flag is omitted). The base must hold the same files as a release.
 
@@ -49,7 +49,7 @@ ctrlb init
 `CTRLB_INSTALL_DIR` changes the folder and `CTRLB_VERSION` installs a named release. Set them on `sh`, not on `curl`:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ctrlb-hq/ctrlb-agent/releases/latest/download/install.sh | CTRLB_VERSION=v0.1.0 sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/ctrlb-hq/ctrlb-agent/releases/latest/download/install.sh | CTRLB_VERSION=v0.2.0 sh
 ```
 
 The two routes install in different folders, so use one of them and upgrade with the same one. The hooks look for `ctrlb` in `<CTRLB_HOME>/bin` first, then in `PATH`. A copy that `install.py --local` put in `~/.ctrlb/bin` stays in use until that route replaces it.
@@ -117,6 +117,8 @@ The Relay tools are listed only when the MCP session connects with a run. To joi
 This setup is for several agents on one machine, used by one user.
 
 ## Limits
+
+The local server keeps the first 2,000 characters of a note, question or answer. If text is cut, the write answer gives `kept`, `whole: false` and a `note` explaining the limit. A hosted workspace keeps the whole message up to 64 KB in the session record. `read_text` returns the stored text on either server.
 
 Local mode is for one machine and one user. It has no team search, search by meaning, or continuous sync with hosted CtrlB.
 
