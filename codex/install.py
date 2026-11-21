@@ -4,7 +4,8 @@
                         (bearer_token_env_var), never written into the file; X-CtrlB-Run and X-CtrlB-Agent are sent
                         from CTRLB_RUN and CTRLB_AGENT when they are set (env_http_headers)
   [[hooks.<Event>]]     SessionStart, SubagentStart, PreCompact, SessionEnd, Stop, SubagentStop and PreToolUse
-                        (matcher apply_patch), each calling codex/hook.py from this repo
+                        (matcher apply_patch; and matcher Bash when guardModelCalls is on), each calling codex/hook.py
+                        from this repo
   [otel]                only with --otel: Codex's own OTLP log export, straight to the lake's OTLP endpoint
 
 Usage:
@@ -34,6 +35,9 @@ HOOKS = [('SessionStart', 'session-start', 10, None, False),
          ('Stop', 'upload', 120, None, True),
          ('SubagentStop', 'upload', 120, None, True),
          ('PreToolUse', 'pre-tool', 5, 'apply_patch', False)]
+# guardModelCalls: written only when the setting is on, so Codex runs no hook on every shell command for users who
+# have not turned the guard on. Turning it on later means running this installer again (and /hooks once).
+GUARD_HOOK = ('PreToolUse', 'pre-bash', 5, 'Bash', False)
 EVENT_KEYS = {'hooks.' + h[0] for h in HOOKS}
 HEADER_RE = re.compile(r'^\s*\[(\[?)\s*([^\[\]]+?)\s*\]\]?\s*(?:#.*)?$')
 KEY_RE = re.compile(r'^\s*([A-Za-z0-9_\-."\' ]+?)\s*=')
@@ -59,14 +63,14 @@ def _name(dotted):
     return '.'.join(part.strip().strip('"\'') for part in dotted.split('.'))
 
 
-def block(mcp_url, otel_endpoint='', otel_headers=None):
+def block(mcp_url, otel_endpoint='', otel_headers=None, guard=False):
     lines = [BEGIN,
              '[mcp_servers.ctrlb]',
              f'url = {q(mcp_url)}',
              'bearer_token_env_var = "CTRLB_KEY"',
              'env_http_headers = { "X-CtrlB-Run" = "CTRLB_RUN", "X-CtrlB-Agent" = "CTRLB_AGENT" }',
              '']
-    for event, mode, timeout, matcher, run_async in HOOKS:
+    for event, mode, timeout, matcher, run_async in HOOKS + ([GUARD_HOOK] if guard else []):
         lines.append(f'[[hooks.{event}]]')
         if matcher:
             lines.append(f'matcher = {q(matcher)}')
@@ -300,7 +304,7 @@ def main(argv=None):
                 raise InstallError('--otel-endpoint and --otel-header need --otel')
             if cfg['key'] and any(cfg['key'] in s for s in [mcp_url, a.otel_endpoint] + [v for _, v in headers]):
                 raise InstallError('the CtrlB key must not be written into config.toml: Codex reads it from CTRLB_KEY')
-            new_block = block(mcp_url, a.otel_endpoint if a.otel else '', headers)
+            new_block = block(mcp_url, a.otel_endpoint if a.otel else '', headers, cfg.get('guard_model_calls'))
         old = ''
         if os.path.exists(path):
             with open(path) as fh:

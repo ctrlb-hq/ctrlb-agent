@@ -147,6 +147,16 @@ The check gives up after two seconds. If CtrlB does not answer, the edit goes ah
 
 In a relay run the plugin also registers a task for each sub-agent it spawns, keeps small text files from the session's scratch directories in the record, starts each session with the run's open tasks, contracts and handoffs, and claims shared files such as `REGISTRY.md` around each edit (`CTRLB_AUTO_SLOTS`, `CTRLB_SCRATCH_DIR`). See [Relay hooks](relay-hooks.md).
 
+### Guard model CLI calls (optional)
+
+Set `CTRLB_GUARD_MODEL_CALLS=1` (or `"guardModelCalls": true` in `~/.ctrlb/config.json`) to make the plugin refuse a shell command that starts `codex exec`, `codex review` or `claude -p` without a time limit, a run and its own agent name. The agent gets the command to run instead:
+
+```sh
+CTRLB_RUN=nightly-refactor-1 CTRLB_AGENT=reviewer-1 timeout 1200 codex exec "Review the diff in src/parser"
+```
+
+The call then joins the run as its own worker, and if it stops, its task shows as stalled. Off by default. See [Relay hooks](relay-hooks.md#a-model-cli-call-needs-a-time-limit-and-a-run) for what the check sees and does not see.
+
 ### When the session ends, and when the agent calls done
 
 - **Session end.** In a relay run (`CTRLB_RUN` set, or the agent called a relay tool), the `SessionEnd` hook hands off every hold the agent still has, in one write. Tasks go to nobody: the next agent to claim one gets it, with a note naming the files edited in this session, the last test command and its exit code, and the agent's last note. Paths and slots are released.

@@ -96,6 +96,7 @@ Then one `[[hooks.<Event>]]` table per event. Each runs `python3 -I <clone>/code
 | `SessionEnd` | `session-end` | In a relay run (`CTRLB_RUN` set), hands off every hold the agent still has to nobody, in one write (tasks open for the next claimer, paths and slots released), then uploads like `flush`. Codex has no hook after a tool call, so the handoff's text cannot list edits or tests, and `done` carries no witness |
 | `Stop`, `SubagentStop` | `upload` | The same, in the background (`async = true`) |
 | `PreToolUse`, matcher `apply_patch` | `pre-tool` | Sends the patch's file paths to the edit check |
+| `PreToolUse`, matcher `Bash` | `pre-bash` | Only when `guardModelCalls` is on at install (`CTRLB_GUARD_MODEL_CALLS=1`, or `"guardModelCalls": true` in `~/.ctrlb/config.json`). Refuses a shell command that starts `codex exec`, `codex review` or `claude -p` without `timeout`, `CTRLB_RUN` and its own `CTRLB_AGENT`. To turn it on later, run the installer again and approve the new hook with `/hooks`. See [Relay hooks](relay-hooks.md#a-model-cli-call-needs-a-time-limit-and-a-run) |
 
 For example, the `PreToolUse` table:
 

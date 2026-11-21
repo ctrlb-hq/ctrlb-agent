@@ -1,6 +1,6 @@
 ---
 title: Relay hooks
-description: What each CtrlB Relay hook of the Claude Code plugin and the Codex hooks reads, writes and how long it may take, including the hooks that register spawned sub-agents, keep scratch artefacts, start a session with the record and manage shared-file slots.
+description: What each CtrlB Relay hook of the Claude Code plugin and the Codex hooks reads, writes and how long it may take, including the hooks that register spawned sub-agents, keep scratch artefacts, start a session with the record, manage shared-file slots and guard model CLI calls.
 slug: relay-hooks
 ---
 
@@ -30,6 +30,7 @@ Budgets ("Timeouts", SessionStart, SessionEnd): a hook's `timeout` in `hooks.jso
 |---|---|---|---|
 | `scratchDir` | `CTRLB_SCRATCH_DIR` (`{run}` is replaced by the run id) | `scratchDir` | `~/.ctrlb/relay/<run id>/scratch` (under `CTRLB_HOME`) |
 | `autoSlots` | `CTRLB_AUTO_SLOTS` (comma-separated relative paths; empty turns it off) | `autoSlots` (a list) | `["REGISTRY.md"]` |
+| `guardModelCalls` | `CTRLB_GUARD_MODEL_CALLS` (`1`, `true`, `on` or `yes` turns it on; any other value turns it off) | `guardModelCalls` (`true` or `false`) | off |
 
 A hook "is in a relay run" as the session-end handoff decides it: `CTRLB_RUN` is set, or a ctrlb relay tool was called in this session.
 
@@ -43,6 +44,7 @@ A hook "is in a relay run" as the session-end handoff decides it: `CTRLB_RUN` is
 | Scratch directory (`session-start`) | SessionStart | 10 s | local | none | — |
 | autoSlots claim (`pre-tool`) | PreToolUse, `Edit\|Write\|MultiEdit\|NotebookEdit` | 5 s | synchronous, the claim inside 1.5 s (alarm at 2 s) | `POST .../claims` `{resource: "slot:<path>", paths: [<path>]}` | open: deny only on a definite answer that another agent holds it |
 | autoSlots release (`post-tool`, `post-tool-failure`) | PostToolUse and PostToolUseFailure, edit tools | 5 s | synchronous, inside 1 s | `DELETE .../claims` `{resource: "slot:<path>"}` | the slot lapses (a slot's lease is two minutes) |
+| Model CLI guard (`pre-bash`) | PreToolUse, `Bash` | 5 s | synchronous, local (alarm at 2 s) | none | open: a command it cannot read, or an error, lets the command run |
 | Session-end handoff (`session-end`) | SessionEnd | 10 s (the 1.5 s budget applies) | synchronous, 0.8 s | `POST .../handoffs` `{all: true, to: ""}` | nothing written |
 
 Every call goes to the CtrlB URL under the agent's key (`Authorization: Bearer`), as every other hook call does.
@@ -86,6 +88,24 @@ For an edit of a file `autoSlots` lists (matched by its path relative to `cwd`),
 
 Fail-open: a claim that errors or does not answer inside 1.5 s lets the edit go ahead, with no edit check, and a line in the hook log. A slow CtrlB must not stall every edit of a shared file; the cost is that two agents may write it at once while CtrlB is slow, which `Edit`'s own exact-match replacement mostly catches. Only a definite answer that another agent holds the slot denies.
 
+### A model CLI call needs a time limit and a run
+
+Only with `guardModelCalls` on. PreToolUse on `Bash`. The hook refuses a command that starts `codex exec` (or `codex e`), `codex review`, or `claude` with `-p` or `--print`, unless the command gives that call all three of these:
+
+- **A time limit:** `timeout <duration>` in front of the call, with a duration above zero (`1200`, `20m`). A call with no time limit can block the shell command, and the agent that started it, for hours.
+- **A run:** `CTRLB_RUN`, set in the command (`CTRLB_RUN=<run> ...`, `env CTRLB_RUN=<run> ...`, or `export CTRLB_RUN=<run>` earlier in the same command), or already in the session's environment or `~/.ctrlb/config.json`, which the call inherits.
+- **Its own agent name:** `CTRLB_AGENT`, set in the command, different from the agent id of the session that starts it.
+
+So the call joins the run as a worker of its own. It claims its task there, and when it stops working, the task shows as stalled in the run view and another agent can take it over. A call outside a run holds no claim, so nothing can show that it stopped.
+
+The refusal names what is missing and the command to run instead, for example:
+
+```text
+CtrlB Relay: this command starts `codex exec` without a time limit, a Relay run (CTRLB_RUN) and its own agent name (CTRLB_AGENT). guardModelCalls is on: every model CLI call needs a time limit and must join a Relay run under its own agent name, so a stalled worker shows in the run view. Run it like this: CTRLB_RUN=nightly-7 CTRLB_AGENT=<worker name> timeout 1200 codex exec ... The worker then claims its task in that run.
+```
+
+The hook reads only the command text and calls nothing. It sees the call after `cd ... &&`, on a later line, in a pipe, in a subshell, in a `$( )` substitution, inside `bash -c` (and `sh`, `zsh`, `dash`), and behind `env`, `nohup`, `exec`, `command`, `time`, `setsid`, `nice` and `stdbuf`. Text that only names a model CLI (an `echo`, a `grep`, a commit message, a heredoc body) is not a call. Limits: it does not see a call made from a script file, or through another program such as `xargs`, `npx` or `make`. A variable as the duration (`timeout "$LIMIT"`) is accepted as it is. A command the hook cannot read (for example, an unclosed quote) runs.
+
 ## Codex
 
 | Hook | Codex |
@@ -95,6 +115,7 @@ Fail-open: a claim that errors or does not answer inside 1.5 s lets the edit go 
 | Record at session start and scratch directory | Yes: `codex/hook.py session-start` adds the same block (artefacts only from the record; Codex posts none). |
 | autoSlots | No: with no hook after a patch, a slot claimed before it could not be released after it. Codex agents claim `slot:REGISTRY.md` themselves (see [Relay tools](relay-tools.md#slots)). |
 | Session-end handoff | Yes, with a fixed text. |
+| Model CLI guard | Yes, when `guardModelCalls` is on when you run `codex/install.py`: the installer then writes a PreToolUse hook with matcher `Bash` (Codex matches its shell tools as `Bash`). With the setting off, it writes no such hook, so Codex runs no CtrlB hook on each shell command. After you turn the setting on, run the installer again and approve the new hook with `/hooks`. |
 
 ## CtrlB reads and writes this needs
 

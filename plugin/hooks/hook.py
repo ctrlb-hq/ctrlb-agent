@@ -1,7 +1,8 @@
 """Every ctrlb-agent hook for Claude Code. Usage: hook.py <session-start|subagent-start|flush|upload|session-end|pre-tool|
-pre-agent|post-tool|post-tool-failure>, with the hook's JSON on stdin. A hook never fails or blocks a session: every error goes to
+pre-agent|pre-bash|post-tool|post-tool-failure>, with the hook's JSON on stdin. A hook never fails or blocks a session: every error goes to
 ~/.ctrlb/hooks.log and the hook exits 0. pre-tool fails open (no output) on any error and gives up after two seconds;
-pre-agent (a sub-agent spawn registers a task) never prints anything and gives up after three. docs/relay-hooks.md
+pre-agent (a sub-agent spawn registers a task) never prints anything and gives up after three. pre-bash (guardModelCalls)
+reads only the command text, calls nothing and fails open. docs/relay-hooks.md
 lists each hook's event, fields, output and time budget."""
 import json, os, signal, sys, time
 sys.dont_write_bytecode = True
@@ -10,6 +11,9 @@ for _lib in (os.path.join(_HERE, '..', 'lib'), os.path.join(_HERE, '..', '..', '
     if os.path.isfile(os.path.join(_lib, 'common.py')):
         sys.path.insert(0, _lib)
         break
+import model_call_guard  # noqa: E402
+if __name__ == '__main__' and sys.argv[1:2] == ['pre-bash'] and model_call_guard.off_before_load():
+    sys.exit(0)         # pre-bash runs before every Bash call: with guardModelCalls off, stop before loading the rest
 import common, relay_hooks, rows_claude  # noqa: E402
 from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, start_context, decide, record_tokens, _tool_answer,  # noqa: E402
                           bash_result, evidence_hint, is_test_command, record_test, record_bash, record_edit, record_note,
@@ -120,6 +124,19 @@ def pre_agent(cfg, inp):
     return relay_hooks.register_spawn(cfg, run, agent, inp.get('tool_input'), inp.get('cwd') or '')
 
 
+def pre_bash(cfg, inp):
+    """guardModelCalls: refuse a Bash command that starts a model CLI without a time limit, a Relay run and its own
+    agent name. Local: reads only the command, calls nothing."""
+    if not model_call_guard.enabled(cfg) or (inp.get('tool_name') or '') != 'Bash':
+        return None
+    run, agent, _ = _who(cfg, inp)
+    reason = model_call_guard.check(cfg, (inp.get('tool_input') or {}).get('command'), agent, run)
+    if reason:
+        common.log(f"pre-bash: model CLI call refused ({reason.split('`')[1]})")
+        return _deny(reason)
+    return None
+
+
 def post_tool(cfg, inp):
     """After a ctrlb claim, handoff, release or done, keep the agent's hold tokens for the pre-tool check.
     After a test-looking Bash command, remember it, its exit code and last output line; after a done (or
@@ -180,9 +197,9 @@ def _alarm(*_):
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ''
-    if mode in ('pre-tool', 'pre-agent'):
+    if mode in ('pre-tool', 'pre-agent', 'pre-bash'):
         signal.signal(signal.SIGALRM, _alarm)
-        signal.setitimer(signal.ITIMER_REAL, CHECK_S if mode == 'pre-tool' else AGENT_ALARM_S)
+        signal.setitimer(signal.ITIMER_REAL, AGENT_ALARM_S if mode == 'pre-agent' else CHECK_S)
     try:
         inp = json.load(sys.stdin)
     except Exception:
@@ -238,6 +255,14 @@ def main():
             out = pre_tool(cfg, inp)
         except BaseException as e:      # fail open: the edit goes ahead
             common.log(f"pre-tool fail open: {type(e).__name__}: {str(e)[:200]}")
+            out = None
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+    elif mode == 'pre-bash':
+        try:
+            out = pre_bash(cfg, inp)
+        except BaseException as e:      # fail open: the command runs
+            common.log(f"pre-bash fail open: {type(e).__name__}: {str(e)[:200]}")
             out = None
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
