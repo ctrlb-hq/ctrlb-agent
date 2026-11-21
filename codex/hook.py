@@ -1,4 +1,4 @@
-"""Every ctrlb-agent hook for Codex. Usage: hook.py <session-start|subagent-start|flush|upload|session-end|pre-tool>, with the
+"""Every ctrlb-agent hook for Codex. Usage: hook.py <session-start|subagent-start|flush|upload|session-end|pre-tool|pre-bash>, with the
 hook's JSON on stdin (Codex 0.166: session_id, transcript_path, cwd, hook_event_name; agent_id and
 agent_transcript_path on subagent events and on tool calls inside a subagent; tool_name and tool_input on PreToolUse).
 codex/install.py writes the [[hooks.*]] tables that call it. Output shapes are Claude Code's, which Codex accepts:
@@ -14,8 +14,8 @@ claimed before a patch could not be released after it."""
 import json, os, signal, sys, time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
-import common, relay_hooks, rows_codex  # noqa: E402
-from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, start_context, decide  # noqa: E402
+import common, model_call_guard, relay_hooks, rows_codex  # noqa: E402
+from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, start_context, decide, _deny  # noqa: E402
 
 SYNC_S, ASYNC_S = 5, 90
 HANDOFF_S = 0.8
@@ -82,13 +82,33 @@ def pre_tool(cfg, inp):
     return decide(cfg, run, agent, paths, inp.get('cwd') or '')
 
 
+def pre_bash(cfg, inp):
+    """guardModelCalls: refuse a shell command that starts a model CLI without a time limit, a Relay run and its own
+    agent name. Codex matches its shell tools as Bash, with the command in tool_input.command."""
+    if not model_call_guard.enabled(cfg):
+        return None
+    ti = inp.get('tool_input')
+    command = ti.get('command') if isinstance(ti, dict) else ti
+    if not command:
+        return None
+    sid = inp.get('session_id') or ''
+    run, parent = session_run(cfg, sid, inp.get('transcript_path'))
+    sub = inp.get('agent_id') or ''
+    agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid, parent)
+    reason = model_call_guard.check(cfg, command, agent, run)
+    if reason:
+        common.log(f"codex pre-bash: model CLI call refused ({reason.split('`')[1]})")
+        return _deny(reason)
+    return None
+
+
 def _alarm(*_):
     raise TimeoutError(f'pre-tool over {CHECK_S}s')
 
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ''
-    if mode == 'pre-tool':
+    if mode in ('pre-tool', 'pre-bash'):
         signal.signal(signal.SIGALRM, _alarm)
         signal.setitimer(signal.ITIMER_REAL, CHECK_S)
     try:
@@ -145,6 +165,14 @@ def main():
             out = pre_tool(cfg, inp)
         except BaseException as e:      # fail open: the patch goes ahead
             common.log(f"codex pre-tool fail open: {type(e).__name__}: {str(e)[:200]}")
+            out = None
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+    elif mode == 'pre-bash':
+        try:
+            out = pre_bash(cfg, inp)
+        except BaseException as e:      # fail open: the command runs
+            common.log(f"codex pre-bash fail open: {type(e).__name__}: {str(e)[:200]}")
             out = None
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)

@@ -1909,6 +1909,149 @@ def test_project_list_fences():
           project_rules._markers(project_rules.split_lines(indented)) == ([1], [3], None))
 
 
+def test_model_call_guard(seeker):
+    """guardModelCalls (docs/relay-hooks.md): with the setting on, a shell command that starts codex exec, codex review
+    or claude -p is refused unless it gives the model CLI a time limit, a Relay run and its own agent name. Off by
+    default; reads only the command; calls nothing."""
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import model_call_guard as g
+    on = {'guard_model_calls': True, 'run': ''}
+    ok_prefix = 'CTRLB_RUN=r1 CTRLB_AGENT=worker-1 timeout 1200 '
+
+    def reason(cmd, cfg=on, own='lead'):
+        return g.check(cfg, cmd, own, 'r1')
+
+    refused = {
+        'bare codex exec': 'codex exec "fix the parser"',
+        'codex alias e': 'codex e "fix it"',
+        'codex review': 'cat diff.txt | codex review -',
+        'codex option before exec': 'codex -m gpt-6-astra -c x=1 exec "go"',
+        'claude -p': 'claude -p "review this"',
+        'claude --print with a full path': '/usr/local/bin/claude --model x --print hi',
+        'timeout 0 is no limit': 'CTRLB_RUN=r1 CTRLB_AGENT=worker-1 timeout 0 codex exec x',
+        'no run': 'CTRLB_AGENT=worker-1 timeout 60 codex exec x',
+        'no agent name': 'CTRLB_RUN=r1 timeout 60 codex exec x',
+        'the caller\'s own agent name': 'CTRLB_RUN=r1 CTRLB_AGENT=lead timeout 60 codex exec x',
+        'after cd and &&': 'cd repo && timeout 60 codex exec x',
+        'on a second line': 'ls\ncodex exec x',
+        'inside bash -lc': "cd repo && bash -lc 'codex exec hi' 2>&1",
+        'inside $( ) in quotes': 'echo "$(claude -p hi)"',
+        'in a subshell': '(cd d; codex exec x) > out.txt',
+        'in the background': 'nohup codex exec x > log 2>&1 &',
+        'bare assignment is not exported': 'CTRLB_RUN=r1; CTRLB_AGENT=worker-1; timeout 60 codex exec x',
+    }
+    bad = {n: c for n, c in refused.items() if not reason(c)}
+    check('guard: refuses each bare or incomplete model CLI call', not bad, json.dumps(bad))
+    allowed = {
+        'all three as assignments': ok_prefix + 'codex exec "fix it"',
+        'env and timeout options': 'env CTRLB_RUN=r1 CTRLB_AGENT=worker-1 timeout -k 10 --signal=TERM 20m claude -p hi',
+        'export earlier in the command': 'export CTRLB_RUN=r1 CTRLB_AGENT=worker-1 && timeout 600 codex e x',
+        'outer timeout around bash -lc': ok_prefix + "bash -lc 'codex exec hi'",
+        'timeout from a variable': 'CTRLB_RUN=r1 CTRLB_AGENT=worker-1 timeout "$LIMIT" codex exec x',
+        'codex --version': 'codex --version',
+        'codex login status': 'codex login status',
+        'codex resume (interactive)': 'codex resume --last',
+        'claude mcp list': 'claude mcp list',
+        'grep for the text': 'grep -rn "codex exec" docs/',
+        'echo the text': 'echo claude -p hi',
+        'commit message': 'git commit -m "run claude -p in CI"',
+        'heredoc body': "cat > run.sh <<'EOF'\ncodex exec x\nclaude -p y\nEOF\nchmod +x run.sh",
+        'unreadable command': 'codex exec "unclosed',
+        'empty': '',
+    }
+    bad = {n: reason(c) for n, c in allowed.items() if reason(c)}
+    check('guard: lets through complete calls, other CLI commands and text that only names a model CLI', not bad,
+          json.dumps(bad)[:400])
+    check('guard: a run in the session environment or config file counts for the child',
+          not reason('CTRLB_AGENT=worker-1 timeout 60 codex exec x', dict(on, run='r9')))
+    check('guard: off by default (no setting), even for a bare call', g.check({'run': ''}, 'codex exec x', 'lead') is None)
+    r = reason('codex exec x') or ''
+    check('guard: the refusal names the call, each missing part and the command to run instead',
+          '`codex exec`' in r and 'a time limit' in r and 'CTRLB_RUN' in r and 'CTRLB_AGENT' in r
+          and 'CTRLB_RUN=r1 CTRLB_AGENT=<worker name> timeout 1200 codex exec' in r, r)
+    r = reason('CTRLB_RUN=r1 CTRLB_AGENT=worker-1 codex exec x') or ''
+    check('guard: a call missing only the time limit is refused for that alone',
+          'without a time limit.' in r and 'CTRLB_RUN)' not in r.split('guardModelCalls')[0], r)
+
+    # the setting: environment first, then the config file
+    home = os.path.join(WORK, 'home-guard')
+    shutil.rmtree(home, ignore_errors=True)
+    os.makedirs(home)
+    env = base_env(seeker.url, home)
+    cfg_of = lambda e: json.loads(subprocess.run(
+        [sys.executable, '-I', '-c', 'import sys, json; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib')) + '); '
+         'import common; print(json.dumps(common.config()["guard_model_calls"]))'], capture_output=True, text=True, env=e).stdout)
+    with open(os.path.join(home, 'config.json'), 'w') as fh:
+        json.dump({'guardModelCalls': True}, fh)
+    check('setting: guardModelCalls in config.json turns it on; CTRLB_GUARD_MODEL_CALLS=0 turns it off; 1 turns it on',
+          cfg_of(env) is True and cfg_of(dict(env, CTRLB_GUARD_MODEL_CALLS='0')) is False
+          and cfg_of(dict(base_env(seeker.url, os.path.join(WORK, 'home-guard-none')), CTRLB_GUARD_MODEL_CALLS='1')) is True
+          and cfg_of(base_env(seeker.url, os.path.join(WORK, 'home-guard-none'))) is False)
+    os.remove(os.path.join(home, 'config.json'))
+
+    # the Claude Code hook
+    inp = {'session_id': SID, 'transcript_path': '', 'cwd': '/work/dash', 'hook_event_name': 'PreToolUse',
+           'tool_name': 'Bash', 'tool_input': {'command': 'codex exec "fix it"', 'description': 'run codex'}}
+    seeker.reset()
+    p, dt = hook('pre-bash', inp, dict(env, CTRLB_GUARD_MODEL_CALLS='1'))
+    o = out_of(p)
+    check('pre-bash: a bare codex exec is denied with the refusal, exit 0, no call to CtrlB',
+          p.returncode == 0 and o.get('permissionDecision') == 'deny' and '`codex exec`' in o.get('permissionDecisionReason', '')
+          and f'CTRLB_RUN={SID}' in o.get('permissionDecisionReason', '') and not seeker.calls, f'{json.dumps(o)[:300]} {dt:.2f}s')
+    p, _ = hook('pre-bash', dict(inp, tool_input={'command': ok_prefix + 'codex exec x'}), dict(env, CTRLB_GUARD_MODEL_CALLS='1'))
+    check('pre-bash: a complete call prints nothing', p.returncode == 0 and not p.stdout.strip(), p.stdout[:200])
+    p, _ = hook('pre-bash', inp, env)
+    check('pre-bash: setting off prints nothing, calls nothing', p.returncode == 0 and not p.stdout.strip() and not seeker.calls)
+    p, _ = hook('pre-bash', dict(inp, tool_input={'command': 'CTRLB_RUN=r1 CTRLB_AGENT=lead timeout 9 codex exec x'}),
+                dict(env, CTRLB_GUARD_MODEL_CALLS='1', CTRLB_AGENT='lead'))
+    check('pre-bash: the session\'s own CTRLB_AGENT for the child is denied',
+          out_of(p).get('permissionDecision') == 'deny' and 'the name of this session' in out_of(p).get('permissionDecisionReason', ''))
+    with open(os.path.join(home, 'config.json'), 'w') as fh:
+        json.dump({'guardModelCalls': True}, fh)
+    p, _ = hook('pre-bash', inp, env)
+    on_by_file = out_of(p).get('permissionDecision') == 'deny'
+    p, _ = hook('pre-bash', inp, dict(env, CTRLB_GUARD_MODEL_CALLS='off'))
+    check('pre-bash: the early exit reads the setting as config does (file on: denied; variable off: nothing)',
+          on_by_file and p.returncode == 0 and not p.stdout.strip())
+    os.remove(os.path.join(home, 'config.json'))
+    p, _ = hook('pre-bash', '{not json', dict(env, CTRLB_GUARD_MODEL_CALLS='1'))
+    check('pre-bash: unreadable input fails open', p.returncode == 0 and not p.stdout.strip())
+
+    hk = load('../../plugin/hooks/hooks.json')['hooks']
+    guard = [grp for grp in hk['PreToolUse'] if grp.get('matcher') == 'Bash']
+    check('hooks.json: PreToolUse Bash runs pre-bash (timeout 5, not async)',
+          len(guard) == 1 and guard[0]['hooks'][0]['command'].endswith('hook.py" pre-bash') and guard[0]['hooks'][0]['timeout'] == 5
+          and 'async' not in guard[0]['hooks'][0])
+
+    # the Codex hook: Codex matches its shell tools as Bash, with tool_input.command
+    cinp = {'session_id': CSID, 'transcript_path': '', 'cwd': '/work/dash', 'hook_event_name': 'PreToolUse',
+            'tool_name': 'Bash', 'tool_input': {'command': 'claude -p "review"'}}
+    p, _ = chook('pre-bash', cinp, dict(env, CTRLB_GUARD_MODEL_CALLS='1'))
+    o = out_of(p)
+    check('codex pre-bash: a bare claude -p is denied', p.returncode == 0 and o.get('permissionDecision') == 'deny'
+          and '`claude -p`' in o.get('permissionDecisionReason', ''), json.dumps(o)[:200])
+    p, _ = chook('pre-bash', cinp, env)
+    check('codex pre-bash: setting off prints nothing', p.returncode == 0 and not p.stdout.strip())
+
+    if can_validate_toml():
+        chome = os.path.join(WORK, 'codex-guard')
+        for extra, want in (({}, False), ({'CTRLB_GUARD_MODEL_CALLS': '1'}, True)):
+            shutil.rmtree(chome, ignore_errors=True)
+            os.makedirs(chome)
+            p = install(['--mcp-url', 'http://127.0.0.1:8095/mcp'], chome, extra)
+            text = read(os.path.join(chome, 'config.toml')).decode() if p.returncode == 0 else ''
+            has = '[[hooks.PreToolUse]]\nmatcher = "Bash"\n[[hooks.PreToolUse.hooks]]\ntype = "command"\n' in text and ' pre-bash"' in text
+            check(f'codex install: the Bash pre-bash hook is written {"only " if want else "not "}when guardModelCalls is '
+                  f'{"on" if want else "off"}', p.returncode == 0 and has == want, p.stderr[-200:])
+
+    doc = open(os.path.join(ROOT, 'docs', 'relay-hooks.md')).read()
+    skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+    check('docs: relay-hooks.md documents guardModelCalls, its variable, pre-bash and what it does not see',
+          'guardModelCalls' in doc and 'CTRLB_GUARD_MODEL_CALLS' in doc and '`pre-bash`' in doc and 'script' in doc)
+    check('relay skill: a model CLI call runs with timeout, CTRLB_RUN and its own CTRLB_AGENT',
+          'timeout' in skill and 'CTRLB_RUN=' in skill and 'CTRLB_AGENT=' in skill and 'guardModelCalls' in skill)
+
+
 def test_codex_install():
     if not can_validate_toml():
         print('SKIP Codex installer integration (needs Python 3.11+ or codex)')
@@ -2351,7 +2494,7 @@ def test_round6_hooks(seeker):
           json.dumps(o)[:200])
     hk = load('../../plugin/hooks/hooks.json')['hooks']
     check('hooks.json: PreToolUse on the done tool, PostToolUse on edits and post, PostToolUseFailure on Bash',
-          len(hk['PreToolUse']) == 3 and hk['PreToolUse'][1]['matcher'] == 'mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'
+          len(hk['PreToolUse']) == 4 and hk['PreToolUse'][1]['matcher'] == 'mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'
           and hk['PostToolUse'][2]['matcher'].startswith('Edit|Write|MultiEdit|NotebookEdit|mcp__ctrlb__post')
           and hk['PostToolUseFailure'][0]['matcher'] == 'Bash' and hk['SessionEnd'][0]['hooks'][0]['command'].endswith('session-end'))
     # Codex: the same session-end handoff in a relay run, with what it can say.
@@ -4847,6 +4990,7 @@ def main():
     run_test(test_redaction_linear_budget)
     run_test(test_witness_docs)
     run_test(test_pre_tool, seeker)
+    run_test(test_model_call_guard, seeker)
     run_test(test_keys)
     run_test(test_edit_keys_across_harnesses, seeker)
     run_test(test_docs)
