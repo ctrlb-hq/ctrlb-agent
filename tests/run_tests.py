@@ -2147,49 +2147,58 @@ def test_spawned_agents(seeker):
           'agent id is lead' in ctx and 'started you' not in ctx and not [c for c in seeker.calls if c['method'] != 'GET']
           and not os.path.exists(os.path.join(home, 'spawn')))
 
-    # the process record: a Codex parent (no environment file) found by the child's process tree
-    shutil.rmtree(home, ignore_errors=True)
-    bindir = os.path.join(WORK, 'spawn-bin')
-    shutil.rmtree(bindir, ignore_errors=True)
-    os.makedirs(bindir)
-    for prog in ('codex', 'claude'):
-        os.symlink(sys.executable, os.path.join(bindir, prog))
-    cin = load('hooks/codex.json')['session_start']
-    cin = dict(cin, session_id=PSID, transcript_path='')
-    # driver.py runs as "codex" (the parent): its own session-start hook writes its process record, then it starts
-    # child.py as "claude" without CTRLB_RUN or CTRLB_AGENT; child.py runs its session-start hook and prints its output
-    driver, child = os.path.join(WORK, 'spawn-driver.py'), os.path.join(WORK, 'spawn-child.py')
-    with open(os.path.join(WORK, 'spawn-in.json'), 'w') as fh:
-        json.dump(dict(parent=cin, child=I['session_start'], codex_hook=CODEX_HOOK, hook=HOOK,
-                       claude=os.path.join(bindir, 'claude'), child_py=child), fh)
-    with open(driver, 'w') as fh:
-        fh.write(textwrap.dedent("""
-            import json, os, subprocess, sys
-            d = json.load(open(sys.argv[1]))
-            subprocess.run([sys.executable, '-I', d['codex_hook'], 'session-start'], input=json.dumps(d['parent']),
-                           text=True, capture_output=True)
-            env = {k: v for k, v in os.environ.items() if k not in ('CTRLB_RUN', 'CTRLB_AGENT')}
-            out = subprocess.run([d['claude'], '-I', d['child_py'], sys.argv[1]], text=True, capture_output=True, env=env)
-            sys.stdout.write(out.stdout)
-            sys.stderr.write(out.stderr)
-        """))
-    with open(child, 'w') as fh:
-        fh.write(textwrap.dedent("""
-            import json, subprocess, sys
-            d = json.load(open(sys.argv[1]))
-            p = subprocess.run([sys.executable, '-I', d['hook'], 'session-start'], input=json.dumps(d['child']),
+    # the process record: a Codex parent (no environment file) found by the child's process tree. Linux only: the fake
+    # agents are links to Python, which on macOS starts again under its own name; real agent CLIs do not.
+    if os.path.isdir('/proc/self'):
+        shutil.rmtree(home, ignore_errors=True)
+        bindir = os.path.join(WORK, 'spawn-bin')
+        shutil.rmtree(bindir, ignore_errors=True)
+        os.makedirs(bindir)
+        for prog in ('codex', 'claude'):
+            os.symlink(sys.executable, os.path.join(bindir, prog))
+        cin = load('hooks/codex.json')['session_start']
+        cin = dict(cin, session_id=PSID, transcript_path='')
+        # driver.py runs as "codex" (the parent): its own session-start hook writes its process record, then it starts
+        # child.py as "claude" without CTRLB_RUN or CTRLB_AGENT; child.py runs its session-start hook and prints its output
+        driver, child = os.path.join(WORK, 'spawn-driver.py'), os.path.join(WORK, 'spawn-child.py')
+        with open(os.path.join(WORK, 'spawn-in.json'), 'w') as fh:
+            json.dump(dict(parent=cin, child=I['session_start'], codex_hook=CODEX_HOOK, hook=HOOK,
+                           claude=os.path.join(bindir, 'claude'), child_py=child), fh)
+        with open(driver, 'w') as fh:
+            fh.write(textwrap.dedent("""
+                import json, os, subprocess, sys
+                d = json.load(open(sys.argv[1]))
+                subprocess.run([sys.executable, '-I', d['codex_hook'], 'session-start'], input=json.dumps(d['parent']),
                                text=True, capture_output=True)
-            sys.stdout.write(p.stdout)
-        """))
-    seeker.reset()
-    p = subprocess.run([os.path.join(bindir, 'codex'), '-I', driver, os.path.join(WORK, 'spawn-in.json')],
-                       capture_output=True, text=True, timeout=60, env=dict(env, CTRLB_RUN='run-s2', CTRLB_AGENT='lead'))
-    ctx = out_of(subprocess.CompletedProcess([], 0, p.stdout.strip(), '')).get('additionalContext', '')
-    check('process record: a child of a Codex parent finds it with no variables, joins its run as lead.claude-<id>',
-          'run id is run-s2' in ctx and f'agent id is lead.claude-{SID[:8]}' in ctx and f'lead (session {PSID}) started you' in ctx,
-          (ctx or p.stdout + p.stderr)[-600:])
-    j = json.load(open(os.path.join(home, 'spawn', 'sessions', SID + '.json')))
-    check('process record: the decision is kept, found by process', j.get('how') == 'process' and j.get('parent') == PSID, json.dumps(j))
+                env = {k: v for k, v in os.environ.items() if k not in ('CTRLB_RUN', 'CTRLB_AGENT')}
+                out = subprocess.run([d['claude'], '-I', d['child_py'], sys.argv[1]], text=True, capture_output=True, env=env)
+                sys.stdout.write(out.stdout)
+                sys.stderr.write(out.stderr)
+            """))
+        with open(child, 'w') as fh:
+            fh.write(textwrap.dedent("""
+                import json, subprocess, sys
+                d = json.load(open(sys.argv[1]))
+                p = subprocess.run([sys.executable, '-I', d['hook'], 'session-start'], input=json.dumps(d['child']),
+                                   text=True, capture_output=True)
+                sys.stdout.write(p.stdout)
+            """))
+        seeker.reset()
+        p = subprocess.run([os.path.join(bindir, 'codex'), '-I', driver, os.path.join(WORK, 'spawn-in.json')],
+                           capture_output=True, text=True, timeout=60, env=dict(env, CTRLB_RUN='run-s2', CTRLB_AGENT='lead'))
+        ctx = out_of(subprocess.CompletedProcess([], 0, p.stdout.strip(), '')).get('additionalContext', '')
+        check('process record: a child of a Codex parent finds it with no variables, joins its run as lead.claude-<id>',
+              'run id is run-s2' in ctx and f'agent id is lead.claude-{SID[:8]}' in ctx and f'lead (session {PSID}) started you' in ctx,
+              (ctx or p.stdout + p.stderr)[-600:])
+        j = json.load(open(os.path.join(home, 'spawn', 'sessions', SID + '.json')))
+        check('process record: the decision is kept, found by process', j.get('how') == 'process' and j.get('parent') == PSID, json.dumps(j))
+    ps_line = '  4242 Sun Nov  2 05:01:14 2026     /opt/homebrew/bin/codex exec "fix it"\n'
+    with mock.patch.object(spawn.os.path, 'isdir', lambda d: False), \
+            mock.patch('builtins.open', side_effect=FileNotFoundError), \
+            mock.patch.object(spawn.subprocess, 'run', lambda *a, **k: subprocess.CompletedProcess(a, 0, ps_line, '')):
+        got = spawn._proc(5000)
+    check('process lookup without /proc (macOS): ps gives the parent, the program and the start time',
+          got == (4242, 'codex', 'Sun Nov  2 05:01:14 2026'), repr(got))
     tree = {100: (200, 'claude', 'S1'), 200: (300, 'codex', 'S2'), 300: (1, 'zsh', 'S3')}
     with open(spawn._record_path(200), 'w') as fh:
         json.dump(dict(session=PSID, run='run-s3', agent='lead', relay=True, start='OLD'), fh)
