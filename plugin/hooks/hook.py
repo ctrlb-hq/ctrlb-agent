@@ -2,7 +2,8 @@
 pre-agent|pre-bash|post-tool|post-tool-failure>, with the hook's JSON on stdin. A hook never fails or blocks a session: every error goes to
 ~/.ctrlb/hooks.log and the hook exits 0. pre-tool fails open (no output) on any error and gives up after two seconds;
 pre-agent (a sub-agent spawn registers a task) never prints anything and gives up after three. pre-bash (guardModelCalls)
-reads only the command text, calls nothing and fails open. docs/relay-hooks.md
+reads only the command text, calls nothing and fails open. session-start also finds the agent that started this session
+from its shell, if any, and leaves this session's marks for the agents it starts (lib/spawn.py). docs/relay-hooks.md
 lists each hook's event, fields, output and time budget."""
 import json, os, signal, sys, time
 sys.dont_write_bytecode = True
@@ -14,8 +15,8 @@ for _lib in (os.path.join(_HERE, '..', 'lib'), os.path.join(_HERE, '..', '..', '
 import model_call_guard  # noqa: E402
 if __name__ == '__main__' and sys.argv[1:2] == ['pre-bash'] and model_call_guard.off_before_load():
     sys.exit(0)         # pre-bash runs before every Bash call: with guardModelCalls off, stop before loading the rest
-import common, relay_hooks, rows_claude  # noqa: E402
-from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, start_context, decide, record_tokens, _tool_answer,  # noqa: E402
+import common, relay_hooks, rows_claude, spawn  # noqa: E402
+from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, start_context, spawned_text, decide, record_tokens, _tool_answer,  # noqa: E402
                           bash_result, evidence_hint, is_test_command, record_test, record_bash, record_edit, record_note,
                           mark_relay, handoff_text, witness, _deny)
 from paths import edit_paths as normalise_edit_paths  # noqa: E402
@@ -125,12 +126,11 @@ def pre_agent(cfg, inp):
 
 
 def pre_bash(cfg, inp):
-    """guardModelCalls: refuse a Bash command that starts a model CLI without a time limit, a Relay run and its own
-    agent name. Local: reads only the command, calls nothing."""
+    """guardModelCalls: refuse a Bash command that starts a model CLI without a time limit. Local: reads only the
+    command, calls nothing."""
     if not model_call_guard.enabled(cfg) or (inp.get('tool_name') or '') != 'Bash':
         return None
-    run, agent, _ = _who(cfg, inp)
-    reason = model_call_guard.check(cfg, (inp.get('tool_input') or {}).get('command'), agent, run)
+    reason = model_call_guard.check(cfg, (inp.get('tool_input') or {}).get('command'))
     if reason:
         common.log(f"pre-bash: model CLI call refused ({reason.split('`')[1]})")
         return _deny(reason)
@@ -211,19 +211,27 @@ def main():
         return
     sid = inp.get('session_id') or ''
     out = None
+    if mode != 'session-start':
+        spawn.apply(cfg, sid)      # a session that joined its parent's run at start keeps that run and agent name
     if mode == 'session-start':
         common.start_local_server(cfg)
+        # started from another agent's shell: join its run (cfg changes); and leave marks for the agents this one starts
+        started = spawn.session_start(cfg, sid, inp.get('source') or '', transcript=inp.get('transcript_path') or '')
         if common.relay_off(cfg):
-            print(json.dumps(start_context(cfg, 'SessionStart', RECALL.format(sid=sid))))
+            print(json.dumps(start_context(cfg, 'SessionStart', RECALL.format(sid=sid) + spawned_text(started, '', '', ''))))
             return
         run, agent = common.run_id(cfg, sid), common.agent_name(cfg, sid)
         scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
-        text = RECALL.format(sid=sid) + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
-        try:      # a relay run's session starts with the record
-            block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
-        except Exception as e:
-            common.log(f"session-start record: {type(e).__name__}: {str(e)[:200]}")
+        if started.get('joined'):
+            text = RECALL.format(sid=sid) + spawned_text(started, run, agent, scratch)
             block = ''
+        else:
+            text = RECALL.format(sid=sid) + spawned_text(started, '', '', '') + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
+            try:      # a relay run's session starts with the record
+                block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
+            except Exception as e:
+                common.log(f"session-start record: {type(e).__name__}: {str(e)[:200]}")
+                block = ''
         out = start_context(cfg, 'SessionStart', text + ('\n\n' + block if block else ''))
     elif mode == 'subagent-start':
         upload(cfg, dict(inp, agent_transcript_path=None), SYNC_S - 1)

@@ -147,15 +147,16 @@ The check gives up after two seconds. If CtrlB does not answer, the edit goes ah
 
 In a relay run the plugin also registers a task for each sub-agent it spawns, keeps small text files from the session's scratch directories in the record, starts each session with the run's open tasks, contracts and handoffs, and claims shared files such as `REGISTRY.md` around each edit (`CTRLB_AUTO_SLOTS`, `CTRLB_SCRATCH_DIR`). See [Relay hooks](relay-hooks.md).
 
-### Guard model CLI calls (optional)
+### Agents started from a shell
 
-Set `CTRLB_GUARD_MODEL_CALLS=1` (or `"guardModelCalls": true` in `~/.ctrlb/config.json`) to make the plugin refuse a shell command that starts `codex exec`, `codex review` or `claude -p` without a time limit, a run and its own agent name. The agent gets the command to run instead:
+When an agent starts another agent from a shell command (`codex exec`, `claude -p`, or a script that runs one), the new agent finds the agent that started it when its own session starts. If that agent is in a relay run, the new one joins the same run under its own agent name and posts a note saying who started it, so it shows in the run view with its own holds and stalls. Its context names the parent's session, so it can search what the parent already did. Nothing reads the command, so this works through scripts, `xargs` and `make` too. On by default; `CTRLB_JOIN_SPAWNED=0` turns it off.
 
-```sh
-CTRLB_RUN=nightly-refactor-1 CTRLB_AGENT=reviewer-1 timeout 1200 codex exec "Review the diff in src/parser"
-```
+Two optional settings:
 
-The call then joins the run as its own worker, and if it stops, its task shows as stalled. Off by default. See [Relay hooks](relay-hooks.md#a-model-cli-call-needs-a-time-limit-and-a-run) for what the check sees and does not see.
+- `CTRLB_SPAWN_IDLE_MINUTES=30` (or `"spawnIdleMinutes": 30`) stops a started agent whose transcript has not changed for 30 minutes. It posts a note in the run, then sends SIGTERM, so the agent hands back its holds.
+- `CTRLB_GUARD_MODEL_CALLS=1` (or `"guardModelCalls": true`) refuses a shell command that starts `codex exec`, `codex review` or `claude -p` without `timeout` in front, for example `timeout 1200 codex exec "Review the diff in src/parser"`.
+
+See [Relay hooks](relay-hooks.md#an-agent-started-from-a-shell-joins-its-parents-run) for how the parent is found and what is not seen.
 
 ### When the session ends, and when the agent calls done
 

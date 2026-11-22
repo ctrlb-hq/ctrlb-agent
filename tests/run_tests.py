@@ -3,7 +3,7 @@
 CtrlB is a local fake that answers with the synthetic responses in tests/fixtures/seeker/.
 Nothing is sent anywhere else, Claude is never called, and no real config is read: every CTRLB_* variable from the
 calling environment is dropped and CTRLB_HOME points into tests/work/."""
-import base64, glob, hashlib, http.server, json, os, re, shutil, signal, socket, socketserver, stat, subprocess, sys, threading, time, traceback
+import base64, glob, hashlib, http.server, json, os, re, shutil, signal, socket, socketserver, stat, subprocess, sys, textwrap, threading, time, traceback
 from unittest import mock
 sys.dont_write_bytecode = True
 
@@ -263,7 +263,7 @@ def closed_port():
 # ---------------------------------------------------------------- helpers
 
 def base_env(url, home, **extra):
-    env = {k: v for k, v in os.environ.items() if not k.startswith('CTRLB_')}
+    env = {k: v for k, v in os.environ.items() if not k.startswith('CTRLB_') and k != 'CLAUDE_ENV_FILE'}
     env.update(CTRLB_HOME=home, CTRLB_URL=url, CTRLB_KEY=KEY)
     env.update(extra)
     return env
@@ -1911,15 +1911,14 @@ def test_project_list_fences():
 
 def test_model_call_guard(seeker):
     """guardModelCalls (docs/relay-hooks.md): with the setting on, a shell command that starts codex exec, codex review
-    or claude -p is refused unless it gives the model CLI a time limit, a Relay run and its own agent name. Off by
-    default; reads only the command; calls nothing."""
+    or claude -p is refused unless a time limit (timeout) runs it. Off by default; reads only the command; calls
+    nothing. Joining the run is not its job: the started agent finds its parent (test_spawned_agents)."""
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import model_call_guard as g
     on = {'guard_model_calls': True, 'run': ''}
-    ok_prefix = 'CTRLB_RUN=r1 CTRLB_AGENT=worker-1 timeout 1200 '
 
-    def reason(cmd, cfg=on, own='lead'):
-        return g.check(cfg, cmd, own, 'r1')
+    def reason(cmd, cfg=on):
+        return g.check(cfg, cmd)
 
     refused = {
         'bare codex exec': 'codex exec "fix the parser"',
@@ -1928,26 +1927,25 @@ def test_model_call_guard(seeker):
         'codex option before exec': 'codex -m gpt-6-astra -c x=1 exec "go"',
         'claude -p': 'claude -p "review this"',
         'claude --print with a full path': '/usr/local/bin/claude --model x --print hi',
-        'timeout 0 is no limit': 'CTRLB_RUN=r1 CTRLB_AGENT=worker-1 timeout 0 codex exec x',
-        'no run': 'CTRLB_AGENT=worker-1 timeout 60 codex exec x',
-        'no agent name': 'CTRLB_RUN=r1 timeout 60 codex exec x',
-        'the caller\'s own agent name': 'CTRLB_RUN=r1 CTRLB_AGENT=lead timeout 60 codex exec x',
-        'after cd and &&': 'cd repo && timeout 60 codex exec x',
+        'timeout 0 is no limit': 'timeout 0 codex exec x',
+        'run and agent but no time limit': 'CTRLB_RUN=r1 CTRLB_AGENT=worker-1 codex exec x',
+        'after cd and &&': 'cd repo && codex exec x',
         'on a second line': 'ls\ncodex exec x',
         'inside bash -lc': "cd repo && bash -lc 'codex exec hi' 2>&1",
         'inside $( ) in quotes': 'echo "$(claude -p hi)"',
         'in a subshell': '(cd d; codex exec x) > out.txt',
         'in the background': 'nohup codex exec x > log 2>&1 &',
-        'bare assignment is not exported': 'CTRLB_RUN=r1; CTRLB_AGENT=worker-1; timeout 60 codex exec x',
+        'a timeout on another command': 'timeout 5 make build; codex exec x',
     }
     bad = {n: c for n, c in refused.items() if not reason(c)}
-    check('guard: refuses each bare or incomplete model CLI call', not bad, json.dumps(bad))
+    check('guard: refuses each model CLI call with no time limit', not bad, json.dumps(bad))
     allowed = {
-        'all three as assignments': ok_prefix + 'codex exec "fix it"',
-        'env and timeout options': 'env CTRLB_RUN=r1 CTRLB_AGENT=worker-1 timeout -k 10 --signal=TERM 20m claude -p hi',
-        'export earlier in the command': 'export CTRLB_RUN=r1 CTRLB_AGENT=worker-1 && timeout 600 codex e x',
-        'outer timeout around bash -lc': ok_prefix + "bash -lc 'codex exec hi'",
-        'timeout from a variable': 'CTRLB_RUN=r1 CTRLB_AGENT=worker-1 timeout "$LIMIT" codex exec x',
+        'timeout alone': 'timeout 1200 codex exec "fix it"',
+        'assignments and timeout': 'CTRLB_RUN=r1 timeout 1200 codex exec "fix it"',
+        'env and timeout options': 'env A=1 timeout -k 10 --signal=TERM 20m claude -p hi',
+        'export earlier in the command': 'export CTRLB_RUN=r1 && timeout 600 codex e x',
+        'outer timeout around bash -lc': "timeout 1200 bash -lc 'codex exec hi'",
+        'timeout from a variable': 'timeout "$LIMIT" codex exec x',
         'codex --version': 'codex --version',
         'codex login status': 'codex login status',
         'codex resume (interactive)': 'codex resume --last',
@@ -1960,18 +1958,13 @@ def test_model_call_guard(seeker):
         'empty': '',
     }
     bad = {n: reason(c) for n, c in allowed.items() if reason(c)}
-    check('guard: lets through complete calls, other CLI commands and text that only names a model CLI', not bad,
+    check('guard: lets through timed calls, other CLI commands and text that only names a model CLI', not bad,
           json.dumps(bad)[:400])
-    check('guard: a run in the session environment or config file counts for the child',
-          not reason('CTRLB_AGENT=worker-1 timeout 60 codex exec x', dict(on, run='r9')))
-    check('guard: off by default (no setting), even for a bare call', g.check({'run': ''}, 'codex exec x', 'lead') is None)
+    check('guard: off by default (no setting), even for a bare call', g.check({'run': ''}, 'codex exec x') is None)
     r = reason('codex exec x') or ''
-    check('guard: the refusal names the call, each missing part and the command to run instead',
-          '`codex exec`' in r and 'a time limit' in r and 'CTRLB_RUN' in r and 'CTRLB_AGENT' in r
-          and 'CTRLB_RUN=r1 CTRLB_AGENT=<worker name> timeout 1200 codex exec' in r, r)
-    r = reason('CTRLB_RUN=r1 CTRLB_AGENT=worker-1 codex exec x') or ''
-    check('guard: a call missing only the time limit is refused for that alone',
-          'without a time limit.' in r and 'CTRLB_RUN)' not in r.split('guardModelCalls')[0], r)
+    check('guard: the refusal names the call, the time limit and the command to run instead, and asks for no run or name',
+          '`codex exec`' in r and 'without a time limit' in r and 'timeout 1200 codex exec' in r
+          and 'CTRLB_RUN' not in r and 'CTRLB_AGENT' not in r, r)
 
     # the setting: environment first, then the config file
     home = os.path.join(WORK, 'home-guard')
@@ -1997,15 +1990,11 @@ def test_model_call_guard(seeker):
     o = out_of(p)
     check('pre-bash: a bare codex exec is denied with the refusal, exit 0, no call to CtrlB',
           p.returncode == 0 and o.get('permissionDecision') == 'deny' and '`codex exec`' in o.get('permissionDecisionReason', '')
-          and f'CTRLB_RUN={SID}' in o.get('permissionDecisionReason', '') and not seeker.calls, f'{json.dumps(o)[:300]} {dt:.2f}s')
-    p, _ = hook('pre-bash', dict(inp, tool_input={'command': ok_prefix + 'codex exec x'}), dict(env, CTRLB_GUARD_MODEL_CALLS='1'))
-    check('pre-bash: a complete call prints nothing', p.returncode == 0 and not p.stdout.strip(), p.stdout[:200])
+          and not seeker.calls, f'{json.dumps(o)[:300]} {dt:.2f}s')
+    p, _ = hook('pre-bash', dict(inp, tool_input={'command': 'timeout 1200 codex exec x'}), dict(env, CTRLB_GUARD_MODEL_CALLS='1'))
+    check('pre-bash: a timed call prints nothing', p.returncode == 0 and not p.stdout.strip(), p.stdout[:200])
     p, _ = hook('pre-bash', inp, env)
     check('pre-bash: setting off prints nothing, calls nothing', p.returncode == 0 and not p.stdout.strip() and not seeker.calls)
-    p, _ = hook('pre-bash', dict(inp, tool_input={'command': 'CTRLB_RUN=r1 CTRLB_AGENT=lead timeout 9 codex exec x'}),
-                dict(env, CTRLB_GUARD_MODEL_CALLS='1', CTRLB_AGENT='lead'))
-    check('pre-bash: the session\'s own CTRLB_AGENT for the child is denied',
-          out_of(p).get('permissionDecision') == 'deny' and 'the name of this session' in out_of(p).get('permissionDecisionReason', ''))
     with open(os.path.join(home, 'config.json'), 'w') as fh:
         json.dump({'guardModelCalls': True}, fh)
     p, _ = hook('pre-bash', inp, env)
@@ -2048,8 +2037,210 @@ def test_model_call_guard(seeker):
     skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
     check('docs: relay-hooks.md documents guardModelCalls, its variable, pre-bash and what it does not see',
           'guardModelCalls' in doc and 'CTRLB_GUARD_MODEL_CALLS' in doc and '`pre-bash`' in doc and 'script' in doc)
-    check('relay skill: a model CLI call runs with timeout, CTRLB_RUN and its own CTRLB_AGENT',
-          'timeout' in skill and 'CTRLB_RUN=' in skill and 'CTRLB_AGENT=' in skill and 'guardModelCalls' in skill)
+    check('relay skill: a model CLI call runs under timeout, and the agent it starts joins the run on its own',
+          'timeout' in skill and 'guardModelCalls' in skill and 'joinSpawned' in skill)
+
+
+def _spawn_lib():
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import spawn
+    return spawn
+
+
+def test_spawned_agents(seeker):
+    """joinSpawned (docs/relay-hooks.md, lib/spawn.py): an agent CLI started from another agent's shell finds that agent
+    when it starts, from a process record or the CTRLB_PARENT_* variables, joins its Relay run under its own name when
+    that agent is in one, and says who started it. No command text is read."""
+    spawn = _spawn_lib()
+    main, sub = setup_transcripts()
+    I = inputs(main, sub)
+    home = os.path.join(WORK, 'home-spawn')
+    shutil.rmtree(home, ignore_errors=True)
+    env = base_env(seeker.url, home)
+    PSID = '7a7a7a7a-0000-4000-8000-0000000000aa'
+
+    # the decision, alone
+    lead = dict(session=PSID, run='run-s1', agent='lead', relay=True, how='environment')
+    d = spawn.decide({'run': '', 'agent': ''}, SID, lead, 'codex')
+    check('decide: a child with no run of its own joins a parent in a run, named <parent>.<program>-<8 of its id>',
+          d['joined'] and d['run'] == 'run-s1' and d['agent'] == 'lead.codex-' + SID[:8] and not d['renamed'], json.dumps(d))
+    d = spawn.decide({'run': 'run-s1', 'agent': 'lead'}, SID, lead, 'claude')
+    check("decide: a child that inherited the parent's run and agent name joins under a name of its own",
+          d['joined'] and d['renamed'] and d['agent'] == 'lead.claude-' + SID[:8], json.dumps(d))
+    d = spawn.decide({'run': 'bench-4', 'agent': 'worker-2'}, SID, lead, 'claude')
+    check('decide: a child with its own run and agent name is left as it is',
+          not d['joined'] and not d['renamed'] and d['run'] == 'bench-4' and d['agent'] == 'worker-2', json.dumps(d))
+    d = spawn.decide({'run': 'bench-4', 'agent': 'lead'}, SID, lead, 'claude')
+    check("decide: its own run but the parent's agent name: stays in its run, renamed",
+          not d['joined'] and d['renamed'] and d['run'] == 'bench-4' and d['agent'] == 'lead.claude-' + SID[:8], json.dumps(d))
+    d = spawn.decide({'run': '', 'agent': ''}, SID, dict(lead, relay=False, run=PSID, agent=PSID), 'codex')
+    check('decide: a parent in no relay run is not joined, and a parent with no label gives no prefix',
+          not d['joined'] and d['agent'] == '' and spawn.child_name(PSID, PSID, 'codex', SID) == 'codex-' + SID[:8], json.dumps(d))
+
+    # the Claude Code parent: CTRLB_PARENT_* in CLAUDE_ENV_FILE, appended, once
+    env_file = os.path.join(WORK, 'spawn-env-file')
+    with open(env_file, 'w') as fh:
+        fh.write('export OTHER_PLUGIN=1\n')
+    pin = dict(I['session_start'], session_id=PSID)
+    seeker.reset()
+    p, _ = hook('session-start', pin, dict(env, CTRLB_RUN='run-s1', CTRLB_AGENT='lead', CLAUDE_ENV_FILE=env_file))
+    hook('session-start', pin, dict(env, CTRLB_RUN='run-s1', CTRLB_AGENT='lead', CLAUDE_ENV_FILE=env_file))
+    text = open(env_file).read()
+    check('parent: session-start appends CTRLB_PARENT_SESSION, _RUN, _AGENT and _RELAY to CLAUDE_ENV_FILE once, keeping other lines',
+          text.startswith('export OTHER_PLUGIN=1\n') and text.count(f'export CTRLB_PARENT_SESSION={PSID}\n') == 1
+          and 'export CTRLB_PARENT_RUN=run-s1\n' in text and 'export CTRLB_PARENT_AGENT=lead\n' in text
+          and 'export CTRLB_PARENT_RELAY=1\n' in text and p.returncode == 0, text)
+    check('parent: its own context is unchanged and nothing is written to CtrlB', 'run id is run-s1' in out_of(p).get('additionalContext', '')
+          and 'started you' not in out_of(p).get('additionalContext', '') and not [c for c in seeker.calls if c['method'] != 'GET'])
+
+    # a Claude Code child that inherited the parent's variables (and its CTRLB_RUN and CTRLB_AGENT)
+    parent_env = dict(CTRLB_PARENT_SESSION=PSID, CTRLB_PARENT_RUN='run-s1', CTRLB_PARENT_AGENT='lead', CTRLB_PARENT_RELAY='1')
+    seeker.reset()
+    p, _ = hook('session-start', I['session_start'], dict(env, CTRLB_RUN='run-s1', CTRLB_AGENT='lead', **parent_env))
+    ctx = out_of(p).get('additionalContext', '')
+    name = spawn.child_name('lead', PSID, '', SID)
+    check('child: joins the run under its own name and is told who started it, with the parent session to search',
+          'run id is run-s1' in ctx and f'agent id is {name}' in ctx and f'lead (session {PSID}) started you' in ctx
+          and f'search_sessions` with session_id {PSID}' in ctx and 'Do the work you were asked to do' in ctx, ctx[-900:])
+    check('child: is not told to take the next free task', 'claim(next=true)' not in ctx and 'no task and stop' not in ctx)
+    posts = [c for c in seeker.calls if c['path'].endswith('/runs/run-s1/posts')]
+    check('child: posts one note in the run saying who started it', len(posts) == 1 and posts[0]['body']['agent'] == name
+          and f'Started by lead (session {PSID})' in posts[0]['body']['text'], json.dumps(seeker.calls)[:400])
+    seeker.reset()
+    p, _ = hook('session-start', I['session_start_compact'], dict(env, CTRLB_RUN='run-s1', CTRLB_AGENT='lead', **parent_env))
+    check('child after compaction: the same name, no second note', f'agent id is {name}' in out_of(p).get('additionalContext', '')
+          and not [c for c in seeker.calls if c['path'].endswith('/posts')])
+    seeker.reset()
+    hook('upload', I['stop'], dict(env, CTRLB_RUN='run-s1', CTRLB_AGENT='lead', **parent_env))
+    rows = [r for r in seeker.rows if r.get('session_id') == SID]
+    check("child: every later hook uses the decision: its rows carry the run and its own name, not the parent's",
+          rows and all(r.get('run_id') == 'run-s1' and r.get('agent') == name for r in rows),
+          json.dumps([(r.get('run_id'), r.get('agent')) for r in rows[:3]]))
+
+    # a parent in no relay run: the child is told who started it and joins nothing
+    shutil.rmtree(home, ignore_errors=True)
+    seeker.reset()
+    quiet = dict(parent_env, CTRLB_PARENT_RUN=PSID, CTRLB_PARENT_AGENT=PSID, CTRLB_PARENT_RELAY='0')
+    p, _ = hook('session-start', I['session_start'], dict(env, **quiet))
+    ctx = out_of(p).get('additionalContext', '')
+    check('child of a parent in no run: told who started it, keeps its own run, nothing sent',
+          f'(session {PSID}) started you' in ctx and f'run id is {SID}' in ctx and 'Do the work you were asked' not in ctx
+          and not seeker.calls, ctx[-600:])
+    # the same parent, once it called a relay tool: the next child joins
+    shutil.rmtree(home, ignore_errors=True)
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    subprocess.run([sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib')) + '); '
+                    f'import common; common.SessionRecord({PSID!r}, {PSID!r}).update({PSID!r}, lambda r: r.update(relay=True))'],
+                   env=env, check=True)
+    seeker.reset()
+    p, _ = hook('session-start', I['session_start'], dict(env, **quiet))
+    ctx = out_of(p).get('additionalContext', '')
+    check('child of a parent that called a relay tool after it started: joins that run (the session id), no label prefix',
+          f'run id is {PSID}' in ctx and f'agent id is agent-{SID[:8]}' in ctx, ctx[-600:])
+
+    # joinSpawned off: nothing changes
+    shutil.rmtree(home, ignore_errors=True)
+    seeker.reset()
+    p, _ = hook('session-start', I['session_start'], dict(env, CTRLB_JOIN_SPAWNED='0', CTRLB_RUN='run-s1', CTRLB_AGENT='lead', **parent_env))
+    ctx = out_of(p).get('additionalContext', '')
+    check('joinSpawned off: the child keeps the inherited name, is told nothing, writes nothing to CtrlB',
+          'agent id is lead' in ctx and 'started you' not in ctx and not [c for c in seeker.calls if c['method'] != 'GET']
+          and not os.path.exists(os.path.join(home, 'spawn')))
+
+    # the process record: a Codex parent (no environment file) found by the child's process tree
+    shutil.rmtree(home, ignore_errors=True)
+    bindir = os.path.join(WORK, 'spawn-bin')
+    shutil.rmtree(bindir, ignore_errors=True)
+    os.makedirs(bindir)
+    for prog in ('codex', 'claude'):
+        os.symlink(sys.executable, os.path.join(bindir, prog))
+    cin = load('hooks/codex.json')['session_start']
+    cin = dict(cin, session_id=PSID, transcript_path='')
+    # driver.py runs as "codex" (the parent): its own session-start hook writes its process record, then it starts
+    # child.py as "claude" without CTRLB_RUN or CTRLB_AGENT; child.py runs its session-start hook and prints its output
+    driver, child = os.path.join(WORK, 'spawn-driver.py'), os.path.join(WORK, 'spawn-child.py')
+    with open(os.path.join(WORK, 'spawn-in.json'), 'w') as fh:
+        json.dump(dict(parent=cin, child=I['session_start'], codex_hook=CODEX_HOOK, hook=HOOK,
+                       claude=os.path.join(bindir, 'claude'), child_py=child), fh)
+    with open(driver, 'w') as fh:
+        fh.write(textwrap.dedent("""
+            import json, os, subprocess, sys
+            d = json.load(open(sys.argv[1]))
+            subprocess.run([sys.executable, '-I', d['codex_hook'], 'session-start'], input=json.dumps(d['parent']),
+                           text=True, capture_output=True)
+            env = {k: v for k, v in os.environ.items() if k not in ('CTRLB_RUN', 'CTRLB_AGENT')}
+            out = subprocess.run([d['claude'], '-I', d['child_py'], sys.argv[1]], text=True, capture_output=True, env=env)
+            sys.stdout.write(out.stdout)
+            sys.stderr.write(out.stderr)
+        """))
+    with open(child, 'w') as fh:
+        fh.write(textwrap.dedent("""
+            import json, subprocess, sys
+            d = json.load(open(sys.argv[1]))
+            p = subprocess.run([sys.executable, '-I', d['hook'], 'session-start'], input=json.dumps(d['child']),
+                               text=True, capture_output=True)
+            sys.stdout.write(p.stdout)
+        """))
+    seeker.reset()
+    p = subprocess.run([os.path.join(bindir, 'codex'), '-I', driver, os.path.join(WORK, 'spawn-in.json')],
+                       capture_output=True, text=True, timeout=60, env=dict(env, CTRLB_RUN='run-s2', CTRLB_AGENT='lead'))
+    ctx = out_of(subprocess.CompletedProcess([], 0, p.stdout.strip(), '')).get('additionalContext', '')
+    check('process record: a child of a Codex parent finds it with no variables, joins its run as lead.claude-<id>',
+          'run id is run-s2' in ctx and f'agent id is lead.claude-{SID[:8]}' in ctx and f'lead (session {PSID}) started you' in ctx,
+          (ctx or p.stdout + p.stderr)[-600:])
+    j = json.load(open(os.path.join(home, 'spawn', 'sessions', SID + '.json')))
+    check('process record: the decision is kept, found by process', j.get('how') == 'process' and j.get('parent') == PSID, json.dumps(j))
+    tree = {100: (200, 'claude', 'S1'), 200: (300, 'codex', 'S2'), 300: (1, 'zsh', 'S3')}
+    with open(spawn._record_path(200), 'w') as fh:
+        json.dump(dict(session=PSID, run='run-s3', agent='lead', relay=True, start='OLD'), fh)
+    with mock.patch.object(spawn, '_proc', lambda pid: tree.get(pid)):
+        stale = spawn.find_parent((100, 'claude', 'S1'), SID, env={})
+        with open(spawn._record_path(200), 'w') as fh:
+            json.dump(dict(session=PSID, run='run-s3', agent='lead', relay=True, start='S2'), fh)
+        found = spawn.find_parent((100, 'claude', 'S1'), SID, env={})
+        own = spawn.find_parent((100, 'claude', 'S1'), PSID, env={})
+    os.remove(spawn._record_path(200))
+    check('process record: one whose start time does not match its process (a reused pid) is ignored; a match is found; '
+          'a record of the session itself is not its parent', stale is None and found and found['run'] == 'run-s3'
+          and found['how'] == 'process' and own is None, json.dumps([stale, found, own]))
+    p = subprocess.run([sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib'))
+                        + '); import spawn; print(spawn.agent_process())'], capture_output=True, text=True, env=env)
+    check('own agent process: a hook run by another program (not an agent or a shell under one) has none',
+          p.stdout.strip() == 'None', p.stdout + p.stderr[-200:])
+
+    # spawnIdleMinutes: the watchdog stops a process whose transcript does not change, and not one whose transcript does
+    tr = os.path.join(WORK, 'spawn-transcript.jsonl')
+    open(tr, 'w').close()
+    victim = subprocess.Popen(['sleep', '60'])
+    start = spawn._proc(victim.pid)[2]
+    t0 = time.monotonic()
+    stop_touch = time.monotonic() + 3
+    th = threading.Thread(target=spawn._watcher, args=(dict(pid=victim.pid, start=start, transcript=tr, minutes=1.5 / 60), 0.2, 1))
+    th.start()
+    while time.monotonic() < stop_touch:
+        os.utime(tr)
+        time.sleep(0.3)
+    alive_while_busy = victim.poll() is None
+    try:
+        victim.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        victim.kill()
+    th.join(5)
+    check('spawnIdleMinutes: alive while its transcript changes; stopped (SIGTERM) once it stops changing',
+          alive_while_busy and victim.returncode == -signal.SIGTERM and time.monotonic() - t0 < 9, f'{victim.returncode}')
+    check('setting: joinSpawned on by default; spawnIdleMinutes 0 by default and read as minutes',
+          json.loads(subprocess.run([sys.executable, '-I', '-c', 'import sys, json; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib'))
+                                     + '); import common; c = common.config(); print(json.dumps([c["join_spawned"], c["spawn_idle_minutes"]]))'],
+                                    capture_output=True, text=True, env=env).stdout) == [True, 0]
+          and json.loads(subprocess.run([sys.executable, '-I', '-c', 'import sys, json; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib'))
+                                         + '); import common; c = common.config(); print(json.dumps([c["join_spawned"], c["spawn_idle_minutes"]]))'],
+                                        capture_output=True, text=True,
+                                        env=dict(env, CTRLB_JOIN_SPAWNED='off', CTRLB_SPAWN_IDLE_MINUTES='30')).stdout) == [False, 30])
+
+    doc = open(os.path.join(ROOT, 'docs', 'relay-hooks.md')).read()
+    check('docs: relay-hooks.md documents joinSpawned, spawnIdleMinutes and how the parent is found',
+          'joinSpawned' in doc and 'CTRLB_JOIN_SPAWNED' in doc and 'spawnIdleMinutes' in doc and 'CLAUDE_ENV_FILE' in doc
+          and 'process record' in doc)
 
 
 def test_codex_install():
@@ -4991,6 +5182,7 @@ def main():
     run_test(test_witness_docs)
     run_test(test_pre_tool, seeker)
     run_test(test_model_call_guard, seeker)
+    run_test(test_spawned_agents, seeker)
     run_test(test_keys)
     run_test(test_edit_keys_across_harnesses, seeker)
     run_test(test_docs)

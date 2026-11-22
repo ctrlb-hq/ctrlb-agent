@@ -8,14 +8,15 @@ A hook never fails or blocks a session: every error goes to ~/.ctrlb/hooks.log a
 open (no output) on any error and gives up after two seconds.
 
 As described in docs/relay-hooks.md, session-start creates the run's scratch directory and, in a relay run (CTRLB_RUN), adds
-the record block. Codex gets no spawn registration, no artefact posting and
+the record block, and a session started from another agent's shell finds that agent (lib/spawn.py: a process record,
+since Codex has no environment file). Codex gets no spawn registration, no artefact posting and
 no autoSlots: its hooks have no sub-agent tool input to read and no hook after a tool call, so a slot
 claimed before a patch could not be released after it."""
 import json, os, signal, sys, time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
-import common, model_call_guard, relay_hooks, rows_codex  # noqa: E402
-from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, start_context, decide, _deny  # noqa: E402
+import common, model_call_guard, relay_hooks, rows_codex, spawn  # noqa: E402
+from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, start_context, spawned_text, decide, _deny  # noqa: E402
 
 SYNC_S, ASYNC_S = 5, 90
 HANDOFF_S = 0.8
@@ -83,19 +84,15 @@ def pre_tool(cfg, inp):
 
 
 def pre_bash(cfg, inp):
-    """guardModelCalls: refuse a shell command that starts a model CLI without a time limit, a Relay run and its own
-    agent name. Codex matches its shell tools as Bash, with the command in tool_input.command."""
+    """guardModelCalls: refuse a shell command that starts a model CLI without a time limit. Codex matches its shell
+    tools as Bash, with the command in tool_input.command."""
     if not model_call_guard.enabled(cfg):
         return None
     ti = inp.get('tool_input')
     command = ti.get('command') if isinstance(ti, dict) else ti
     if not command:
         return None
-    sid = inp.get('session_id') or ''
-    run, parent = session_run(cfg, sid, inp.get('transcript_path'))
-    sub = inp.get('agent_id') or ''
-    agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid, parent)
-    reason = model_call_guard.check(cfg, command, agent, run)
+    reason = model_call_guard.check(cfg, command)
     if reason:
         common.log(f"codex pre-bash: model CLI call refused ({reason.split('`')[1]})")
         return _deny(reason)
@@ -123,21 +120,33 @@ def main():
     sid = inp.get('session_id') or ''
     event = inp.get('hook_event_name') or mode
     out = None
+    if mode != 'session-start':
+        spawn.apply(cfg, sid)      # a session that joined its parent's run at start keeps that run and agent name
     if mode == 'session-start':
         common.start_local_server(cfg)
+        _, parent = session_run(cfg, sid, inp.get('transcript_path'))
+        started = {}
+        if parent:      # a subagent thread: its root session decided at its own start
+            spawn.apply(cfg, rows_codex.session_run(cfg, sid, parent, inp.get('transcript_path') or ''))
+        else:           # Codex has no environment file: '' keeps a CLAUDE_ENV_FILE inherited from a parent's shell unused
+            started = spawn.session_start(cfg, sid, inp.get('source') or '', env_file='',
+                                          transcript=inp.get('transcript_path') or '')
         run, parent = session_run(cfg, sid, inp.get('transcript_path'))
         head = SUBAGENT.format(sid=parent) if parent else RECALL.format(sid=sid)
         if common.relay_off(cfg):
-            print(json.dumps(start_context(cfg, 'SessionStart', head)))
+            print(json.dumps(start_context(cfg, 'SessionStart', head + spawned_text(started, '', '', ''))))
             return
         agent = rows_codex.agent_for(cfg, sid, parent)
         scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
-        text = head + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
-        try:      # a relay run's session starts with the record
-            block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
-        except Exception as e:
-            common.log(f"codex session-start record: {type(e).__name__}: {str(e)[:200]}")
-            block = ''
+        if started.get('joined'):
+            text, block = head + spawned_text(started, run, agent, scratch), ''
+        else:
+            text = head + spawned_text(started, '', '', '') + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
+            try:      # a relay run's session starts with the record
+                block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
+            except Exception as e:
+                common.log(f"codex session-start record: {type(e).__name__}: {str(e)[:200]}")
+                block = ''
         out = start_context(cfg, 'SessionStart', text + ('\n\n' + block if block else ''))
     elif mode == 'subagent-start':
         upload(cfg, [inp.get('transcript_path')], SYNC_S - 1, event, sid)

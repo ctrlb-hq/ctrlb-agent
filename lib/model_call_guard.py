@@ -1,17 +1,15 @@
 """guardModelCalls: refuse a shell command that starts a model CLI (codex exec, codex review, claude -p) without a time
-limit, a Relay run and its own agent name. Standard library only. Off unless CTRLB_GUARD_MODEL_CALLS or the config key
-guardModelCalls turns it on. docs/relay-hooks.md describes it.
+limit in front of it. Standard library only. Off unless CTRLB_GUARD_MODEL_CALLS or the config key guardModelCalls turns
+it on. docs/relay-hooks.md describes it.
 
-A model CLI started from a shell call with no time limit can block that call for hours, and a worker outside a Relay
-run holds no claim, so nothing shows it as stalled. With the guard on, the command must give the model CLI:
-  - `timeout <duration>` in front of it (a duration above zero),
-  - CTRLB_RUN, set in the command (VAR=value, env VAR=value, or export VAR=value earlier in the same command), or
-    already in the session's environment or config file,
-  - CTRLB_AGENT, set in the command, different from the calling agent's own name.
+A model CLI started from a shell call with no time limit can block that call for hours. Joining the Relay run does not
+need the command: the started agent finds its parent when it starts (lib/spawn.py). This check is only the time limit:
+`timeout <duration>` (a duration above zero) in front of the model CLI.
 
 The check reads only the command text. It sees through env assignments, env, timeout, nohup, exec, command, time,
 setsid, nice, stdbuf, `bash -c` (sh, zsh, dash) and $( ) substitutions. A model CLI started from a script, or through
-another program (xargs, npx, a Makefile), is not seen. A command the tokenizer cannot read is let through."""
+another program (xargs, npx, a Makefile), is not seen; spawnIdleMinutes (lib/spawn.py) covers those. A command the
+tokenizer cannot read is let through."""
 import json
 import os
 import re
@@ -145,16 +143,13 @@ def _valid_duration(d):
     return bool(m) and float(m.group(1)) > 0
 
 
-def _scan(words, env, timeout, found, depth):
-    """Walk one simple command's prefixes (assignments and wrappers) and record any model CLI it starts, with the
-    environment and time limit in force for it. env: variables set for the command; timeout: None, or the duration."""
-    env = dict(env)
+def _scan(words, timeout, found, depth):
+    """Walk one simple command's prefixes (assignments and wrappers) and record any model CLI it starts, with the time
+    limit in force for it: None, or the duration."""
     i = 0
     while i < len(words):
         w = words[i]
-        m = ASSIGN_RE.match(w)
-        if m:
-            env[m.group(1)] = m.group(2)
+        if ASSIGN_RE.match(w):
             i += 1
             continue
         prog = os.path.basename(w)
@@ -192,7 +187,7 @@ def _scan(words, env, timeout, found, depth):
             rest = words[i + 1:]
             for k, a in enumerate(rest):
                 if a.startswith('-') and not a.startswith('--') and 'c' in a[1:] and k + 1 < len(rest):
-                    _walk(rest[k + 1], env, timeout, found, depth + 1)
+                    _walk(rest[k + 1], timeout, found, depth + 1)
                     break
                 if not a.startswith('-'):
                     break
@@ -201,63 +196,45 @@ def _scan(words, env, timeout, found, depth):
     rest = words[i:]
     call = _model_call(rest)
     if call:
-        found.append((call, env, timeout))
+        found.append((call, timeout))
     for w in rest:
         for inner in _substitutions(w):
-            _walk(inner, env, timeout, found, depth + 1)
+            _walk(inner, timeout, found, depth + 1)
 
 
-def _walk(text, env, timeout, found, depth=0):
+def _walk(text, timeout, found, depth=0):
     if depth > MAX_DEPTH:
         return
-    exported = {}
     for seg in _segments(_tokens(_drop_heredocs(text.replace('\\\n', ' ')))):
-        if os.path.basename(seg[0]) == 'export':
-            for w in seg[1:]:
-                m = ASSIGN_RE.match(w)
-                if m:
-                    exported[m.group(1)] = m.group(2)
-            continue
-        _scan(seg, dict(env, **exported), timeout, found, depth)
+        if os.path.basename(seg[0]) != 'export':
+            _scan(seg, timeout, found, depth)
 
 
 def model_calls(command):
-    """[(call, env, timeout)] for each model CLI the command starts. Raises ValueError when the command cannot be read."""
+    """[(call, timeout)] for each model CLI the command starts. Raises ValueError when the command cannot be read."""
     if isinstance(command, list):
         command = shlex.join(str(c) for c in command)
     found = []
-    _walk(str(command or ''), {}, None, found)
+    _walk(str(command or ''), None, found)
     return found
 
 
-def check(cfg, command, own_agent, run_hint=''):
-    """The refusal text when the guard is on and the command starts a model CLI without a time limit, a run or its
-    own agent name; None otherwise (including when the command cannot be read)."""
+def check(cfg, command):
+    """The refusal text when the guard is on and the command starts a model CLI without a time limit; None otherwise
+    (including when the command cannot be read)."""
     if not enabled(cfg):
         return None
     try:
         calls = model_calls(command)
     except ValueError:
         return None
-    for call, env, timeout in calls:
-        missing = []
+    for call, timeout in calls:
         if not timeout:
-            missing.append('a time limit')
-        if not (env.get('CTRLB_RUN') or '').strip() and not (cfg.get('run') or '').strip():
-            missing.append('a Relay run (CTRLB_RUN)')
-        agent = (env.get('CTRLB_AGENT') or '').strip()
-        if not agent:
-            missing.append('its own agent name (CTRLB_AGENT)')
-        elif agent == own_agent:
-            missing.append(f'its own agent name (CTRLB_AGENT is {agent}, the name of this session)')
-        if missing:
-            return refusal(call, missing, run_hint or cfg.get('run') or '')
+            return refusal(call)
     return None
 
 
-def refusal(call, missing, run):
-    need = ', '.join(missing[:-1]) + (' and ' if len(missing) > 1 else '') + missing[-1]
-    return (f'CtrlB Relay: this command starts `{call}` without {need}. guardModelCalls is on: every model CLI call '
-            'needs a time limit and must join a Relay run under its own agent name, so a stalled worker shows in the '
-            f'run view. Run it like this: CTRLB_RUN={run or "<run id>"} CTRLB_AGENT=<worker name> timeout 1200 '
-            f'{call} ... The worker then claims its task in that run.')
+def refusal(call):
+    return (f'CtrlB Relay: this command starts `{call}` without a time limit. guardModelCalls is on: a model CLI call '
+            'needs one, so a stuck call cannot hold this shell for hours. Run it like this: timeout 1200 '
+            f'{call} ... The agent it starts finds this session on its own, and joins its Relay run when it has one.')

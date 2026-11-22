@@ -1,6 +1,6 @@
 ---
 title: Relay hooks
-description: What each CtrlB Relay hook of the Claude Code plugin and the Codex hooks reads, writes and how long it may take, including the hooks that register spawned sub-agents, keep scratch artefacts, start a session with the record, manage shared-file slots and guard model CLI calls.
+description: What each CtrlB Relay hook of the Claude Code plugin and the Codex hooks reads, writes and how long it may take, including the hooks that register spawned sub-agents, keep scratch artefacts, start a session with the record, manage shared-file slots, let an agent started from a shell join its parent's run, and require a time limit on model CLI calls.
 slug: relay-hooks
 ---
 
@@ -30,6 +30,8 @@ Budgets ("Timeouts", SessionStart, SessionEnd): a hook's `timeout` in `hooks.jso
 |---|---|---|---|
 | `scratchDir` | `CTRLB_SCRATCH_DIR` (`{run}` is replaced by the run id) | `scratchDir` | `~/.ctrlb/relay/<run id>/scratch` (under `CTRLB_HOME`) |
 | `autoSlots` | `CTRLB_AUTO_SLOTS` (comma-separated relative paths; empty turns it off) | `autoSlots` (a list) | `["REGISTRY.md"]` |
+| `joinSpawned` | `CTRLB_JOIN_SPAWNED` (`0`, `false`, `off` or `no` turns it off) | `joinSpawned` (`true` or `false`) | on |
+| `spawnIdleMinutes` | `CTRLB_SPAWN_IDLE_MINUTES` (minutes; `0` turns it off) | `spawnIdleMinutes` (a number) | off (`0`) |
 | `guardModelCalls` | `CTRLB_GUARD_MODEL_CALLS` (`1`, `true`, `on` or `yes` turns it on; any other value turns it off) | `guardModelCalls` (`true` or `false`) | off |
 
 A hook "is in a relay run" as the session-end handoff decides it: `CTRLB_RUN` is set, or a ctrlb relay tool was called in this session.
@@ -42,9 +44,10 @@ A hook "is in a relay run" as the session-end handoff decides it: `CTRLB_RUN` is
 | Artefacts (`post-tool`) | PostToolUse, `Edit\|Write\|MultiEdit\|NotebookEdit\|...` | 5 s | the checks inline, the post detached (10 s) | `POST .../posts` with `key` and `hash` | open: no output; a failed post is retried on the next write |
 | Record at session start (`session-start`) | SessionStart | 10 s | synchronous, all reads in parallel inside 3 s | `GET .../tasks`, `GET .../contracts?agent=`, `GET .../peers?kind=note`, `GET .../peers?kind=handoff`, `GET .../artifacts?agent=` | the rule always; a part that did not answer comes from the local cache, or is left out |
 | Scratch directory (`session-start`) | SessionStart | 10 s | local | none | — |
+| Started agent finds its parent (`session-start`) | SessionStart | 10 s | synchronous; the note inside 1.5 s | `POST .../posts` (one note, only when it joins its parent's run) | open: an error leaves the session as if no agent started it |
 | autoSlots claim (`pre-tool`) | PreToolUse, `Edit\|Write\|MultiEdit\|NotebookEdit` | 5 s | synchronous, the claim inside 1.5 s (alarm at 2 s) | `POST .../claims` `{resource: "slot:<path>", paths: [<path>]}` | open: deny only on a definite answer that another agent holds it |
 | autoSlots release (`post-tool`, `post-tool-failure`) | PostToolUse and PostToolUseFailure, edit tools | 5 s | synchronous, inside 1 s | `DELETE .../claims` `{resource: "slot:<path>"}` | the slot lapses (a slot's lease is two minutes) |
-| Model CLI guard (`pre-bash`) | PreToolUse, `Bash` | 5 s | synchronous, local (alarm at 2 s) | none | open: a command it cannot read, or an error, lets the command run |
+| Model CLI time limit (`pre-bash`) | PreToolUse, `Bash` | 5 s | synchronous, local (alarm at 2 s) | none | open: a command it cannot read, or an error, lets the command run |
 | Session-end handoff (`session-end`) | SessionEnd | 10 s (the 1.5 s budget applies) | synchronous, 0.8 s | `POST .../handoffs` `{all: true, to: ""}` | nothing written |
 
 Every call goes to the CtrlB URL under the agent's key (`Authorization: Bearer`), as every other hook call does.
@@ -88,23 +91,36 @@ For an edit of a file `autoSlots` lists (matched by its path relative to `cwd`),
 
 Fail-open: a claim that errors or does not answer inside 1.5 s lets the edit go ahead, with no edit check, and a line in the hook log. A slow CtrlB must not stall every edit of a shared file; the cost is that two agents may write it at once while CtrlB is slow, which `Edit`'s own exact-match replacement mostly catches. Only a definite answer that another agent holds the slot denies.
 
-### A model CLI call needs a time limit and a run
+### An agent started from a shell joins its parent's run
 
-Only with `guardModelCalls` on. PreToolUse on `Bash`. The hook refuses a command that starts `codex exec` (or `codex e`), `codex review`, or `claude` with `-p` or `--print`, unless the command gives that call all three of these:
+On by default (`joinSpawned`). An agent can start another agent from a shell command: `codex exec`, `claude -p`, or a script or `make` target that runs one. The plugin does not read the command to find this. Instead, when the new agent's own session starts, its SessionStart hook finds the agent that started it. This works whatever ran it: a script, `xargs`, `make`, a pipe or a background job.
 
-- **A time limit:** `timeout <duration>` in front of the call, with a duration above zero (`1200`, `20m`). A call with no time limit can block the shell command, and the agent that started it, for hours.
-- **A run:** `CTRLB_RUN`, set in the command (`CTRLB_RUN=<run> ...`, `env CTRLB_RUN=<run> ...`, or `export CTRLB_RUN=<run>` earlier in the same command), or already in the session's environment or `~/.ctrlb/config.json`, which the call inherits.
-- **Its own agent name:** `CTRLB_AGENT`, set in the command, different from the agent id of the session that starts it.
+- **Every session leaves two marks for the agents it starts.**
+  - A process record, `~/.ctrlb/spawn/procs/<pid>.json`, for its agent process: its session id, run, agent id, whether it is in a relay run, and the process start time (so a reused process id does not match).
+  - In Claude Code, `CTRLB_PARENT_SESSION`, `CTRLB_PARENT_RUN`, `CTRLB_PARENT_AGENT` and `CTRLB_PARENT_RELAY` in the session's `CLAUDE_ENV_FILE`. Claude Code sets these for every later Bash command, so every process those commands start inherits them, even one that leaves the process tree (`nohup`, `setsid`). Codex has no such file, so a Codex parent is found by its process record only.
+- **The new session finds its parent.** It is the nearest agent process above the new session's own process that has a process record. When there is none, the `CTRLB_PARENT_*` variables give it.
+- **It joins the parent's run when the parent is in one.** The parent is in a run when `CTRLB_RUN` was set for it, or it has called a ctrlb relay tool. The new agent then takes the parent's run and an agent name of its own: `<parent agent>.<claude|codex>-<first 8 characters of its session id>`. The parent's name is left out when the parent has no `CTRLB_AGENT`. It posts one note in the run, `Started by <parent> (session <id>) from its shell`, so the run view shows it from its first minute, with its own rows, holds and stalls.
+- **Its context says who started it.** It gets the parent's session id to search with `search_sessions`. When it joined the run, it also gets its run id and agent id, and the rule to claim files before it edits them and to post one note when it finishes. It is not told to claim the next free task: it has the job its parent gave it.
+- **A worker with its own run is left as it is.** A new agent started with its own `CTRLB_RUN` (not the parent's) and its own `CTRLB_AGENT` changes nothing. One that inherited the parent's `CTRLB_AGENT` gets a name of its own, so its claims are not taken for the parent's.
+- **The decision is kept.** It is stored in `~/.ctrlb/spawn/sessions/<session id>.json`, so every later hook of that session (its edit checks, its uploads, its session-end handoff) uses the same run and agent name. A compacted or resumed session keeps it and posts no second note.
 
-So the call joins the run as a worker of its own. It claims its task there, and when it stops working, the task shows as stalled in the run view and another agent can take it over. A call outside a run holds no claim, so nothing can show that it stopped.
+Limits: the new agent must run the plugin's hooks (Claude Code with the plugin; Codex with `codex/install.py` run and its hooks approved). Another agent CLI is not seen. With `joinSpawned` off, a session leaves no marks and finds no parent.
 
-The refusal names what is missing and the command to run instead, for example:
+### spawnIdleMinutes: stop a started agent that stops making progress
+
+Off by default. Set `CTRLB_SPAWN_IDLE_MINUTES=30` (or `"spawnIdleMinutes": 30`). Then the SessionStart hook of an agent started from another agent's shell starts a small watchdog process. When the agent's transcript has not changed for that many minutes, the watchdog posts a note in the run (when the agent joined one) and stops the agent with SIGTERM, so its session-end hook hands back its holds. If the agent is still running 20 seconds later, the watchdog sends SIGKILL. The shell command that started the agent then ends, and the parent sees it end. One long tool call that writes nothing to the transcript (a long build) counts as no progress, so set the minutes above your longest step.
+
+### A model CLI call needs a time limit
+
+Only with `guardModelCalls` on. PreToolUse on `Bash`. The hook refuses a command that starts `codex exec` (or `codex e`), `codex review`, or `claude` with `-p` or `--print` without `timeout <duration>` in front of the call, with a duration above zero (`1200`, `20m`). A call with no time limit can block the shell command, and the agent that started it, for hours. The run and the agent name are not its job: the agent it starts joins the run on its own (above).
+
+The refusal names the call and the command to run instead:
 
 ```text
-CtrlB Relay: this command starts `codex exec` without a time limit, a Relay run (CTRLB_RUN) and its own agent name (CTRLB_AGENT). guardModelCalls is on: every model CLI call needs a time limit and must join a Relay run under its own agent name, so a stalled worker shows in the run view. Run it like this: CTRLB_RUN=nightly-7 CTRLB_AGENT=<worker name> timeout 1200 codex exec ... The worker then claims its task in that run.
+CtrlB Relay: this command starts `codex exec` without a time limit. guardModelCalls is on: a model CLI call needs one, so a stuck call cannot hold this shell for hours. Run it like this: timeout 1200 codex exec ... The agent it starts finds this session on its own, and joins its Relay run when it has one.
 ```
 
-The hook reads only the command text and calls nothing. It sees the call after `cd ... &&`, on a later line, in a pipe, in a subshell, in a `$( )` substitution, inside `bash -c` (and `sh`, `zsh`, `dash`), and behind `env`, `nohup`, `exec`, `command`, `time`, `setsid`, `nice` and `stdbuf`. Text that only names a model CLI (an `echo`, a `grep`, a commit message, a heredoc body) is not a call. Limits: it does not see a call made from a script file, or through another program such as `xargs`, `npx` or `make`. A variable as the duration (`timeout "$LIMIT"`) is accepted as it is. A command the hook cannot read (for example, an unclosed quote) runs.
+The hook reads only the command text and calls nothing. It sees the call after `cd ... &&`, on a later line, in a pipe, in a subshell, in a `$( )` substitution, inside `bash -c` (and `sh`, `zsh`, `dash`), and behind `env`, `nohup`, `exec`, `command`, `time`, `setsid`, `nice` and `stdbuf`. Text that only names a model CLI (an `echo`, a `grep`, a commit message, a heredoc body) is not a call. Limits: it does not see a call made from a script file, or through another program such as `xargs`, `npx` or `make`; `spawnIdleMinutes` covers those. A variable as the duration (`timeout "$LIMIT"`) is accepted as it is. A command the hook cannot read (for example, an unclosed quote) runs.
 
 ## Codex
 
@@ -115,7 +131,9 @@ The hook reads only the command text and calls nothing. It sees the call after `
 | Record at session start and scratch directory | Yes: `codex/hook.py session-start` adds the same block (artefacts only from the record; Codex posts none). |
 | autoSlots | No: with no hook after a patch, a slot claimed before it could not be released after it. Codex agents claim `slot:REGISTRY.md` themselves (see [Relay tools](relay-tools.md#slots)). |
 | Session-end handoff | Yes, with a fixed text. |
-| Model CLI guard | Yes, when `guardModelCalls` is on when you run `codex/install.py`: the installer then writes a PreToolUse hook with matcher `Bash` (Codex matches its shell tools as `Bash`). With the setting off, it writes no such hook, so Codex runs no CtrlB hook on each shell command. After you turn the setting on, run the installer again and approve the new hook with `/hooks`. |
+| Started agent finds its parent | Yes, by process record (Codex has no environment file). A Codex session leaves its record for the agents it starts, and a Codex session started from another agent's shell finds that agent. |
+| spawnIdleMinutes | Yes: the watchdog reads the session's rollout file. |
+| Model CLI time limit | Yes, when `guardModelCalls` is on when you run `codex/install.py`: the installer then writes a PreToolUse hook with matcher `Bash` (Codex matches its shell tools as `Bash`). With the setting off, it writes no such hook, so Codex runs no CtrlB hook on each shell command. After you turn the setting on, run the installer again and approve the new hook with `/hooks`. |
 
 ## CtrlB reads and writes this needs
 
