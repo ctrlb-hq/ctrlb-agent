@@ -26,7 +26,8 @@
       { "matcher": "Agent|Task",
         "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" pre-agent", "timeout": 5 } ] },
       { "matcher": "Bash",
-        "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" pre-bash", "timeout": 5 } ] }
+        "hooks": [ { "type": "command", "if": "Bash(*codex*)", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" pre-bash", "timeout": 5 },
+                   { "type": "command", "if": "Bash(*claude*)", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" pre-bash", "timeout": 5 } ] }
     ],
     "PostToolUse": [
       { "matcher": "mcp__ctrlb__claim|mcp__plugin_ctrlb-agent_ctrlb__claim|mcp__ctrlb__handoff|mcp__plugin_ctrlb-agent_ctrlb__handoff|mcp__ctrlb__release|mcp__plugin_ctrlb-agent_ctrlb__release",

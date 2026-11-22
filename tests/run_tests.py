@@ -2008,9 +2008,9 @@ def test_model_call_guard(seeker):
 
     hk = load('../../plugin/hooks/hooks.json')['hooks']
     guard = [grp for grp in hk['PreToolUse'] if grp.get('matcher') == 'Bash']
-    check('hooks.json: PreToolUse Bash runs pre-bash (timeout 5, not async)',
-          len(guard) == 1 and guard[0]['hooks'][0]['command'].endswith('hook.py" pre-bash') and guard[0]['hooks'][0]['timeout'] == 5
-          and 'async' not in guard[0]['hooks'][0])
+    check('hooks.json: PreToolUse Bash runs pre-bash (timeout 5, not async) only for a command that names codex or claude',
+          len(guard) == 1 and [h.get('if') for h in guard[0]['hooks']] == ['Bash(*codex*)', 'Bash(*claude*)']
+          and all(h['command'].endswith('hook.py" pre-bash') and h['timeout'] == 5 and 'async' not in h for h in guard[0]['hooks']))
 
     # the Codex hook: Codex matches its shell tools as Bash, with tool_input.command
     cinp = {'session_id': CSID, 'transcript_path': '', 'cwd': '/work/dash', 'hook_event_name': 'PreToolUse',

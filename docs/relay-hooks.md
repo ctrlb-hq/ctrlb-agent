@@ -120,6 +120,8 @@ The refusal names the call and the command to run instead:
 CtrlB Relay: this command starts `codex exec` without a time limit. guardModelCalls is on: a model CLI call needs one, so a stuck call cannot hold this shell for hours. Run it like this: timeout 1200 codex exec ... The agent it starts finds this session on its own, and joins its Relay run when it has one.
 ```
 
+In Claude Code the hook has an `if` filter (`Bash(*codex*)`, `Bash(*claude*)`), so Claude Code starts it only for a command that names `codex` or `claude`; any other Bash call starts no process. A Claude Code version without `if` starts it for every Bash call, and with the setting off it then stops before loading the rest of the plugin.
+
 The hook reads only the command text and calls nothing. It sees the call after `cd ... &&`, on a later line, in a pipe, in a subshell, in a `$( )` substitution, inside `bash -c` (and `sh`, `zsh`, `dash`), and behind `env`, `nohup`, `exec`, `command`, `time`, `setsid`, `nice` and `stdbuf`. Text that only names a model CLI (an `echo`, a `grep`, a commit message, a heredoc body) is not a call. Limits: it does not see a call made from a script file, or through another program such as `xargs`, `npx` or `make`; `spawnIdleMinutes` covers those. A variable as the duration (`timeout "$LIMIT"`) is accepted as it is. A command the hook cannot read (for example, an unclosed quote) runs.
 
 ## Codex
