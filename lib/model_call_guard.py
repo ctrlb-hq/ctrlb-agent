@@ -241,7 +241,8 @@ def _body(items, j):
 
 def _parts(items):
     """The command in the order the shell runs it: ('seg', [(text, subs)]) for each simple command, and
-    ('def', name, body items) for each function definition (name() { ...; }, name() ( ... ), function name [()] { ...; })."""
+    ('def', name, (body items, runs in the same shell)) for each function definition (name() { ...; }, name() ( ... ),
+    function name [()] { ...; })."""
     i, n, seg = 0, len(items), []
     while i < n:
         kind, text, subs = items[i]
@@ -258,8 +259,8 @@ def _parts(items):
             while j < n and _is(items[j], 'sep', '\n'):
                 j += 1
             span = _body(items, j) if j < n else None
-            if span:
-                yield ('def', name, items[span[0]:span[1]])
+            if span:      # a ( ) body runs in a subshell: what it defines does not stay
+                yield ('def', name, (items[span[0]:span[1]], _is(items[j], 'word', '{')))
                 i = span[1] + 1
                 continue
         if kind == 'sep':
@@ -376,7 +377,8 @@ def _scan(seg, timeout, found, depth, funcs=None):
             return
         break
     if i < len(words) and words[i] in funcs and depth < MAX_DEPTH:      # a call of a function defined in the command
-        _run(funcs[words[i]], timeout, found, depth + 1, funcs, share=True)
+        body, same_shell = funcs[words[i]]
+        _run(body, timeout, found, depth + 1, funcs, share=same_shell)
         return
     call = _model_call(words[i:])
     if call:

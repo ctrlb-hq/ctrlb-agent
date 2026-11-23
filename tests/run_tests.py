@@ -1486,13 +1486,14 @@ def test_codex_hooks(seeker):
           and any(k['offset'] == os.path.getsize(relay_rollout) - len('{"partial": ') for k in kept2), json.dumps([other, named, kept2])[:300])
     p, _ = chook('subagent-start', dict(I['subagent_start'], transcript_path=relay_rollout), dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-relay')))
     ctx = out_of(p).get('additionalContext', '')
-    check('codex: the run a relay call named (no CTRLB_RUN) is the run in the subagent rule', 'run id is review-run' in ctx, ctx[-300:])
+    check('codex: a session with no CTRLB_RUN that called a relay tool naming another run keeps its own run in the rule',
+          'claim(next=true)' in ctx and f'run id is {CSID}' in ctx and 'review-run' not in ctx, ctx[-300:])
     seeker.reset()
     seeker.state['check'] = 'allow'
     chook('pre-tool', dict(I['pre_tool_patch'], transcript_path=relay_rollout), dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-relay')))
     ccall = seeker.calls[0] if seeker.calls else {}
-    check('codex: a later hook of that session uses the named run and agent (the edit check)',
-          ccall.get('path') == '/ai/relay/agent_sessions/runs/review-run/check' and (ccall.get('body') or {}).get('agent') == 'lead',
+    check('codex: a later hook of that session uses its own run (the edit check)',
+          ccall.get('path') == f'/ai/relay/agent_sessions/runs/{CSID}/check' and (ccall.get('body') or {}).get('agent') == CSID,
           json.dumps(ccall)[:300])
     parsed = []
     real_item = rows_codex._relay_item
@@ -1502,6 +1503,25 @@ def test_codex_hooks(seeker):
         third = rows_codex.relay_call(relay_rollout)
     check('codex relay_call: a second read parses only the lines added since the first', third == ('third-run', 'lead') and len(parsed) == 1,
           f'{third} {len(parsed)}')
+    early = os.path.join(WORK, 'codex-early-bytes-rollout.jsonl')
+    with open(early, 'w') as fh:
+        fh.write(mcp_line('ctrlb', 'aaa-run') + '{"type": "event_msg", "payload": {"type": "note", "text": "' + 'x' * 200 + '"}}\n')
+    first_read = rows_codex.relay_call(early)
+    with open(early, 'r+') as fh:       # an earlier line changed in place, far before the kept offset's last 64 bytes
+        text = fh.read()
+        fh.seek(0)
+        fh.write(text.replace('aaa-run', 'zzz-run'))
+    with open(early, 'a') as fh:
+        fh.write('{"type": "event_msg", "payload": {"type": "note"}}\n')
+    second_read = rows_codex.relay_call(early)
+    check('codex relay_call: the second read starts at the kept offset (an earlier line changed in place is not read again)',
+          first_read == ('aaa-run', 'lead') and second_read == ('aaa-run', 'lead'), json.dumps([first_read, second_read]))
+    with open(early, 'a') as fh:
+        fh.write(mcp_line('ctrlb', 'late-run'))
+    with mock.patch.object(rows_codex, '_relay_item', side_effect=TimeoutError('hook over its budget')):
+        timed_out = rows_codex.relay_call(early)
+    check("codex relay_call: when the hook's time runs out it answers what it had read before", timed_out == ('aaa-run', 'lead'),
+          json.dumps(timed_out))
     rewritten = os.path.join(WORK, 'codex-rewritten-rollout.jsonl')
     with open(rewritten, 'w') as fh:
         fh.write(mcp_line('ctrlb', 'old-run'))
@@ -2051,6 +2071,8 @@ def test_model_call_guard(seeker):
         'the second definition is the one called': 'f() { echo ok; }; f() { codex exec hi; }; f',
         'a function defined when another one runs': 'setup() { review() { codex exec hi; }; }; setup; review',
         'a function defined after then, called': 'if true; then f() { codex exec hi; }; fi; f',
+        'a ( ) function body does not change a function outside it':
+            'f() { codex exec hi; }; setup() ( f() { echo ok; }; ); setup; f',
     }
     bad = {n: c for n, c in refused.items() if not reason(c)}
     check('guard: refuses each model CLI call with no time limit', not bad, json.dumps(bad))
@@ -2346,13 +2368,18 @@ def test_spawned_agents(seeker):
     with mock.patch.object(spawn, '_proc', lambda pid: ptree.get(pid)):
         ap = spawn.agent_process(10)
     check('own agent process: codex -> sh -> hook finds codex', ap == (30, 'codex', 'C'), repr(ap))
-    spawn.note_relay(PSID, 'review', 'lead')
-    with mock.patch.object(spawn, '_proc', lambda pid: None):
-        fp = spawn.find_parent(None, SID, env=dict(CTRLB_PARENT_SESSION=PSID, CTRLB_PARENT_RUN=PSID, CTRLB_PARENT_AGENT=PSID,
-                                                   CTRLB_PARENT_RELAY='0'))
-    os.remove(spawn._relay_path(PSID))
-    check('a parent that named a run in a relay tool call (claim(run_id="review")): its children join that run',
-          fp and fp['run'] == 'review' and fp['agent'] == 'lead' and fp['relay'], json.dumps(fp))
+    codex_parent_rollout = os.path.join(WORK, 'spawn-codex-parent.jsonl')
+    with open(codex_parent_rollout, 'w') as fh:
+        fh.write(json.dumps(dict(type='event_msg', payload=dict(type='item_completed', item=dict(
+            type='McpToolCall', server='ctrlb', tool='claim', arguments=dict(run_id='review', agent='lead'))))) + '\n')
+    ctree = {100: (200, 'claude', 'S1'), 200: (300, 'codex', 'S2'), 300: (1, 'zsh', 'S3')}
+    with mock.patch.object(spawn, '_proc', lambda pid: ctree.get(pid)):
+        spawn._write_json(spawn._record_path(200), dict(session=PSID, run=PSID, agent='', relay=False, start='S2',
+                                                        program='codex', transcript=codex_parent_rollout))
+        fp = spawn.find_parent((100, 'claude', 'S1'), SID, env={})
+    os.remove(spawn._record_path(200))
+    check("a Codex parent that called a relay tool (seen in its rollout) is in a run; its children join the parent's own "
+          'run, not a run the call named', fp and fp['relay'] and fp['run'] == PSID and fp['agent'] == '', json.dumps(fp))
     spawn._write_json(spawn._session_path('root-x'), dict(parent=PSID, parent_agent='lead', run='run-L', agent='lead.codex-1234',
                                                           joined=True, renamed=False))
     spawn.link('thread-y', 'root-x')
@@ -2384,7 +2411,7 @@ def test_spawned_agents(seeker):
     before = out_of(p).get('additionalContext', '')
     hook('post-tool', dict(session_id=TSID, transcript_path=main, cwd='/work/dash', hook_event_name='PostToolUse',
                            tool_name='mcp__plugin_ctrlb-agent_ctrlb__task',
-                           tool_input=dict(run_id='review-run', agent='lead', name='task 01 parser', text='fix it', paths=['src/p.py']),
+                           tool_input=dict(run_id=TSID, agent=TSID, name='task 01 parser', text='fix it', paths=['src/p.py']),
                            tool_response=[dict(type='text', text='{"ok": true}')]), env)
     p, _ = hook('subagent-start', dict(I['subagent_start'], session_id=TSID), env)
     after = out_of(p).get('additionalContext', '')
@@ -2392,17 +2419,12 @@ def test_spawned_agents(seeker):
     seeker.state['check'] = 'allow'
     hook('pre-tool', dict(I['pre_tool_edit'], session_id=TSID), env)
     edit_check = [c for c in seeker.calls if c['path'].endswith('/check')]
-    check("a session with no run that named a run in a relay call: its later hooks use that run and agent (the edit check)",
-          len(edit_check) == 1 and edit_check[0]['path'].endswith('/runs/review-run/check')
-          and edit_check[0]['body'].get('agent') == 'lead', json.dumps(seeker.calls)[:300])
-    try:
-        os.remove(os.path.join(home, 'spawn', 'relay', TSID + '.json'))
-        noted = True
-    except OSError:
-        noted = False
-    check('a session with no run: its subagent gets the short rule; after a task call, the whole rule, and the run is noted '
-          'for the agents it starts', 'no Relay tasks are waiting' in before and 'claim(next=true)' not in before
-          and 'claim(next=true)' in after and 'run id is review-run' in after and noted, after[-300:])
+    check('a session with no run that registered a task: its later hooks check edits in its own run',
+          len(edit_check) == 1 and edit_check[0]['path'].endswith(f'/runs/{TSID}/check')
+          and edit_check[0]['body'].get('agent') == TSID, json.dumps(seeker.calls)[:300])
+    check('a session with no run: its subagent gets the short rule; after a task call, the whole rule in its own run',
+          'no Relay tasks are waiting' in before and 'claim(next=true)' not in before
+          and 'claim(next=true)' in after and f'run id is {TSID}' in after, after[-300:])
     hooks_json = open(os.path.join(ROOT, 'plugin', 'hooks', 'hooks.json')).read()
     post_groups = [re.compile(g['matcher']) for g in json.loads(hooks_json)['hooks']['PostToolUse']]
     runs_after = lambda t: any(m.search(t) for m in post_groups)

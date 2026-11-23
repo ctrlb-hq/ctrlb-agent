@@ -170,7 +170,7 @@ def relay_call(path):
         st = os.stat(path)
     except (OSError, TypeError, ValueError):
         return None
-    keep, c = '', {}
+    keep, c, last = '', {}, None
     try:      # without the kept part (a folder that cannot be made, a bad file) the whole rollout is read
         d = common.private_dir(os.path.join(common.HOME, 'spawn', 'rollouts'))
         keep = os.path.join(d, hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:32] + '.json')
@@ -210,6 +210,8 @@ def relay_call(path):
                         os.replace(tmp, keep)
                     except OSError:
                         pass
+    except TimeoutError:      # the hook's time ran out: what was found so far, the kept part included
+        return tuple(last) if last else None
     except OSError:
         return None
     return tuple(last) if last else None

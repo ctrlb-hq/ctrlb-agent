@@ -150,49 +150,27 @@ def find_parent(me, sid, env=None):
             continue
         rec = _read_json(_record_path(pid))
         if rec.get('session') and rec.get('start') == q[2] and rec['session'] != sid:
-            return _with_relay_run(dict(session=rec['session'], run=rec.get('run') or rec['session'],
+            return _codex_relay(dict(session=rec['session'], run=rec.get('run') or rec['session'],
                                         agent=rec.get('agent') or '', relay=bool(rec.get('relay')),
                                         base_agent=rec.get('base_agent') or '', how='process'),
                                    rec.get('transcript') if rec.get('program') == 'codex' else '')
     psid = (env.get('CTRLB_PARENT_SESSION') or '').strip()
     if psid and psid != sid:
-        return _with_relay_run(dict(session=psid, run=(env.get('CTRLB_PARENT_RUN') or '').strip() or psid,
+        return _codex_relay(dict(session=psid, run=(env.get('CTRLB_PARENT_RUN') or '').strip() or psid,
                                     agent=(env.get('CTRLB_PARENT_AGENT') or '').strip(),
                                     relay=env.get('CTRLB_PARENT_RELAY') == '1',
                                     base_agent=(env.get('CTRLB_PARENT_BASE_AGENT') or '').strip(), how='environment'))
     return None
 
 
-def _relay_path(sid):
-    return os.path.join(_dir('relay'), re.sub(r'[^A-Za-z0-9_.-]', '_', sid)[:128] + '.json')
-
-
-def note_relay(sid, run, agent):
-    """A ctrlb relay tool was called in session sid with this run and agent: the agents it starts later join that run
-    under that name, also when it is not the run the session started with (no CTRLB_RUN, then claim(run_id=...))."""
-    if not sid or not run:
-        return
-    if _read_json(_relay_path(sid)) == dict(run=run, agent=agent or ''):
-        return
-    _write_json(_relay_path(sid), dict(run=run, agent=agent or ''))
-
-
-def relay_run(sid):
-    """{run, agent} of the session's latest relay tool call (Claude Code), or {}."""
-    return _read_json(_relay_path(sid)) if sid else {}
-
-
-def _with_relay_run(parent, codex_transcript=''):
-    """The parent with the run and agent of its latest relay tool call, when it made one: from the Claude Code
-    post-tool hook's file, or, for a Codex parent (no hook after a tool call), from its rollout."""
-    r = _read_json(_relay_path(parent['session']))
-    if not r.get('run') and codex_transcript:
+def _codex_relay(parent, codex_transcript=''):
+    """The parent, marked as in a relay run when it is a Codex session whose rollout shows a ctrlb relay tool call that
+    writes to a run (Codex has no hook after a tool call; a Claude Code parent's call is in its SessionRecord). Its run
+    stays its own: a session works in the run it started with."""
+    if not parent['relay'] and codex_transcript:
         import rows_codex
-        call = rows_codex.relay_call(codex_transcript)
-        if call:
-            r = dict(run=call[0] or parent['run'], agent=call[1])
-    if r.get('run'):
-        parent.update(run=r['run'], agent=r.get('agent') or parent['agent'], relay=True)
+        if rows_codex.relay_call(codex_transcript):
+            parent['relay'] = True
     return parent
 
 
@@ -268,29 +246,21 @@ def decide(cfg, sid, parent, program):
 
 
 def apply(cfg, sid):
-    """Put the session's run and agent name in cfg (every hook calls this after config()): the ones decided at its
-    start when an agent started it; else, with no run set, the ones its latest relay tool call named (no CTRLB_RUN,
-    then claim(run_id="review", agent="lead")), so its edit checks, registrations, rows and session-end handoff use the
-    run it works in. Returns the start decision, or {}."""
-    if not sid:
+    """Put the session's decided run and agent name in cfg (every hook calls this after config()). Returns the
+    decision, or {}. Never raises: a spawn folder that cannot be read leaves cfg as it is, so the hook's own work (the
+    edit check, the guard) still runs."""
+    if not sid or not cfg.get('join_spawned'):
         return {}
-    j = joined(sid) if cfg.get('join_spawned') else {}
+    try:
+        j = joined(sid)
+    except Exception as e:
+        common.log(f"spawn apply {sid}: {type(e).__name__}: {str(e)[:200]}")
+        return {}
     if j.get('joined') and j.get('run'):
         cfg['run'] = j['run']
     if j.get('agent') and (j.get('joined') or j.get('renamed')):
         cfg['agent'] = j['agent']
-    if not cfg.get('run'):
-        follow(cfg, sid, relay_run(sid))
     return j
-
-
-def follow(cfg, sid, named):
-    """cfg takes the run and agent a relay tool call named ({run, agent}); the agent only when it is a label, not the
-    session id."""
-    if named and named.get('run'):
-        cfg['run'] = named['run']
-        if named.get('agent') and named['agent'] != sid:
-            cfg['agent'] = named['agent']
 
 
 def link(sid, root):
