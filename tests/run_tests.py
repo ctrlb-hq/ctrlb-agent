@@ -2120,6 +2120,7 @@ def test_model_call_guard(seeker):
         'codex help before the subcommand': 'codex --help exec x',
         'claude -p help': 'claude -p --help',
         'command -v looks a name up': 'command -v codex exec',
+        'command -p -v and -pv look a name up': 'command -p -v codex exec; command -pv claude -p',
         'empty': '',
     }
     bad = {n: reason(c) for n, c in allowed.items() if reason(c)}

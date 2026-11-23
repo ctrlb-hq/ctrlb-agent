@@ -358,8 +358,12 @@ def _scan(seg, timeout, found, depth, funcs=None):
                 timeout = words[i] if _valid_duration(words[i]) else (timeout or '')
                 i += 1
             continue
-        if prog == 'command' and i + 1 < len(words) and words[i + 1] in ('-v', '-V'):
-            return      # command -v codex: looks the name up, runs nothing
+        if prog == 'command':
+            k = i + 1
+            while k < len(words) and words[k].startswith('-') and words[k] != '--':
+                if 'v' in words[k][1:] or 'V' in words[k][1:]:
+                    return      # command -v, -pv, -p -V codex: looks the name up, runs nothing
+                k += 1
         if prog in PASS_THROUGH:
             i += 1
             while i < len(words) and words[i].startswith('-'):
