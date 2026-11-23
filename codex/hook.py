@@ -62,17 +62,19 @@ def upload(cfg, paths, budget, event, sid):
         common.log(f"codex {event} {sid}: {total}")
 
 
-def in_relay(cfg, run, agent, sid, parent, transcript):
-    """Whether a Codex session or thread is in a relay run: CTRLB_RUN set (or joined), or its root session's rollout
-    shows a ctrlb relay tool call that writes to a run. Codex has no hook after a tool call, so the rollout is read."""
+def relay_state(cfg, run, agent, sid, parent, transcript):
+    """(in a relay run, run id for the rule) of a Codex session or thread: in a run when CTRLB_RUN is set (or it
+    joined its starter's run), or when its root session's rollout shows a ctrlb relay tool call that writes to a run
+    (Codex has no hook after a tool call). With no CTRLB_RUN, the run that call named is the run of the rule."""
     if relay_hooks.in_relay(cfg, run, agent, sid):
-        return True
+        return True, run
     try:
         rollout = rows_codex.root_rollout(sid, parent, transcript or '')[1]
-        return bool(rollout and rows_codex.relay_call(rollout))
+        call = rollout and rows_codex.relay_call(rollout)
     except Exception as e:
         common.log(f"codex relay check {sid}: {type(e).__name__}: {str(e)[:200]}")
-        return False
+        call = None
+    return (True, call[0] or run) if call else (False, run)
 
 
 def session_run(cfg, sid, transcript):
@@ -158,7 +160,9 @@ def main():
         if started.get('joined'):
             text, block = head + spawned_text(started, run, agent, scratch), ''
         else:
-            in_run = in_relay(cfg, run, agent, sid, parent, inp.get('transcript_path'))
+            in_run, named = relay_state(cfg, run, agent, sid, parent, inp.get('transcript_path'))
+            if named != run:
+                run, scratch = named, relay_hooks.make_scratch(cfg, named) or common.scratch_dir(cfg, named)
             text = head + spawned_text(started, '', '', '') + '\n\n' + relay_text(in_run, run, agent, scratch)
             block = ''
             if in_run:
@@ -175,9 +179,9 @@ def main():
         run, sparent = session_run(cfg, sid, inp.get('transcript_path'))
         sub = inp.get('agent_id') or ''
         agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid)
+        in_run, run = relay_state(cfg, run, agent, sid, sparent, inp.get('transcript_path'))
         out = start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid) + '\n\n'
-                      + relay_text(in_relay(cfg, run, agent, sid, sparent, inp.get('transcript_path')), run, agent,
-                                   common.scratch_dir(cfg, run)))
+                      + relay_text(in_run, run, agent, common.scratch_dir(cfg, run)))
     elif mode == 'flush':
         upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
     elif mode == 'session-end':

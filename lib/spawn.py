@@ -177,6 +177,11 @@ def note_relay(sid, run, agent):
     _write_json(_relay_path(sid), dict(run=run, agent=agent or ''))
 
 
+def relay_run(sid):
+    """{run, agent} of the session's latest relay tool call (Claude Code), or {}."""
+    return _read_json(_relay_path(sid)) if sid else {}
+
+
 def _with_relay_run(parent, codex_transcript=''):
     """The parent with the run and agent of its latest relay tool call, when it made one: from the Claude Code
     post-tool hook's file, or, for a Codex parent (no hook after a tool call), from its rollout."""

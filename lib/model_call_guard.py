@@ -122,17 +122,18 @@ def _sub_text(text, i, j):
 
 
 def _lex(text):
-    """The command as the shell splits it: [('word', text, subs) or ('sep', text, [])]. Quotes are removed from a word;
+    """The command as the shell splits it: [('word', text, subs), ('qword', text, subs) for a word with quoting in it,
+    or ('sep', text, [])]. Quotes are removed from a word;
     text in quotes never separates commands. subs: the text of each $( ) and ` ` in the word that the shell runs (not
     those in single quotes). A redirection operator is a word of its own. Raises ValueError for an unclosed quote."""
     out, n, i = [], len(text), 0
-    word, subs, inword = [], [], False
+    word, subs, inword, quoted = [], [], False, False
 
     def end():
-        nonlocal word, subs, inword
+        nonlocal word, subs, inword, quoted
         if inword:
-            out.append(('word', ''.join(word), subs))
-        word, subs, inword = [], [], False
+            out.append(('qword' if quoted else 'word', ''.join(word), subs))
+        word, subs, inword, quoted = [], [], False, False
 
     while i < n:
         c = text[i]
@@ -152,23 +153,23 @@ def _lex(text):
         elif c in SEPARATORS:
             end()
             j = i + 1
-            while c != '\n' and j < n and text[j] in ';&|':
+            while c not in '\n()' and j < n and text[j] in ';&|':      # && || ;; |& ; ( and ) stand alone
                 j += 1
             out.append(('sep', text[i:j], []))
             i = j
         elif c == '\\':
-            inword = True
+            inword = quoted = True
             word.append(text[i + 1:i + 2])
             i += 2
         elif c == "'":
-            inword = True
+            inword = quoted = True
             k = text.find("'", i + 1)
             if k == -1:
                 raise ValueError("unclosed '")
             word.append(text[i + 1:k])
             i = k + 1
         elif c == '"':
-            inword = True
+            inword = quoted = True
             i += 1
             while True:
                 if i >= n:
@@ -202,53 +203,82 @@ def _lex(text):
     return out
 
 
-def _functions(items):
-    """Function definitions taken out of the command: (the other items, {name: the items of its body}). A definition
-    runs nothing; its body counts where the function is called. Forms: name() { ...; } and function name [()] { ...; }."""
-    out, funcs, i, n = [], {}, 0, len(items)
+def _is(item, kind, text):
+    return item[0] == kind and item[1] == text
+
+
+def _body(items, j):
+    """The function body that starts at items[j], a { ... } group or a ( ... ) subshell: (index of its first item,
+    index of its closing item), or None. A brace counts only where a command starts, unquoted, as the shell reads it:
+    `echo }` and `printf '{'` do not open or close the body."""
+    n = len(items)
+    if _is(items[j], 'word', '{'):
+        depth, at_cmd = 0, True
+        for m in range(j, n):
+            kind, text, _ = items[m]
+            if kind == 'sep':
+                at_cmd = True
+            elif kind == 'word' and at_cmd and text == '{':
+                depth += 1
+            elif kind == 'word' and at_cmd and text == '}':
+                depth -= 1
+                if depth == 0:
+                    return j + 1, m
+            elif not (kind == 'word' and at_cmd and text in RESERVED):
+                at_cmd = False
+        return None
+    if _is(items[j], 'sep', '('):
+        depth = 0
+        for m in range(j, n):
+            if _is(items[m], 'sep', '('):
+                depth += 1
+            elif _is(items[m], 'sep', ')'):
+                depth -= 1
+                if depth == 0:
+                    return j + 1, m
+    return None
+
+
+def _parts(items):
+    """The command in the order the shell runs it: ('seg', [(text, subs)]) for each simple command, and
+    ('def', name, body items) for each function definition (name() { ...; }, name() ( ... ), function name [()] { ...; })."""
+    i, n, seg = 0, len(items), []
     while i < n:
-        kind, text, _ = items[i]
+        kind, text, subs = items[i]
         name, j = None, i
-        if kind == 'word' and text == 'function' and i + 1 < n and items[i + 1][0] == 'word':
+        if not seg and kind == 'word' and text == 'function' and i + 1 < n and items[i + 1][0] != 'sep':
             name, j = items[i + 1][1], i + 2
-            if j + 1 < n and items[j][:2] == ('sep', '(') and items[j + 1][:2] == ('sep', ')'):
+            if j + 1 < n and _is(items[j], 'sep', '(') and _is(items[j + 1], 'sep', ')'):
                 j += 2
-        elif kind == 'word' and i + 2 < n and items[i + 1][:2] == ('sep', '(') and items[i + 2][:2] == ('sep', ')'):
+        elif not seg and kind == 'word' and i + 2 < n and _is(items[i + 1], 'sep', '(') and _is(items[i + 2], 'sep', ')'):
             name, j = text, i + 3
         if name is not None:
-            while j < n and items[j][:2] == ('sep', '\n'):
+            while j < n and _is(items[j], 'sep', '\n'):
                 j += 1
-            if j < n and items[j][:2] == ('word', '{'):
-                depth, m = 0, j
-                while m < n:
-                    if items[m][:2] == ('word', '{'):
-                        depth += 1
-                    elif items[m][:2] == ('word', '}'):
-                        depth -= 1
-                        if depth == 0:
-                            break
-                    m += 1
-                funcs[name] = items[j + 1:m]
-                out.append(('sep', ';', []))
-                i = m + 1
+            span = _body(items, j) if j < n else None
+            if span:
+                yield ('def', name, items[span[0]:span[1]])
+                i = span[1] + 1
                 continue
-        out.append(items[i])
-        i += 1
-    return out, funcs
-
-
-def _segments(items):
-    """Simple commands: runs of words between separators (; & | && || ( ) newline), as [(text, subs)]."""
-    seg = []
-    for kind, text, subs in items:
         if kind == 'sep':
             if seg:
-                yield seg
+                yield ('seg', seg)
             seg = []
         else:
             seg.append((text, subs))
+        i += 1
     if seg:
-        yield seg
+        yield ('seg', seg)
+
+
+def _run(items, timeout, found, depth, funcs):
+    """Scan the parts in order; a definition replaces the function's body for the calls after it."""
+    funcs = dict(funcs or {})
+    for part in _parts(items):
+        if part[0] == 'def':
+            funcs[part[1]] = part[2]
+        else:
+            _scan(part[1], timeout, found, depth, funcs)
 
 
 def _model_call(words):
@@ -342,8 +372,7 @@ def _scan(seg, timeout, found, depth, funcs=None):
             return
         break
     if i < len(words) and words[i] in funcs and depth < MAX_DEPTH:      # a call of a function defined in the command
-        for body in _segments(funcs[words[i]]):
-            _scan(body, timeout, found, depth + 1, funcs)
+        _run(funcs[words[i]], timeout, found, depth + 1, funcs)
         return
     call = _model_call(words[i:])
     if call:
@@ -353,10 +382,7 @@ def _scan(seg, timeout, found, depth, funcs=None):
 def _walk(text, timeout, found, depth=0, funcs=None):
     if depth > MAX_DEPTH:
         return
-    items, defined = _functions(_lex(_drop_heredocs(text.replace('\\\n', ' '))))
-    funcs = dict(funcs or {}, **defined)
-    for seg in _segments(items):
-        _scan(seg, timeout, found, depth, funcs)
+    _run(_lex(_drop_heredocs(text.replace('\\\n', ' '))), timeout, found, depth, funcs)
 
 
 def model_calls(command):

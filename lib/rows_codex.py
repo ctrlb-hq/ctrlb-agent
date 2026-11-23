@@ -20,7 +20,7 @@ A rollout is ~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<time>-<thread id>.jsonl
 session_meta gives the ids, cwd and git branch; turn_context updates cwd. A rollout whose session_meta names a
 parent_thread_id is a subagent: parent_session is that id, agent_id its own thread id, and it joins its parent's
 run. Upload is incremental by byte offset with FileState, through rows_claude.upload_file."""
-import functools, glob, json, os, re, shlex
+import functools, glob, hashlib, json, os, re, shlex
 import common, rows_claude
 from paths import edit_paths as normalise_edit_paths
 from rows_claude import micros
@@ -162,31 +162,60 @@ RELAY_WRITE_TOOLS = ('post', 'claim', 'handoff', 'release', 'done', 'task', 'bri
 
 def relay_call(path):
     """(run_id, agent) of the last ctrlb relay tool call that writes to a run, from a Codex rollout's McpToolCall
-    items, or None. Codex has no hook after a tool call, so this is how a Codex session is known to be in a run."""
-    last = None
+    items (server ctrlb), or None. Codex has no hook after a tool call, so this is how a Codex session is known to be in
+    a run. A rollout only grows: the part read is kept under <CTRLB_HOME>/spawn/rollouts, so each call reads only what
+    was added since the last one."""
     try:
-        with open(path, errors='replace') as fh:
-            for line in fh:
-                if 'McpToolCall' not in line:
-                    continue
-                try:
-                    item = (json.loads(line).get('payload') or {}).get('item') or {}
-                except (ValueError, AttributeError):
-                    continue
-                if (not isinstance(item, dict) or item.get('type') != 'McpToolCall' or item.get('tool') not in RELAY_WRITE_TOOLS
-                        or 'ctrlb' not in str(item.get('server') or '')):
-                    continue
-                args = item.get('arguments')
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except ValueError:
-                        args = {}
-                args = args if isinstance(args, dict) else {}
-                last = (str(args.get('run_id') or ''), str(args.get('agent') or ''))
-    except (OSError, TypeError):
+        st = os.stat(path)
+    except (OSError, TypeError, ValueError):
         return None
-    return last
+    d = common.private_dir(os.path.join(common.HOME, 'spawn', 'rollouts'))
+    keep = os.path.join(d, hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:32] + '.json')
+    try:
+        with open(keep) as fh:
+            c = json.load(fh)
+    except Exception:
+        c = {}
+    if not isinstance(c, dict) or c.get('ino') != st.st_ino or not isinstance(c.get('offset'), int) or c['offset'] > st.st_size:
+        c = dict(ino=st.st_ino, offset=0, last=None)
+    last = c.get('last')
+    if c['offset'] < st.st_size:
+        with open(path, 'rb') as fh:
+            fh.seek(c['offset'])
+            while True:
+                line = fh.readline()
+                if not line.endswith(b'\n'):
+                    break           # a line still being written is read next time
+                c['offset'] += len(line)
+                if b'McpToolCall' in line:
+                    last = _relay_item(line) or last
+        c['last'] = last
+        try:
+            tmp = f'{keep}.{os.getpid()}.tmp'
+            with common.private_open(tmp) as fh:
+                json.dump(c, fh)
+            os.replace(tmp, keep)
+        except OSError:
+            pass
+    return tuple(last) if last else None
+
+
+def _relay_item(line):
+    try:
+        item = (json.loads(line).get('payload') or {}).get('item') or {}
+    except (ValueError, AttributeError):
+        return None
+    if (not isinstance(item, dict) or item.get('type') != 'McpToolCall' or item.get('server') != 'ctrlb'
+            or item.get('tool') not in RELAY_WRITE_TOOLS):
+        return None
+    args = item.get('arguments')
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            args = {}
+    args = args if isinstance(args, dict) else {}
+    return [str(args.get('run_id') or ''), str(args.get('agent') or '')]
 
 
 def ids_for_file(cfg, path):

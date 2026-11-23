@@ -1468,6 +1468,25 @@ def test_codex_hooks(seeker):
     check("codex: a ctrlb relay call in the root's rollout (Codex has no hook after a tool call) gives the whole rule; "
           'relay_call reads its run and agent', 'claim(next=true)' in ctx and rows_codex.relay_call(relay_rollout) == (CSID, CSID)
           and rows_codex.relay_call(main) is None, ctx[-300:])
+    mcp_line = lambda server, run: json.dumps(dict(timestamp='2026-09-06T12:08:00.000Z', type='event_msg', payload=dict(
+        type='item_completed', thread_id=CSID, item=dict(type='McpToolCall', id='exec-2', server=server, tool='claim',
+                                                         arguments=dict(run_id=run, agent='lead'), status='completed')))) + '\n'
+    with open(relay_rollout, 'a') as fh:
+        fh.write(mcp_line('other-ctrlb-service', 'not-this-run'))
+    other = rows_codex.relay_call(relay_rollout)
+    keep_dir = os.path.join(os.environ['CTRLB_HOME'], 'spawn', 'rollouts')
+    kept = [json.load(open(os.path.join(keep_dir, f))) for f in os.listdir(keep_dir)]
+    size_before = os.path.getsize(relay_rollout)
+    with open(relay_rollout, 'a') as fh:
+        fh.write(mcp_line('ctrlb', 'review-run') + '{"partial": ')
+    named = rows_codex.relay_call(relay_rollout)
+    kept2 = [json.load(open(os.path.join(keep_dir, f))) for f in os.listdir(keep_dir)]
+    check('codex relay_call: another server is not ctrlb; the part read is kept and only new full lines are read',
+          other == (CSID, CSID) and named == ('review-run', 'lead') and any(k['offset'] == size_before for k in kept)
+          and any(k['offset'] == os.path.getsize(relay_rollout) - len('{"partial": ') for k in kept2), json.dumps([other, named, kept2])[:300])
+    p, _ = chook('subagent-start', dict(I['subagent_start'], transcript_path=relay_rollout), dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-relay')))
+    ctx = out_of(p).get('additionalContext', '')
+    check('codex: the run a relay call named (no CTRLB_RUN) is the run in the subagent rule', 'run id is review-run' in ctx, ctx[-300:])
     sdir = os.path.join(home, 'spawn', 'sessions')
     os.makedirs(sdir, mode=0o700, exist_ok=True)
     root_decision = os.path.join(sdir, CSID + '.json')
@@ -1998,6 +2017,10 @@ def test_model_call_guard(seeker):
         'a function defined and called': 'review() { codex exec hi; }; review',
         'function keyword form, called on the next line': 'function r { claude -p x; }\nr',
         'nested substitutions with a quoted parenthesis': 'echo "$(echo "$(codex exec "a)b")")"',
+        'a subshell-body function, called': 'f() ( codex exec hi ); f',
+        'after a function whose body prints a quoted {': "f() { printf '%s' '{'; }; codex exec hi",
+        'a call before the function is defined again': 'f() { codex exec hi; }; f; f() { echo ok; }',
+        'the second definition is the one called': 'f() { echo ok; }; f() { codex exec hi; }; f',
     }
     bad = {n: c for n, c in refused.items() if not reason(c)}
     check('guard: refuses each model CLI call with no time limit', not bad, json.dumps(bad))
@@ -2026,6 +2049,9 @@ def test_model_call_guard(seeker):
         'a function defined and not called': 'review() { codex exec hi; }; echo ready',
         'a timed call inside a called function': 'g() {\n  timeout 60 codex exec x\n}\ng',
         'a function that calls itself': 'f() { f; }; f',
+        'a subshell-body function, not called': 'f() ( codex exec hi ); echo ready',
+        'a quoted } inside a function body that is not called': "f() { printf '%s' '}'; codex exec hi; }; echo ready",
+        'echo } inside a function body that is not called': 'f() { echo }; codex exec hi; }; echo ready',
         'empty': '',
     }
     bad = {n: reason(c) for n, c in allowed.items() if reason(c)}
@@ -2327,7 +2353,7 @@ def test_spawned_agents(seeker):
     before = out_of(p).get('additionalContext', '')
     hook('post-tool', dict(session_id=TSID, transcript_path=main, cwd='/work/dash', hook_event_name='PostToolUse',
                            tool_name='mcp__plugin_ctrlb-agent_ctrlb__task',
-                           tool_input=dict(run_id=TSID, agent=TSID, name='task 01 parser', text='fix it', paths=['src/p.py']),
+                           tool_input=dict(run_id='review-run', agent='lead', name='task 01 parser', text='fix it', paths=['src/p.py']),
                            tool_response=[dict(type='text', text='{"ok": true}')]), env)
     p, _ = hook('subagent-start', dict(I['subagent_start'], session_id=TSID), env)
     after = out_of(p).get('additionalContext', '')
@@ -2338,11 +2364,18 @@ def test_spawned_agents(seeker):
         noted = False
     check('a session with no run: its subagent gets the short rule; after a task call, the whole rule, and the run is noted '
           'for the agents it starts', 'no Relay tasks are waiting' in before and 'claim(next=true)' not in before
-          and 'claim(next=true)' in after and noted, after[-300:])
+          and 'claim(next=true)' in after and 'run id is review-run' in after and noted, after[-300:])
     hooks_json = open(os.path.join(ROOT, 'plugin', 'hooks', 'hooks.json')).read()
-    check('hooks.json: the post-tool hook runs after task, brief, ask, answer and contract',
-          all(f'mcp__plugin_ctrlb-agent_ctrlb__{n}' in hooks_json and f'mcp__ctrlb__{n}|' in hooks_json
-              for n in ('task', 'brief', 'ask', 'answer')) and 'mcp__ctrlb__contract' in hooks_json)
+    post_groups = [re.compile(g['matcher']) for g in json.loads(hooks_json)['hooks']['PostToolUse']]
+    runs_after = lambda t: any(m.search(t) for m in post_groups)
+    should = [p + n for p in ('mcp__ctrlb__', 'mcp__plugin_ctrlb-agent_ctrlb__')
+              for n in ('post', 'claim', 'release', 'handoff', 'done', 'task', 'brief', 'ask', 'answer', 'contract')]
+    should_not = [p + n for p in ('mcp__ctrlb__', 'mcp__plugin_ctrlb-agent_ctrlb__')
+                  for n in ('tasks', 'briefs', 'contracts', 'peers', 'search_sessions')]
+    check('hooks.json: the post-tool hook runs after every relay tool that writes to a run, and not after tasks, briefs, '
+          'contracts or the read tools (matchers read as regular expressions)',
+          all(runs_after(t) for t in should) and not any(runs_after(t) for t in should_not),
+          json.dumps([t for t in should if not runs_after(t)] + [t for t in should_not if runs_after(t)]))
 
     # spawnIdleMinutes: the watchdog stops a process whose transcript does not change, and not one whose transcript does
     tr = os.path.join(WORK, 'spawn-transcript.jsonl')
