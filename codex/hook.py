@@ -16,7 +16,7 @@ import json, os, signal, sys, time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
 import common, model_call_guard, relay_hooks, rows_codex, spawn  # noqa: E402
-from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, start_context, spawned_text, decide, _deny  # noqa: E402
+from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, relay_text, start_context, spawned_text, decide, _deny  # noqa: E402
 
 SYNC_S, ASYNC_S = 5, 90
 HANDOFF_S = 0.8
@@ -126,8 +126,12 @@ def main():
         common.start_local_server(cfg)
         _, parent = session_run(cfg, sid, inp.get('transcript_path'))
         started = {}
-        if parent:      # a subagent thread: its root session decided at its own start
-            spawn.apply(cfg, rows_codex.session_run(cfg, sid, parent, inp.get('transcript_path') or ''))
+        if parent:      # a subagent thread: it takes the decision its root session made at its own start
+            try:
+                spawn.link(sid, rows_codex.root_session(sid, parent, inp.get('transcript_path') or ''))
+            except Exception as e:
+                common.log(f"codex spawn link {sid}: {type(e).__name__}: {str(e)[:200]}")
+            spawn.apply(cfg, sid)
         else:           # Codex has no environment file: '' keeps a CLAUDE_ENV_FILE inherited from a parent's shell unused
             started = spawn.session_start(cfg, sid, inp.get('source') or '', env_file='',
                                           transcript=inp.get('transcript_path') or '')
@@ -141,12 +145,14 @@ def main():
         if started.get('joined'):
             text, block = head + spawned_text(started, run, agent, scratch), ''
         else:
-            text = head + spawned_text(started, '', '', '') + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
-            try:      # a relay run's session starts with the record
-                block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
-            except Exception as e:
-                common.log(f"codex session-start record: {type(e).__name__}: {str(e)[:200]}")
-                block = ''
+            in_run = relay_hooks.in_relay(cfg, run, agent, sid)
+            text = head + spawned_text(started, '', '', '') + '\n\n' + relay_text(in_run, run, agent, scratch)
+            block = ''
+            if in_run:
+                try:      # a relay run's session starts with the record
+                    block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
+                except Exception as e:
+                    common.log(f"codex session-start record: {type(e).__name__}: {str(e)[:200]}")
         out = start_context(cfg, 'SessionStart', text + ('\n\n' + block if block else ''))
     elif mode == 'subagent-start':
         upload(cfg, [inp.get('transcript_path')], SYNC_S - 1, event, sid)
@@ -157,7 +163,7 @@ def main():
         sub = inp.get('agent_id') or ''
         agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid)
         out = start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid) + '\n\n'
-                      + RELAY.format(run=run, agent=agent, scratch=common.scratch_dir(cfg, run)))
+                      + relay_text(relay_hooks.in_relay(cfg, run, agent, sid), run, agent, common.scratch_dir(cfg, run)))
     elif mode == 'flush':
         upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
     elif mode == 'session-end':

@@ -86,6 +86,21 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
          "reopen=true. Put helper scripts and binaries in the scratch directory {scratch}, not in /tmp.")
 
 
+# A session with no run set (no CTRLB_RUN, no relay tool called, not joined to the run of the agent that started it):
+# its run is its own and nobody registered tasks in it, so it is not told to claim the next task (or to stop when none
+# is free).
+SOLO = ("CtrlB Relay: no run was set for this session (CTRLB_RUN), so no Relay tasks are waiting for you: do the work "
+        "you were asked to do; do not claim a task to find work. Your run id is {run} and your agent id is {agent}. "
+        "Pass run_id=\"{run}\" and agent=\"{agent}\" to the ctrlb relay tools only when you register tasks for "
+        "subagents or are asked to coordinate with other agents. Put helper scripts and binaries in the scratch "
+        "directory {scratch}, not in /tmp.")
+
+
+def relay_text(in_run, run, agent, scratch):
+    """RELAY for a session in a relay run, SOLO for one that is its own run."""
+    return (RELAY if in_run else SOLO).format(run=run, agent=agent, scratch=scratch)
+
+
 # A hold whose holder has stopped is taken over, not waited out.
 STALLED_HINT = ("If the holder has stopped, the hold shows as stalled (tasks lists stalled tasks); claim it with "
                 "takeover=true instead of waiting.")

@@ -15,7 +15,8 @@ import os
 import re
 import shlex
 
-SEPARATORS = set(';&|()\n')
+SEPARATORS = ';&|()\n'
+RESERVED = ('if', 'then', 'elif', 'else', 'do', 'while', 'until', '!', '{')
 SHELLS = ('bash', 'sh', 'zsh', 'dash')
 TIMEOUTS = ('timeout', 'gtimeout')
 PASS_THROUGH = ('nohup', 'exec', 'command', 'time', 'setsid', 'builtin')
@@ -70,43 +71,144 @@ def _drop_heredocs(text):
     return '\n'.join(out)
 
 
-def _tokens(text):
-    lex = shlex.shlex(text, posix=True, punctuation_chars=';&|()<>\n')
-    lex.whitespace = ' \t\r'
-    lex.commenters = ''
-    return list(lex)
+def _sub_end(text, i):
+    """The index just past the command substitution that starts at i: $( ... ) or ` ... `. Quotes and nested
+    parentheses inside it are followed. Raises ValueError when it is not closed."""
+    n = len(text)
+    if text[i] == '`':
+        j = i + 1
+        while j < n and text[j] != '`':
+            j += 2 if text[j] == '\\' else 1
+        if j >= n:
+            raise ValueError('unclosed `')
+        return j + 1
+    depth, j = 1, i + 2
+    while j < n:
+        c = text[j]
+        if c == '\\':
+            j += 2
+            continue
+        if c == "'":
+            k = text.find("'", j + 1)
+            if k == -1:
+                raise ValueError("unclosed '")
+            j = k + 1
+            continue
+        if c == '"':
+            j += 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == '\\' else 1
+            if j >= n:
+                raise ValueError('unclosed "')
+            j += 1
+            continue
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    raise ValueError('unclosed $(')
 
 
-def _segments(tokens):
-    """Simple commands: runs of tokens between separators (; & | && || ( ) newline). Redirections stay in."""
+def _sub_text(text, i, j):
+    return text[i + 1:j - 1] if text[i] == '`' else text[i + 2:j - 1]
+
+
+def _lex(text):
+    """The command as the shell splits it: [('word', text, subs) or ('sep', text, [])]. Quotes are removed from a word;
+    text in quotes never separates commands. subs: the text of each $( ) and ` ` in the word that the shell runs (not
+    those in single quotes). A redirection operator is a word of its own. Raises ValueError for an unclosed quote."""
+    out, n, i = [], len(text), 0
+    word, subs, inword = [], [], False
+
+    def end():
+        nonlocal word, subs, inword
+        if inword:
+            out.append(('word', ''.join(word), subs))
+        word, subs, inword = [], [], False
+
+    while i < n:
+        c = text[i]
+        if c in ' \t\r':
+            end()
+            i += 1
+        elif c == '#' and not inword:
+            k = text.find('\n', i)
+            i = n if k == -1 else k
+        elif c in '<>' or (c == '&' and text.startswith('&>', i)):
+            end()
+            j = i + 1
+            while j < n and text[j] in '<>&|':
+                j += 1
+            out.append(('word', text[i:j], []))
+            i = j
+        elif c in SEPARATORS:
+            end()
+            j = i + 1
+            while c != '\n' and j < n and text[j] in ';&|':
+                j += 1
+            out.append(('sep', text[i:j], []))
+            i = j
+        elif c == '\\':
+            inword = True
+            word.append(text[i + 1:i + 2])
+            i += 2
+        elif c == "'":
+            inword = True
+            k = text.find("'", i + 1)
+            if k == -1:
+                raise ValueError("unclosed '")
+            word.append(text[i + 1:k])
+            i = k + 1
+        elif c == '"':
+            inword = True
+            i += 1
+            while True:
+                if i >= n:
+                    raise ValueError('unclosed "')
+                c = text[i]
+                if c == '"':
+                    i += 1
+                    break
+                if c == '\\':
+                    word.append(text[i + 1:i + 2])
+                    i += 2
+                elif text.startswith('$(', i) or c == '`':
+                    j = _sub_end(text, i)
+                    subs.append(_sub_text(text, i, j))
+                    word.append(text[i:j])
+                    i = j
+                else:
+                    word.append(c)
+                    i += 1
+        elif text.startswith('$(', i) or c == '`':
+            inword = True
+            j = _sub_end(text, i)
+            subs.append(_sub_text(text, i, j))
+            word.append(text[i:j])
+            i = j
+        else:
+            inword = True
+            word.append(c)
+            i += 1
+    end()
+    return out
+
+
+def _segments(items):
+    """Simple commands: runs of words between separators (; & | && || ( ) newline), as [(text, subs)]."""
     seg = []
-    for t in tokens:
-        if t and all(c in ';&|()<>\n' for c in t) and any(c in SEPARATORS for c in t):
+    for kind, text, subs in items:
+        if kind == 'sep':
             if seg:
                 yield seg
             seg = []
         else:
-            seg.append(t)
+            seg.append((text, subs))
     if seg:
         yield seg
-
-
-def _substitutions(token):
-    """The text of each $( ... ) in a token, by paren depth."""
-    out, i = [], token.find('$(')
-    while i != -1:
-        depth, j = 0, i + 1
-        while j < len(token):
-            if token[j] == '(':
-                depth += 1
-            elif token[j] == ')':
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        out.append(token[i + 2:j])
-        i = token.find('$(', j)
-    return out
 
 
 def _model_call(words):
@@ -143,13 +245,18 @@ def _valid_duration(d):
     return bool(m) and float(m.group(1)) > 0
 
 
-def _scan(words, timeout, found, depth):
-    """Walk one simple command's prefixes (assignments and wrappers) and record any model CLI it starts, with the time
-    limit in force for it: None, or the duration."""
+def _scan(seg, timeout, found, depth):
+    """Walk one simple command's prefixes (assignments, wrappers, reserved words) and record any model CLI it starts,
+    with the time limit in force for it: None, or the duration. A substitution in any of its words runs before the
+    command does, so it gets only the time limit in force outside the command."""
+    for _, subs in seg:
+        for inner in subs:
+            _walk(inner, timeout, found, depth + 1)
+    words = [w for w, _ in seg]
     i = 0
     while i < len(words):
         w = words[i]
-        if ASSIGN_RE.match(w):
+        if ASSIGN_RE.match(w) or w in RESERVED:
             i += 1
             continue
         prog = os.path.basename(w)
@@ -193,21 +300,16 @@ def _scan(words, timeout, found, depth):
                     break
             return
         break
-    rest = words[i:]
-    call = _model_call(rest)
+    call = _model_call(words[i:])
     if call:
         found.append((call, timeout))
-    for w in rest:
-        for inner in _substitutions(w):
-            _walk(inner, timeout, found, depth + 1)
 
 
 def _walk(text, timeout, found, depth=0):
     if depth > MAX_DEPTH:
         return
-    for seg in _segments(_tokens(_drop_heredocs(text.replace('\\\n', ' ')))):
-        if os.path.basename(seg[0]) != 'export':
-            _scan(seg, timeout, found, depth)
+    for seg in _segments(_lex(_drop_heredocs(text.replace('\\\n', ' ')))):
+        _scan(seg, timeout, found, depth)
 
 
 def model_calls(command):

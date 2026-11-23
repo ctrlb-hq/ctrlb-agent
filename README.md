@@ -78,7 +78,7 @@ The header value is stored in `config.toml` as given. The installer refuses to w
 
 A run is the set of agents that share a run id. An agent is one session in a run.
 
-- With no setting, each Claude Code or Codex session is its own run, and its subagents join it.
+- With no setting, each Claude Code or Codex session is its own run, and its subagents join it. Such a session is not told to claim a task; it does the work it was asked to do.
 - To put several sessions in one run, set `CTRLB_RUN` once for all of them:
 
   ```sh

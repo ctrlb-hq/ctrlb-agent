@@ -93,7 +93,7 @@ If your organization already installs the plugin through managed settings, remov
 
 ## 3. Runs
 
-A session is its own run, and its subagents join it. To put several sessions in one run, give them the same `CTRLB_RUN`:
+A session is its own run, and its subagents join it. A session with no run set is not told to claim a task: its context says no Relay tasks are waiting and to do the work it was asked to do. The whole Relay rule (claim the next free task, stop when none is free) is given to a session in a run: one with `CTRLB_RUN`, one that has called a ctrlb relay tool, or one that joined the run of the agent that started it. To put several sessions in one run, give them the same `CTRLB_RUN`:
 
 ```sh
 CTRLB_RUN=nightly-refactor-1 claude -p "Fix the failing tests in src/parser"
@@ -149,7 +149,7 @@ In a relay run the plugin also registers a task for each sub-agent it spawns, ke
 
 ### Agents started from a shell
 
-When an agent starts another agent from a shell command (`codex exec`, `claude -p`, or a script that runs one), the new agent finds the agent that started it when its own session starts. If that agent is in a relay run, the new one joins the same run under its own agent name and posts a note saying who started it, so it shows in the run view with its own holds and stalls. Its context names the parent's session, so it can search what the parent already did. Nothing reads the command, so this works through scripts, `xargs` and `make` too. On by default; `CTRLB_JOIN_SPAWNED=0` turns it off.
+When an agent starts another agent from a shell command (`codex exec`, `claude -p`, or a script that runs one), the new agent finds the agent that started it when its own session starts. If that agent is in a relay run (it has `CTRLB_RUN`, or it has called a ctrlb relay tool), the new one joins the same run under its own agent name and posts a note saying who started it, so it shows in the run view with its own holds and stalls. Its context names the parent's session, so it can search what the parent already did. Nothing reads the command, so this works through scripts, `xargs` and `make` too. On by default; `CTRLB_JOIN_SPAWNED=0` turns it off. In local mode the new agent also needs `CTRLB_RUN` in its environment, which it inherits from its parent unless the command removes it.
 
 Two optional settings:
 

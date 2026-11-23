@@ -16,7 +16,7 @@ import model_call_guard  # noqa: E402
 if __name__ == '__main__' and sys.argv[1:2] == ['pre-bash'] and model_call_guard.off_before_load():
     sys.exit(0)         # pre-bash runs before every Bash call: with guardModelCalls off, stop before loading the rest
 import common, relay_hooks, rows_claude, spawn  # noqa: E402
-from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, start_context, spawned_text, decide, record_tokens, _tool_answer,  # noqa: E402
+from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, relay_text, start_context, spawned_text, decide, record_tokens, _tool_answer,  # noqa: E402
                           bash_result, evidence_hint, is_test_command, record_test, record_bash, record_edit, record_note,
                           mark_relay, handoff_text, witness, _deny)
 from paths import edit_paths as normalise_edit_paths  # noqa: E402
@@ -177,13 +177,16 @@ def post_tool(cfg, inp):
                     common.log(f"artifact: {type(e).__name__}: {str(e)[:200]}")
         return None
     name = tool.rsplit('__', 1)[-1] if tool.startswith('mcp__') else ''
-    if name == 'post':
-        record_note(own_run, own_agent, sid, args.get('text'))
-        mark_relay(own_run, own_agent, sid)
-        return None
-    if name not in ('claim', 'handoff', 'release', 'done'):
+    if name not in ('post', 'claim', 'handoff', 'release', 'done'):
         return None
     mark_relay(own_run, own_agent, sid)
+    try:      # the agents this session starts later join the run it named (lib/spawn.py)
+        spawn.note_relay(sid, args.get('run_id') or own_run, args.get('agent') or own_agent)
+    except Exception as e:
+        common.log(f"spawn relay run {sid}: {type(e).__name__}: {str(e)[:200]}")
+    if name == 'post':
+        record_note(own_run, own_agent, sid, args.get('text'))
+        return None
     run = args.get('run_id') or own_run
     agent = args.get('agent') or own_agent
     answer = _tool_answer(inp.get('tool_response'))
@@ -226,12 +229,14 @@ def main():
             text = RECALL.format(sid=sid) + spawned_text(started, run, agent, scratch)
             block = ''
         else:
-            text = RECALL.format(sid=sid) + spawned_text(started, '', '', '') + '\n\n' + RELAY.format(run=run, agent=agent, scratch=scratch)
-            try:      # a relay run's session starts with the record
-                block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
-            except Exception as e:
-                common.log(f"session-start record: {type(e).__name__}: {str(e)[:200]}")
-                block = ''
+            in_run = relay_hooks.in_relay(cfg, run, agent, sid)
+            text = RECALL.format(sid=sid) + spawned_text(started, '', '', '') + '\n\n' + relay_text(in_run, run, agent, scratch)
+            block = ''
+            if in_run:
+                try:      # a relay run's session starts with the record
+                    block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
+                except Exception as e:
+                    common.log(f"session-start record: {type(e).__name__}: {str(e)[:200]}")
         out = start_context(cfg, 'SessionStart', text + ('\n\n' + block if block else ''))
     elif mode == 'subagent-start':
         upload(cfg, dict(inp, agent_transcript_path=None), SYNC_S - 1)
@@ -239,8 +244,8 @@ def main():
             print(json.dumps(start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid))))
             return
         run = common.run_id(cfg, sid)
-        relay = RELAY.format(run=run, agent=common.agent_name(cfg, sid, inp.get('agent_id') or ''),
-                             scratch=common.scratch_dir(cfg, run))
+        relay = relay_text(relay_hooks.in_relay(cfg, run, common.agent_name(cfg, sid), sid), run,
+                           common.agent_name(cfg, sid, inp.get('agent_id') or ''), common.scratch_dir(cfg, run))
         out = start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid) + '\n\n' + relay)
     elif mode == 'flush':
         upload(cfg, inp, SYNC_S)

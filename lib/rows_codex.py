@@ -129,6 +129,13 @@ def session_run(cfg, sid, parent='', path=''):
     known thread; cycles stop without looping. An explicit run always wins."""
     if cfg.get('run') or not parent:
         return common.run_id(cfg, sid, parent)
+    return root_session(sid, parent, path)
+
+
+def root_session(sid, parent='', path=''):
+    """The session id at the top of a thread's ancestor chain (sid itself when it has no parent)."""
+    if not parent:
+        return sid
     seen = {sid}
     while parent and parent not in seen and len(seen) < 64:
         seen.add(parent)

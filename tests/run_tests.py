@@ -705,33 +705,40 @@ def test_hooks(seeker):
     home = os.path.join(WORK, 'home')
     env = base_env(seeker.url, home)
 
+    # a session in a relay run gets the whole relay rule (CTRLB_RUN set; here the run id is the session id)
+    p, _ = hook('session-start', I['session_start'], dict(env, CTRLB_RUN=SID))
+    rctx = out_of(p).get('additionalContext', '')
+    seeker.reset()
     # session-start: the rule names the session, run and agent ids
     p, dt = hook('session-start', I['session_start'], env)
     o = out_of(p)
     ctx = o.get('additionalContext', '')
     check('session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {SID}' in ctx and f'run id is {SID}' in ctx and f'agent id is {SID}' in ctx and p.returncode == 0)
-    check('session-start: claims the registered task, its files come with it, holds one claim', registered_rule(ctx))
+    check('session-start with no run set: no task to find or stop rule, the ids for the relay tools',
+          'no Relay tasks are waiting for you' in ctx and 'claim(next=true)' not in ctx and 'no task and stop' not in ctx
+          and f'run_id="{SID}"' in ctx and 'helper scripts and binaries in the scratch directory' in ctx, ctx[-400:])
+    check('session-start: claims the registered task, its files come with it, holds one claim', registered_rule(rctx))
     check('session-start: the recall rule names its moments (first grep, file read or shell command; a failed command)',
           recall_rule(ctx, SID))
     check('session-start: refusals, unknown_task, reopen a finished task',
-          'held is false with finished_by, the task is done' in ctx and 'held is false with held_by, another agent has it' in ctx
-          and 'If reason is unknown_task, claim again with the suggestion' in ctx and 'claim its name with reopen=true' in ctx)
-    check('session-start: slots for things that are not files', 'is claimed as slot:<name> and released when you are done with it' in ctx
-          and ctx.index('slot:<name>') < ctx.index('reopen=true'))
+          'held is false with finished_by, the task is done' in rctx and 'held is false with held_by, another agent has it' in rctx
+          and 'If reason is unknown_task, claim again with the suggestion' in rctx and 'claim its name with reopen=true' in rctx)
+    check('session-start: slots for things that are not files', 'is claimed as slot:<name> and released when you are done with it' in rctx
+          and rctx.index('slot:<name>') < rctx.index('reopen=true'))
     check('relay skill and tools: slots, two-minute lease, never finished',
           'claimed as `slot:<name>` and released when you are done with it' in open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
           and all(n in open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read() for n in
                   ('## Slots', '`slot:devserver`', '`slot:port-3000`', '`slot:db-migrate`', '`slot:screenshots`', '`slot:commit`', 'lasts two minutes')))
     check('session-start: names the relay tools, contract and contracts among them',
-          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts, done)' in ctx)
+          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts, done)' in rctx)
     check('session-start: the coordination tools before a prose note, one sentence each',
           'Use the coordination tools before a prose note: handoff when you must leave a task you hold, so it moves to the agent '
           'you name in one step; ask when you are blocked on something only another agent or the orchestrator can decide; '
           "answer, with the question's id, when you can settle an open question; contract when you finish an interface others "
           'will build on (a type, a route, a config shape), with its name, the shape in a few lines and the files that define '
           "it. Before you build on a contract, read it with `contracts`. If it is stale, read the file it names and check your "
-          "assumptions against it. Post a note only for what none of them covers." in ctx)
+          "assumptions against it. Post a note only for what none of them covers." in rctx)
     check('session-start returns promptly', dt < 3.0, f'{dt:.2f}s')
     p, _ = hook('session-start', I['session_start_compact'], dict(env, CTRLB_RUN='relay-run-7', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
@@ -1408,20 +1415,25 @@ def test_codex_hooks(seeker):
     home = os.path.join(WORK, 'home-codex-pre')
     env = base_env(seeker.url, home, CODEX_HOME=chome)
 
+    p, _ = chook('session-start', I['session_start'], dict(env, CTRLB_RUN=CSID))     # in a relay run: the whole rule
+    rctx = out_of(p).get('additionalContext', '')
+    seeker.reset()
     p, dt = chook('session-start', I['session_start'], env)
     o = out_of(p)
     ctx = o.get('additionalContext', '')
     check('codex session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {CSID}' in ctx and f'run id is {CSID}' in ctx and f'agent id is {CSID}' in ctx and p.returncode == 0, f'{dt:.2f}s')
-    check('codex session-start: claims the registered task, its files come with it', registered_rule(ctx))
+    check('codex session-start with no run set: no task to find or stop rule',
+          'no Relay tasks are waiting for you' in ctx and 'claim(next=true)' not in ctx and 'no task and stop' not in ctx, ctx[-300:])
+    check('codex session-start: claims the registered task, its files come with it', registered_rule(rctx))
     check('codex session-start: the same recall rule as Claude Code', recall_rule(ctx, CSID))
     check('codex session-start: names the relay tools, ask and answer among them',
-          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts, done)' in ctx
-          and 'Use the coordination tools before a prose note: handoff when' in ctx and '; ask when you are blocked' in ctx)
-    check('codex session-start: slots', 'slot:<name>' in ctx)
+          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts, done)' in rctx
+          and 'Use the coordination tools before a prose note: handoff when' in rctx and '; ask when you are blocked' in rctx)
+    check('codex session-start: slots', 'slot:<name>' in rctx)
     check('codex session-start: finish with evidence; reopen a finished task',
-          'as the evidence, and next=true' in ctx and 'release it with finished=true' not in ctx
-          and 'claim its name with reopen=true' in ctx)
+          'as the evidence, and next=true' in rctx and 'release it with finished=true' not in rctx
+          and 'claim its name with reopen=true' in rctx)
     p, _ = chook('session-start', I['session_start'], dict(env, CTRLB_RUN='relay-run-8', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
     check('codex session-start: CTRLB_RUN and CTRLB_AGENT win', 'run id is relay-run-8' in ctx and 'agent id is builder-1' in ctx)
@@ -1936,6 +1948,13 @@ def test_model_call_guard(seeker):
         'in a subshell': '(cd d; codex exec x) > out.txt',
         'in the background': 'nohup codex exec x > log 2>&1 &',
         'a timeout on another command': 'timeout 5 make build; codex exec x',
+        'in $( ) under a timed command (it runs first)': 'timeout 5 echo "$(codex exec hi)"',
+        'in backquotes': 'echo `claude -p hi`',
+        'in an assignment substitution': 'OUT=$(codex exec hi) make',
+        'after if, then': 'if true; then codex exec hi; fi',
+        'in a for loop': 'for f in a b; do codex exec "$f"; done',
+        'in braces': '{ codex exec x; }',
+        'a quoted program name': "'codex' exec hi",
     }
     bad = {n: c for n, c in refused.items() if not reason(c)}
     check('guard: refuses each model CLI call with no time limit', not bad, json.dumps(bad))
@@ -1955,6 +1974,12 @@ def test_model_call_guard(seeker):
         'commit message': 'git commit -m "run claude -p in CI"',
         'heredoc body': "cat > run.sh <<'EOF'\ncodex exec x\nclaude -p y\nEOF\nchmod +x run.sh",
         'unreadable command': 'codex exec "unclosed',
+        '$( ) in single quotes is text': "printf %s '$(codex exec hi)'",
+        'a quoted ; is text': "printf %s ';' codex exec hi",
+        'a quoted && is text': 'echo "a && codex exec hi"',
+        'a comment': '# codex exec hi\nls',
+        'timed inside a substitution': 'echo "$(timeout 5 codex exec "a)b")"',
+        'timeout around bash -c with a substitution inside': "timeout 5 bash -c 'echo $(codex exec hi)'",
         'empty': '',
     }
     bad = {n: reason(c) for n, c in allowed.items() if reason(c)}
@@ -2073,6 +2098,13 @@ def test_spawned_agents(seeker):
     d = spawn.decide({'run': 'bench-4', 'agent': 'lead'}, SID, lead, 'claude')
     check("decide: its own run but the parent's agent name: stays in its run, renamed",
           not d['joined'] and d['renamed'] and d['run'] == 'bench-4' and d['agent'] == 'lead.claude-' + SID[:8], json.dumps(d))
+    d = spawn.decide({'run': '', 'agent': 'lead'}, SID, dict(lead, agent='lead.codex-bbbbbbbb', base_agent='lead'), 'claude')
+    check("decide: a grandchild that inherited the first agent's CTRLB_AGENT is renamed below its own parent",
+          d['joined'] and d['renamed'] and d['agent'] == 'lead.codex-bbbbbbbb.claude-' + SID[:8], json.dumps(d))
+    with mock.patch.dict(os.environ, {'CTRLB_RUN': ''}):
+        d = spawn.decide({'run': '', 'agent': '', 'mode': 'local'}, SID, lead, 'codex')
+    check('decide: in local mode a child without CTRLB_RUN in its environment joins nothing (its relay tools need it)',
+          not d['joined'] and d['run'] == '', json.dumps(d))
     d = spawn.decide({'run': '', 'agent': ''}, SID, dict(lead, relay=False, run=PSID, agent=PSID), 'codex')
     check('decide: a parent in no relay run is not joined, and a parent with no label gives no prefix',
           not d['joined'] and d['agent'] == '' and spawn.child_name(PSID, PSID, 'codex', SID) == 'codex-' + SID[:8], json.dumps(d))
@@ -2199,6 +2231,32 @@ def test_spawned_agents(seeker):
         got = spawn._proc(5000)
     check('process lookup without /proc (macOS): ps gives the parent, the program and the start time',
           got == (4242, 'codex', 'Sun Nov  2 05:01:14 2026'), repr(got))
+    got = []
+    for line in ('  4242 Sun Nov  2 05:01:14 2026     -zsh\n', '  4242 Sun Nov  2 05:01:14 2026     /bin/sh -c python3 -I hook.py\n'):
+        with mock.patch.object(spawn.os.path, 'isdir', lambda d: False), \
+                mock.patch('builtins.open', side_effect=FileNotFoundError), \
+                mock.patch.object(spawn.subprocess, 'run', lambda *a, _l=line, **k: subprocess.CompletedProcess(a, 0, _l, '')):
+            got.append(spawn._proc(5000))
+    check('process lookup without /proc (macOS): a login shell and /bin/sh are named as shells',
+          [g[1] for g in got] == ['zsh', 'sh'], repr(got))
+    ptree = {10: (20, 'python3', 'H'), 20: (30, 'sh', 'SH'), 30: (40, 'codex', 'C'), 40: (1, 'zsh', 'Z')}
+    with mock.patch.object(spawn, '_proc', lambda pid: ptree.get(pid)):
+        ap = spawn.agent_process(10)
+    check('own agent process: codex -> sh -> hook finds codex', ap == (30, 'codex', 'C'), repr(ap))
+    spawn.note_relay(PSID, 'review', 'lead')
+    with mock.patch.object(spawn, '_proc', lambda pid: None):
+        fp = spawn.find_parent(None, SID, env=dict(CTRLB_PARENT_SESSION=PSID, CTRLB_PARENT_RUN=PSID, CTRLB_PARENT_AGENT=PSID,
+                                                   CTRLB_PARENT_RELAY='0'))
+    os.remove(spawn._relay_path(PSID))
+    check('a parent that named a run in a relay tool call (claim(run_id="review")): its children join that run',
+          fp and fp['run'] == 'review' and fp['agent'] == 'lead' and fp['relay'], json.dumps(fp))
+    spawn._write_json(spawn._session_path('root-x'), dict(parent=PSID, parent_agent='lead', run='run-L', agent='lead.codex-1234',
+                                                          joined=True, renamed=False))
+    spawn.link('thread-y', 'root-x')
+    lc = {'run': '', 'agent': '', 'join_spawned': True}
+    spawn.apply(lc, 'thread-y')
+    check("Codex subagent thread: every later hook reads its root session's run and agent name",
+          lc['run'] == 'run-L' and lc['agent'] == 'lead.codex-1234' and spawn.joined('thread-y').get('root') == 'root-x', json.dumps(lc))
     tree = {100: (200, 'claude', 'S1'), 200: (300, 'codex', 'S2'), 300: (1, 'zsh', 'S3')}
     with open(spawn._record_path(200), 'w') as fh:
         json.dump(dict(session=PSID, run='run-s3', agent='lead', relay=True, start='OLD'), fh)
@@ -2237,6 +2295,31 @@ def test_spawned_agents(seeker):
     th.join(5)
     check('spawnIdleMinutes: alive while its transcript changes; stopped (SIGTERM) once it stops changing',
           alive_while_busy and victim.returncode == -signal.SIGTERM and time.monotonic() - t0 < 9, f'{victim.returncode}')
+    other = subprocess.Popen(['sleep', '60'])
+    try:
+        ostart = spawn._proc(other.pid)[2]
+        spawn._write_json(spawn._record_path(other.pid), dict(session='new-session-after-clear', start=ostart))
+        th = threading.Thread(target=spawn._watcher, args=(dict(pid=other.pid, start=ostart, transcript=tr, minutes=0.5 / 60,
+                                                                sid='watched-session'), 0.2, 1))
+        th.start()
+        th.join(8)
+        cleared = other.poll() is None and not th.is_alive()
+        try:
+            spawn._signal(other.pid, 'NOT-ITS-START', None, signal.SIGTERM)
+            refused = False
+        except ProcessLookupError:
+            refused = True
+        time.sleep(0.2)
+        check('spawnIdleMinutes: the watchdog ends without a signal when the process runs another session (/clear); '
+              'without a pidfd a signal goes only to the process with the watched start time',
+              cleared and refused and other.poll() is None, f'{cleared} {refused} {other.poll()}')
+    finally:
+        other.kill()
+        other.wait()
+        try:
+            os.remove(spawn._record_path(other.pid))
+        except OSError:
+            pass
     check('setting: joinSpawned on by default; spawnIdleMinutes 0 by default and read as minutes',
           json.loads(subprocess.run([sys.executable, '-I', '-c', 'import sys, json; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib'))
                                      + '); import common; c = common.config(); print(json.dumps([c["join_spawned"], c["spawn_idle_minutes"]]))'],

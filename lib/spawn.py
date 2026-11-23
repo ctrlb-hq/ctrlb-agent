@@ -23,7 +23,8 @@ import common  # noqa: E402
 
 AGENT_PROGRAMS = ('claude', 'codex')
 SHELLS = ('sh', 'bash', 'zsh', 'dash')
-PARENT_VARS = ('CTRLB_PARENT_SESSION', 'CTRLB_PARENT_RUN', 'CTRLB_PARENT_AGENT', 'CTRLB_PARENT_RELAY')
+PARENT_VARS = ('CTRLB_PARENT_SESSION', 'CTRLB_PARENT_RUN', 'CTRLB_PARENT_AGENT', 'CTRLB_PARENT_RELAY',
+               'CTRLB_PARENT_BASE_AGENT')
 MAX_DEPTH = 32
 KEEP_SESSIONS_S = 30 * 86400
 NOTE_S = 1.5
@@ -64,7 +65,8 @@ def _proc(pid):
             return None
         ppid, rest = out.split(None, 1)
         start, command = rest[:24], rest[24:].strip()
-        return int(ppid), _program('', command.split()), start
+        argv = command.split()
+        return int(ppid), _program(os.path.basename(argv[0]).lstrip('-') if argv else '', argv), start
     except Exception:
         return None
 
@@ -102,7 +104,7 @@ def _record_path(pid):
     return os.path.join(_dir('procs'), f'{int(pid)}.json')
 
 
-def write_record(me, sid, run, agent, relay):
+def write_record(me, sid, run, agent, relay, base_agent=''):
     """The process record of this session's agent process me (pid, program, start), and the removal of records whose
     process has gone."""
     pid, prog, start = me
@@ -113,7 +115,8 @@ def write_record(me, sid, run, agent, relay):
                 os.remove(os.path.join(d, f))
             except OSError:
                 pass
-    _write_json(_record_path(pid), dict(session=sid, run=run, agent=agent, relay=bool(relay), program=prog, start=start))
+    _write_json(_record_path(pid), dict(session=sid, run=run, agent=agent, relay=bool(relay), program=prog, start=start,
+                                        base_agent=base_agent or ''))
 
 
 def _write_json(path, data):
@@ -147,26 +150,50 @@ def find_parent(me, sid, env=None):
             continue
         rec = _read_json(_record_path(pid))
         if rec.get('session') and rec.get('start') == q[2] and rec['session'] != sid:
-            return dict(session=rec['session'], run=rec.get('run') or rec['session'], agent=rec.get('agent') or '',
-                        relay=bool(rec.get('relay')), how='process')
+            return _with_relay_run(dict(session=rec['session'], run=rec.get('run') or rec['session'],
+                                        agent=rec.get('agent') or '', relay=bool(rec.get('relay')),
+                                        base_agent=rec.get('base_agent') or '', how='process'))
     psid = (env.get('CTRLB_PARENT_SESSION') or '').strip()
     if psid and psid != sid:
-        return dict(session=psid, run=(env.get('CTRLB_PARENT_RUN') or '').strip() or psid,
-                    agent=(env.get('CTRLB_PARENT_AGENT') or '').strip(), relay=env.get('CTRLB_PARENT_RELAY') == '1',
-                    how='environment')
+        return _with_relay_run(dict(session=psid, run=(env.get('CTRLB_PARENT_RUN') or '').strip() or psid,
+                                    agent=(env.get('CTRLB_PARENT_AGENT') or '').strip(),
+                                    relay=env.get('CTRLB_PARENT_RELAY') == '1',
+                                    base_agent=(env.get('CTRLB_PARENT_BASE_AGENT') or '').strip(), how='environment'))
     return None
+
+
+def _relay_path(sid):
+    return os.path.join(_dir('relay'), re.sub(r'[^A-Za-z0-9_.-]', '_', sid)[:128] + '.json')
+
+
+def note_relay(sid, run, agent):
+    """A ctrlb relay tool was called in session sid with this run and agent: the agents it starts later join that run
+    under that name, also when it is not the run the session started with (no CTRLB_RUN, then claim(run_id=...))."""
+    if not sid or not run:
+        return
+    if _read_json(_relay_path(sid)) == dict(run=run, agent=agent or ''):
+        return
+    _write_json(_relay_path(sid), dict(run=run, agent=agent or ''))
+
+
+def _with_relay_run(parent):
+    """The parent with the run and agent of its latest relay tool call, when it made one."""
+    r = _read_json(_relay_path(parent['session']))
+    if r.get('run'):
+        parent.update(run=r['run'], agent=r.get('agent') or parent['agent'], relay=True)
+    return parent
 
 
 # ---------------------------------------------------------------- the parent side
 
-def mark_shell(sid, run, agent, relay, env_file=None):
+def mark_shell(sid, run, agent, relay, env_file=None, base_agent=''):
     """Claude Code: CTRLB_PARENT_* for every later Bash command of this session, appended to CLAUDE_ENV_FILE (other
     hooks write to it too, so nothing is replaced). False when there is no such file."""
     env_file = env_file if env_file is not None else os.environ.get('CLAUDE_ENV_FILE') or ''
     if not env_file:
         return False
     vals = dict(CTRLB_PARENT_SESSION=sid, CTRLB_PARENT_RUN=run, CTRLB_PARENT_AGENT=agent,
-                CTRLB_PARENT_RELAY='1' if relay else '0')
+                CTRLB_PARENT_RELAY='1' if relay else '0', CTRLB_PARENT_BASE_AGENT=base_agent or '')
     text = ''.join(f'export {k}={shlex.quote(v or "")}\n' for k, v in vals.items())
     try:
         with open(env_file) as fh:
@@ -212,13 +239,15 @@ def child_name(parent_agent, parent_session, program, sid):
 
 def decide(cfg, sid, parent, program):
     """The child's run and agent name: {parent, parent_agent, run, agent, joined, renamed}. joined: the child takes the
-    parent's run (it had none of its own, or the same). renamed: it had the parent's agent name."""
+    parent's run (it had none of its own, or the same). renamed: it had the parent's agent name, or the name the parent
+    itself was given before it was renamed (a grandchild inherits the CTRLB_AGENT of the first agent). In local mode a
+    child without CTRLB_RUN in its environment joins nothing: its relay tools need that run."""
     own_run = cfg.get('run') or ''
     p_agent = parent['agent'] or parent['session']
     explicit_run = bool(own_run) and own_run != parent['run']
-    join = not explicit_run and parent_in_relay(parent)
+    join = not explicit_run and not common.relay_off(cfg) and parent_in_relay(parent)
     agent = cfg.get('agent') or ''
-    renamed = bool(agent) and agent == p_agent
+    renamed = bool(agent) and agent in (p_agent, parent.get('base_agent') or p_agent)
     if renamed or (join and not agent):
         agent = child_name(p_agent, parent['session'], program, sid)
     return dict(parent=parent['session'], parent_agent=p_agent, parent_run=parent['run'], how=parent['how'],
@@ -237,6 +266,17 @@ def apply(cfg, sid):
     if j.get('agent') and (j.get('joined') or j.get('renamed')):
         cfg['agent'] = j['agent']
     return j
+
+
+def link(sid, root):
+    """A Codex subagent thread sid takes the decision of its root session, so every later hook of the thread reads the
+    same run and agent name. Returns the decision, or {}."""
+    if not sid or not root or sid == root:
+        return {}
+    d = joined(root)
+    if d and joined(sid) != dict(d, root=root):
+        _write_json(_session_path(sid), dict(d, root=root))
+    return d
 
 
 def _prune_sessions():
@@ -258,6 +298,7 @@ def session_start(cfg, sid, source='', env_file=None, transcript=''):
         return {}
     decision = {}
     me = None
+    base_agent = cfg.get('agent') or ''
     try:
         me = agent_process()
         decision = joined(sid)
@@ -277,11 +318,11 @@ def session_start(cfg, sid, source='', env_file=None, transcript=''):
     relay = bool(cfg.get('run'))
     try:
         if me:
-            write_record(me, sid, run, agent, relay)
+            write_record(me, sid, run, agent, relay, base_agent)
     except Exception as e:
         common.log(f"spawn record {sid}: {type(e).__name__}: {str(e)[:200]}")
     try:
-        mark_shell(sid, run, agent, relay, env_file)
+        mark_shell(sid, run, agent, relay, env_file, base_agent)
     except Exception as e:
         common.log(f"spawn env file {sid}: {type(e).__name__}: {str(e)[:200]}")
     if decision and not decision.get('noted') and decision.get('joined') and not common.relay_off(cfg):
@@ -321,6 +362,31 @@ def _alive(pid, start):
     return bool(p) and p[2] == start
 
 
+def _same_session(pid, sid):
+    """Whether the process still runs session sid: a new session in the same process (/clear) rewrites its record."""
+    rec = _read_json(_record_path(pid))
+    return not sid or not rec.get('session') or rec['session'] == sid
+
+
+def _pidfd(pid):
+    """A handle on the process itself (Linux 5.3 and later), so a signal can never reach a process that took its pid
+    later; None elsewhere."""
+    try:
+        return os.pidfd_open(pid)
+    except (AttributeError, OSError):
+        return None
+
+
+def _signal(pid, start, fd, sig):
+    """Send sig to the watched process only: through its pidfd, or after checking its start time once more."""
+    if fd is not None:
+        signal.pidfd_send_signal(fd, sig)
+    elif _alive(pid, start):
+        os.kill(pid, sig)
+    else:
+        raise ProcessLookupError(pid)
+
+
 def _last_change(path, since):
     try:
         return max(since, os.path.getmtime(path))
@@ -330,10 +396,22 @@ def _last_change(path, since):
 
 def _watcher(payload, poll_s=WATCH_POLL_S, grace_s=KILL_GRACE_S):
     """Stop the agent process when its transcript has not changed for the set minutes: SIGTERM (its session-end hook
-    hands its holds back), then SIGKILL after grace_s. Ends when the process ends."""
+    hands its holds back), then SIGKILL after grace_s. Ends when the process ends, or when it starts another session."""
     pid, start, limit = int(payload['pid']), payload.get('start'), float(payload['minutes']) * 60
+    sid = payload.get('sid') or ''
     began = time.time()
-    while _alive(pid, start):
+    fd = _pidfd(pid)
+    if not _alive(pid, start):      # the pid was taken by another process before the handle was opened
+        return
+    try:
+        _watch_loop(payload, pid, start, sid, limit, began, fd, poll_s, grace_s)
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _watch_loop(payload, pid, start, sid, limit, began, fd, poll_s, grace_s):
+    while _alive(pid, start) and _same_session(pid, sid):
         idle = time.time() - _last_change(payload.get('transcript') or '', began)
         if idle >= limit:
             common.log(f"spawn watchdog {payload.get('sid')}: no change for {int(idle)}s, stopping pid {pid}")
@@ -346,18 +424,19 @@ def _watcher(payload, poll_s=WATCH_POLL_S, grace_s=KILL_GRACE_S):
                                          timeout=5)
                 except Exception as e:
                     common.log(f"spawn watchdog note: {type(e).__name__}: {str(e)[:200]}")
+            if not _same_session(pid, sid):
+                return
             try:
-                os.kill(pid, signal.SIGTERM)
+                _signal(pid, start, fd, signal.SIGTERM)
             except OSError:
                 return
             end = time.time() + grace_s
             while time.time() < end and _alive(pid, start):
                 time.sleep(1)
-            if _alive(pid, start):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
+            try:
+                _signal(pid, start, fd, signal.SIGKILL)
+            except OSError:
+                pass
             return
         time.sleep(min(poll_s, max(1.0, limit - idle)))
 

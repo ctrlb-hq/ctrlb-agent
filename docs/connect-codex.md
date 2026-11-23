@@ -137,7 +137,7 @@ CODEX_HOME="$(mktemp -d)" python3 -I install.py --codex --mcp-url "<your CtrlB U
 
 ## Runs
 
-A Codex session is its own run, and its subagent threads join it. To put several sessions in one run, give them the same `CTRLB_RUN`:
+A Codex session is its own run, and its subagent threads join it. A session with no run set is not told to claim a task: its context says no Relay tasks are waiting and to do the work it was asked to do. The whole Relay rule (claim the next free task, stop when none is free) is given to a session in a run: one with `CTRLB_RUN`, or one that joined the run of the agent that started it. To put several sessions in one run, give them the same `CTRLB_RUN`:
 
 ```sh
 CTRLB_RUN=nightly-refactor-1 codex exec "Fix the failing tests in src/parser"
