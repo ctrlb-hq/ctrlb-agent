@@ -268,16 +268,29 @@ def decide(cfg, sid, parent, program):
 
 
 def apply(cfg, sid):
-    """Put the session's decided run and agent name in cfg (every hook calls this after config()). Returns the
-    decision, or {}."""
-    if not sid or not cfg.get('join_spawned'):
+    """Put the session's run and agent name in cfg (every hook calls this after config()): the ones decided at its
+    start when an agent started it; else, with no run set, the ones its latest relay tool call named (no CTRLB_RUN,
+    then claim(run_id="review", agent="lead")), so its edit checks, registrations, rows and session-end handoff use the
+    run it works in. Returns the start decision, or {}."""
+    if not sid:
         return {}
-    j = joined(sid)
+    j = joined(sid) if cfg.get('join_spawned') else {}
     if j.get('joined') and j.get('run'):
         cfg['run'] = j['run']
     if j.get('agent') and (j.get('joined') or j.get('renamed')):
         cfg['agent'] = j['agent']
+    if not cfg.get('run'):
+        follow(cfg, sid, relay_run(sid))
     return j
+
+
+def follow(cfg, sid, named):
+    """cfg takes the run and agent a relay tool call named ({run, agent}); the agent only when it is a label, not the
+    session id."""
+    if named and named.get('run'):
+        cfg['run'] = named['run']
+        if named.get('agent') and named['agent'] != sid:
+            cfg['agent'] = named['agent']
 
 
 def link(sid, root):

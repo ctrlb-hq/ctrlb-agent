@@ -232,10 +232,6 @@ def main():
             block = ''
         else:
             in_run = relay_hooks.in_relay(cfg, run, agent, sid)
-            named = {} if cfg.get('run') else spawn.relay_run(sid)     # no CTRLB_RUN, then claim(run_id=...)
-            if in_run and named.get('run') and named['run'] != run:
-                run = named['run']
-                scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
             text = RECALL.format(sid=sid) + spawned_text(started, '', '', '') + '\n\n' + relay_text(in_run, run, agent, scratch)
             block = ''
             if in_run:
@@ -251,9 +247,6 @@ def main():
             return
         run = common.run_id(cfg, sid)
         in_run = relay_hooks.in_relay(cfg, run, common.agent_name(cfg, sid), sid)
-        named = {} if cfg.get('run') else spawn.relay_run(sid)     # no CTRLB_RUN, then claim(run_id=...)
-        if in_run and named.get('run'):
-            run = named['run']
         relay = relay_text(in_run, run, common.agent_name(cfg, sid, inp.get('agent_id') or ''), common.scratch_dir(cfg, run))
         out = start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid) + '\n\n' + relay)
     elif mode == 'flush':

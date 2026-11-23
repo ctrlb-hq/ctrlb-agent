@@ -246,11 +246,13 @@ def _parts(items):
     while i < n:
         kind, text, subs = items[i]
         name, j = None, i
-        if not seg and kind == 'word' and text == 'function' and i + 1 < n and items[i + 1][0] != 'sep':
+        at_cmd = all(w in RESERVED for w, _ in seg)      # nothing but if, then, do ... before it
+        if at_cmd and kind == 'word' and text == 'function' and i + 1 < n and items[i + 1][0] != 'sep':
             name, j = items[i + 1][1], i + 2
             if j + 1 < n and _is(items[j], 'sep', '(') and _is(items[j + 1], 'sep', ')'):
                 j += 2
-        elif not seg and kind == 'word' and i + 2 < n and _is(items[i + 1], 'sep', '(') and _is(items[i + 2], 'sep', ')'):
+        elif at_cmd and kind == 'word' and text not in RESERVED and i + 2 < n and _is(items[i + 1], 'sep', '(') \
+                and _is(items[i + 2], 'sep', ')'):
             name, j = text, i + 3
         if name is not None:
             while j < n and _is(items[j], 'sep', '\n'):
@@ -271,9 +273,11 @@ def _parts(items):
         yield ('seg', seg)
 
 
-def _run(items, timeout, found, depth, funcs):
-    """Scan the parts in order; a definition replaces the function's body for the calls after it."""
-    funcs = dict(funcs or {})
+def _run(items, timeout, found, depth, funcs, share=False):
+    """Scan the parts in order; a definition replaces the function's body for the calls after it. share: a function
+    body run in the same shell, whose definitions stay for the rest of the command; otherwise (a new text: the command,
+    a substitution, bash -c) the definitions are a copy."""
+    funcs = funcs if share and funcs is not None else dict(funcs or {})
     for part in _parts(items):
         if part[0] == 'def':
             funcs[part[1]] = part[2]
@@ -372,7 +376,7 @@ def _scan(seg, timeout, found, depth, funcs=None):
             return
         break
     if i < len(words) and words[i] in funcs and depth < MAX_DEPTH:      # a call of a function defined in the command
-        _run(funcs[words[i]], timeout, found, depth + 1, funcs)
+        _run(funcs[words[i]], timeout, found, depth + 1, funcs, share=True)
         return
     call = _model_call(words[i:])
     if call:

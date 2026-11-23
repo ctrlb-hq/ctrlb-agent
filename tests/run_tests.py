@@ -1487,6 +1487,34 @@ def test_codex_hooks(seeker):
     p, _ = chook('subagent-start', dict(I['subagent_start'], transcript_path=relay_rollout), dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-relay')))
     ctx = out_of(p).get('additionalContext', '')
     check('codex: the run a relay call named (no CTRLB_RUN) is the run in the subagent rule', 'run id is review-run' in ctx, ctx[-300:])
+    seeker.reset()
+    seeker.state['check'] = 'allow'
+    chook('pre-tool', dict(I['pre_tool_patch'], transcript_path=relay_rollout), dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-relay')))
+    ccall = seeker.calls[0] if seeker.calls else {}
+    check('codex: a later hook of that session uses the named run and agent (the edit check)',
+          ccall.get('path') == '/ai/relay/agent_sessions/runs/review-run/check' and (ccall.get('body') or {}).get('agent') == 'lead',
+          json.dumps(ccall)[:300])
+    parsed = []
+    real_item = rows_codex._relay_item
+    with mock.patch.object(rows_codex, '_relay_item', lambda line: parsed.append(1) or real_item(line)):
+        with open(relay_rollout, 'a') as fh:
+            fh.write('2}\n' + mcp_line('ctrlb', 'third-run'))
+        third = rows_codex.relay_call(relay_rollout)
+    check('codex relay_call: a second read parses only the lines added since the first', third == ('third-run', 'lead') and len(parsed) == 1,
+          f'{third} {len(parsed)}')
+    rewritten = os.path.join(WORK, 'codex-rewritten-rollout.jsonl')
+    with open(rewritten, 'w') as fh:
+        fh.write(mcp_line('ctrlb', 'old-run'))
+    first = rows_codex.relay_call(rewritten)
+    with open(rewritten, 'r+') as fh:       # the same file (same inode), cut and written again, the same size
+        fh.truncate(0)
+        fh.write(mcp_line('ctrlb', 'new-run'))
+    second = rows_codex.relay_call(rewritten)
+    with mock.patch.object(rows_codex.common, 'private_dir', side_effect=OSError('read-only')):
+        no_keep = rows_codex.relay_call(rewritten)
+    check('codex relay_call: a file cut and written again is read again from the start; without a folder to keep the '
+          'offset in, the whole file is read', first == ('old-run', 'lead') and second == ('new-run', 'lead')
+          and no_keep == ('new-run', 'lead'), json.dumps([first, second, no_keep]))
     sdir = os.path.join(home, 'spawn', 'sessions')
     os.makedirs(sdir, mode=0o700, exist_ok=True)
     root_decision = os.path.join(sdir, CSID + '.json')
@@ -2021,6 +2049,8 @@ def test_model_call_guard(seeker):
         'after a function whose body prints a quoted {': "f() { printf '%s' '{'; }; codex exec hi",
         'a call before the function is defined again': 'f() { codex exec hi; }; f; f() { echo ok; }',
         'the second definition is the one called': 'f() { echo ok; }; f() { codex exec hi; }; f',
+        'a function defined when another one runs': 'setup() { review() { codex exec hi; }; }; setup; review',
+        'a function defined after then, called': 'if true; then f() { codex exec hi; }; fi; f',
     }
     bad = {n: c for n, c in refused.items() if not reason(c)}
     check('guard: refuses each model CLI call with no time limit', not bad, json.dumps(bad))
@@ -2052,6 +2082,7 @@ def test_model_call_guard(seeker):
         'a subshell-body function, not called': 'f() ( codex exec hi ); echo ready',
         'a quoted } inside a function body that is not called': "f() { printf '%s' '}'; codex exec hi; }; echo ready",
         'echo } inside a function body that is not called': 'f() { echo }; codex exec hi; }; echo ready',
+        'a function defined after then, not called': 'if true; then f() { codex exec hi; }; fi; echo ready',
         'empty': '',
     }
     bad = {n: reason(c) for n, c in allowed.items() if reason(c)}
@@ -2357,6 +2388,13 @@ def test_spawned_agents(seeker):
                            tool_response=[dict(type='text', text='{"ok": true}')]), env)
     p, _ = hook('subagent-start', dict(I['subagent_start'], session_id=TSID), env)
     after = out_of(p).get('additionalContext', '')
+    seeker.reset()
+    seeker.state['check'] = 'allow'
+    hook('pre-tool', dict(I['pre_tool_edit'], session_id=TSID), env)
+    edit_check = [c for c in seeker.calls if c['path'].endswith('/check')]
+    check("a session with no run that named a run in a relay call: its later hooks use that run and agent (the edit check)",
+          len(edit_check) == 1 and edit_check[0]['path'].endswith('/runs/review-run/check')
+          and edit_check[0]['body'].get('agent') == 'lead', json.dumps(seeker.calls)[:300])
     try:
         os.remove(os.path.join(home, 'spawn', 'relay', TSID + '.json'))
         noted = True

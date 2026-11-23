@@ -62,19 +62,21 @@ def upload(cfg, paths, budget, event, sid):
         common.log(f"codex {event} {sid}: {total}")
 
 
-def relay_state(cfg, run, agent, sid, parent, transcript):
-    """(in a relay run, run id for the rule) of a Codex session or thread: in a run when CTRLB_RUN is set (or it
-    joined its starter's run), or when its root session's rollout shows a ctrlb relay tool call that writes to a run
-    (Codex has no hook after a tool call). With no CTRLB_RUN, the run that call named is the run of the rule."""
-    if relay_hooks.in_relay(cfg, run, agent, sid):
-        return True, run
+def follow_named_run(cfg, sid, transcript):
+    """With no run set (no CTRLB_RUN, not joined to its starter's run): the run and agent of the root session's latest
+    ctrlb relay tool call that writes to a run, read from its rollout (Codex has no hook after a tool call). Every hook
+    of the session and its threads then uses that run: rule, edit checks, rows and session-end handoff."""
+    if cfg.get('run') or not sid:
+        return
     try:
-        rollout = rows_codex.root_rollout(sid, parent, transcript or '')[1]
+        parent = str(rows_codex.read_meta(transcript).get('parent_thread_id') or '') if transcript else ''
+        root, rollout = rows_codex.root_rollout(sid, parent, transcript or '')
         call = rollout and rows_codex.relay_call(rollout)
     except Exception as e:
-        common.log(f"codex relay check {sid}: {type(e).__name__}: {str(e)[:200]}")
-        call = None
-    return (True, call[0] or run) if call else (False, run)
+        common.log(f"codex named run {sid}: {type(e).__name__}: {str(e)[:200]}")
+        return
+    if call:
+        spawn.follow(cfg, root, dict(run=call[0] or root, agent=call[1]))
 
 
 def session_run(cfg, sid, transcript):
@@ -137,6 +139,7 @@ def main():
     out = None
     if mode != 'session-start':
         spawn.apply(cfg, sid)      # a session that joined its parent's run at start keeps that run and agent name
+        follow_named_run(cfg, sid, inp.get('transcript_path') or '')
     if mode == 'session-start':
         common.start_local_server(cfg)
         _, parent = session_run(cfg, sid, inp.get('transcript_path'))
@@ -150,6 +153,7 @@ def main():
         else:           # Codex has no environment file: '' keeps a CLAUDE_ENV_FILE inherited from a parent's shell unused
             started = spawn.session_start(cfg, sid, inp.get('source') or '', env_file='',
                                           transcript=inp.get('transcript_path') or '')
+        follow_named_run(cfg, sid, inp.get('transcript_path') or '')
         run, parent = session_run(cfg, sid, inp.get('transcript_path'))
         head = SUBAGENT.format(sid=parent) if parent else RECALL.format(sid=sid)
         if common.relay_off(cfg):
@@ -160,9 +164,7 @@ def main():
         if started.get('joined'):
             text, block = head + spawned_text(started, run, agent, scratch), ''
         else:
-            in_run, named = relay_state(cfg, run, agent, sid, parent, inp.get('transcript_path'))
-            if named != run:
-                run, scratch = named, relay_hooks.make_scratch(cfg, named) or common.scratch_dir(cfg, named)
+            in_run = relay_hooks.in_relay(cfg, run, agent, sid)
             text = head + spawned_text(started, '', '', '') + '\n\n' + relay_text(in_run, run, agent, scratch)
             block = ''
             if in_run:
@@ -179,7 +181,7 @@ def main():
         run, sparent = session_run(cfg, sid, inp.get('transcript_path'))
         sub = inp.get('agent_id') or ''
         agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid)
-        in_run, run = relay_state(cfg, run, agent, sid, sparent, inp.get('transcript_path'))
+        in_run = relay_hooks.in_relay(cfg, run, agent, sid)
         out = start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid) + '\n\n'
                       + relay_text(in_run, run, agent, common.scratch_dir(cfg, run)))
     elif mode == 'flush':

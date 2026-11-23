@@ -163,40 +163,55 @@ RELAY_WRITE_TOOLS = ('post', 'claim', 'handoff', 'release', 'done', 'task', 'bri
 def relay_call(path):
     """(run_id, agent) of the last ctrlb relay tool call that writes to a run, from a Codex rollout's McpToolCall
     items (server ctrlb), or None. Codex has no hook after a tool call, so this is how a Codex session is known to be in
-    a run. A rollout only grows: the part read is kept under <CTRLB_HOME>/spawn/rollouts, so each call reads only what
-    was added since the last one."""
+    a run. A rollout only grows: the part read is kept under <CTRLB_HOME>/spawn/rollouts (its offset, its inode and
+    the 64 bytes before the offset, so a replaced or rewritten file is read again from the start), and each call reads
+    only what was added since the last one."""
     try:
         st = os.stat(path)
     except (OSError, TypeError, ValueError):
         return None
-    d = common.private_dir(os.path.join(common.HOME, 'spawn', 'rollouts'))
-    keep = os.path.join(d, hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:32] + '.json')
-    try:
+    keep, c = '', {}
+    try:      # without the kept part (a folder that cannot be made, a bad file) the whole rollout is read
+        d = common.private_dir(os.path.join(common.HOME, 'spawn', 'rollouts'))
+        keep = os.path.join(d, hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:32] + '.json')
         with open(keep) as fh:
             c = json.load(fh)
     except Exception:
-        c = {}
-    if not isinstance(c, dict) or c.get('ino') != st.st_ino or not isinstance(c.get('offset'), int) or c['offset'] > st.st_size:
-        c = dict(ino=st.st_ino, offset=0, last=None)
-    last = c.get('last')
-    if c['offset'] < st.st_size:
+        pass
+    try:
         with open(path, 'rb') as fh:
-            fh.seek(c['offset'])
-            while True:
-                line = fh.readline()
-                if not line.endswith(b'\n'):
-                    break           # a line still being written is read next time
-                c['offset'] += len(line)
-                if b'McpToolCall' in line:
-                    last = _relay_item(line) or last
-        c['last'] = last
-        try:
-            tmp = f'{keep}.{os.getpid()}.tmp'
-            with common.private_open(tmp) as fh:
-                json.dump(c, fh)
-            os.replace(tmp, keep)
-        except OSError:
-            pass
+            ok = (isinstance(c, dict) and c.get('ino') == st.st_ino and isinstance(c.get('offset'), int)
+                  and 0 <= c['offset'] <= st.st_size)
+            if ok and c['offset']:       # the bytes just before the offset are still the ones read (not a rewritten file)
+                fh.seek(max(0, c['offset'] - 64))
+                ok = fh.read(c['offset'] - max(0, c['offset'] - 64)).hex() == c.get('tail')
+            if not ok:
+                c = dict(ino=st.st_ino, offset=0, last=None, tail='')
+            last = c.get('last')
+            if c['offset'] < st.st_size:
+                fh.seek(c['offset'])
+                start = c['offset']
+                while True:
+                    line = fh.readline()
+                    if not line.endswith(b'\n'):
+                        break           # a line still being written is read next time
+                    c['offset'] += len(line)
+                    if b'McpToolCall' in line:
+                        last = _relay_item(line) or last
+                if c['offset'] > start:
+                    fh.seek(max(0, c['offset'] - 64))
+                    c['tail'] = fh.read(c['offset'] - max(0, c['offset'] - 64)).hex()
+                c['last'] = last
+                if keep:
+                    try:
+                        tmp = f'{keep}.{os.getpid()}.tmp'
+                        with common.private_open(tmp) as out:
+                            json.dump(c, out)
+                        os.replace(tmp, keep)
+                    except OSError:
+                        pass
+    except OSError:
+        return None
     return tuple(last) if last else None
 
 
