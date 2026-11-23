@@ -97,7 +97,12 @@ def _sub_end(text, i):
         if c == '"':
             j += 1
             while j < n and text[j] != '"':
-                j += 2 if text[j] == '\\' else 1
+                if text[j] == '\\':
+                    j += 2
+                elif text.startswith('$(', j) or text[j] == '`':
+                    j = _sub_end(text, j)
+                else:
+                    j += 1
             if j >= n:
                 raise ValueError('unclosed "')
             j += 1
@@ -197,6 +202,41 @@ def _lex(text):
     return out
 
 
+def _functions(items):
+    """Function definitions taken out of the command: (the other items, {name: the items of its body}). A definition
+    runs nothing; its body counts where the function is called. Forms: name() { ...; } and function name [()] { ...; }."""
+    out, funcs, i, n = [], {}, 0, len(items)
+    while i < n:
+        kind, text, _ = items[i]
+        name, j = None, i
+        if kind == 'word' and text == 'function' and i + 1 < n and items[i + 1][0] == 'word':
+            name, j = items[i + 1][1], i + 2
+            if j + 1 < n and items[j][:2] == ('sep', '(') and items[j + 1][:2] == ('sep', ')'):
+                j += 2
+        elif kind == 'word' and i + 2 < n and items[i + 1][:2] == ('sep', '(') and items[i + 2][:2] == ('sep', ')'):
+            name, j = text, i + 3
+        if name is not None:
+            while j < n and items[j][:2] == ('sep', '\n'):
+                j += 1
+            if j < n and items[j][:2] == ('word', '{'):
+                depth, m = 0, j
+                while m < n:
+                    if items[m][:2] == ('word', '{'):
+                        depth += 1
+                    elif items[m][:2] == ('word', '}'):
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    m += 1
+                funcs[name] = items[j + 1:m]
+                out.append(('sep', ';', []))
+                i = m + 1
+                continue
+        out.append(items[i])
+        i += 1
+    return out, funcs
+
+
 def _segments(items):
     """Simple commands: runs of words between separators (; & | && || ( ) newline), as [(text, subs)]."""
     seg = []
@@ -245,13 +285,14 @@ def _valid_duration(d):
     return bool(m) and float(m.group(1)) > 0
 
 
-def _scan(seg, timeout, found, depth):
+def _scan(seg, timeout, found, depth, funcs=None):
     """Walk one simple command's prefixes (assignments, wrappers, reserved words) and record any model CLI it starts,
     with the time limit in force for it: None, or the duration. A substitution in any of its words runs before the
     command does, so it gets only the time limit in force outside the command."""
+    funcs = funcs or {}
     for _, subs in seg:
         for inner in subs:
-            _walk(inner, timeout, found, depth + 1)
+            _walk(inner, timeout, found, depth + 1, funcs)
     words = [w for w, _ in seg]
     i = 0
     while i < len(words):
@@ -300,16 +341,22 @@ def _scan(seg, timeout, found, depth):
                     break
             return
         break
+    if i < len(words) and words[i] in funcs and depth < MAX_DEPTH:      # a call of a function defined in the command
+        for body in _segments(funcs[words[i]]):
+            _scan(body, timeout, found, depth + 1, funcs)
+        return
     call = _model_call(words[i:])
     if call:
         found.append((call, timeout))
 
 
-def _walk(text, timeout, found, depth=0):
+def _walk(text, timeout, found, depth=0, funcs=None):
     if depth > MAX_DEPTH:
         return
-    for seg in _segments(_lex(_drop_heredocs(text.replace('\\\n', ' ')))):
-        _scan(seg, timeout, found, depth)
+    items, defined = _functions(_lex(_drop_heredocs(text.replace('\\\n', ' '))))
+    funcs = dict(funcs or {}, **defined)
+    for seg in _segments(items):
+        _scan(seg, timeout, found, depth, funcs)
 
 
 def model_calls(command):

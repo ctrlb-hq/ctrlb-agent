@@ -62,6 +62,19 @@ def upload(cfg, paths, budget, event, sid):
         common.log(f"codex {event} {sid}: {total}")
 
 
+def in_relay(cfg, run, agent, sid, parent, transcript):
+    """Whether a Codex session or thread is in a relay run: CTRLB_RUN set (or joined), or its root session's rollout
+    shows a ctrlb relay tool call that writes to a run. Codex has no hook after a tool call, so the rollout is read."""
+    if relay_hooks.in_relay(cfg, run, agent, sid):
+        return True
+    try:
+        rollout = rows_codex.root_rollout(sid, parent, transcript or '')[1]
+        return bool(rollout and rows_codex.relay_call(rollout))
+    except Exception as e:
+        common.log(f"codex relay check {sid}: {type(e).__name__}: {str(e)[:200]}")
+        return False
+
+
 def session_run(cfg, sid, transcript):
     """(run id, parent thread id) of a Codex session. A thread whose rollout names a parent_thread_id is a subagent
     and joins its parent's run."""
@@ -145,7 +158,7 @@ def main():
         if started.get('joined'):
             text, block = head + spawned_text(started, run, agent, scratch), ''
         else:
-            in_run = relay_hooks.in_relay(cfg, run, agent, sid)
+            in_run = in_relay(cfg, run, agent, sid, parent, inp.get('transcript_path'))
             text = head + spawned_text(started, '', '', '') + '\n\n' + relay_text(in_run, run, agent, scratch)
             block = ''
             if in_run:
@@ -159,11 +172,12 @@ def main():
         if common.relay_off(cfg):
             print(json.dumps(start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid))))
             return
-        run, _ = session_run(cfg, sid, inp.get('transcript_path'))
+        run, sparent = session_run(cfg, sid, inp.get('transcript_path'))
         sub = inp.get('agent_id') or ''
         agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid)
         out = start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid) + '\n\n'
-                      + relay_text(relay_hooks.in_relay(cfg, run, agent, sid), run, agent, common.scratch_dir(cfg, run)))
+                      + relay_text(in_relay(cfg, run, agent, sid, sparent, inp.get('transcript_path')), run, agent,
+                                   common.scratch_dir(cfg, run)))
     elif mode == 'flush':
         upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
     elif mode == 'session-end':

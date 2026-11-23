@@ -177,7 +177,7 @@ def post_tool(cfg, inp):
                     common.log(f"artifact: {type(e).__name__}: {str(e)[:200]}")
         return None
     name = tool.rsplit('__', 1)[-1] if tool.startswith('mcp__') else ''
-    if name not in ('post', 'claim', 'handoff', 'release', 'done'):
+    if name not in ('post', 'claim', 'handoff', 'release', 'done', 'task', 'brief', 'ask', 'answer', 'contract'):
         return None
     mark_relay(own_run, own_agent, sid)
     try:      # the agents this session starts later join the run it named (lib/spawn.py)
@@ -186,6 +186,8 @@ def post_tool(cfg, inp):
         common.log(f"spawn relay run {sid}: {type(e).__name__}: {str(e)[:200]}")
     if name == 'post':
         record_note(own_run, own_agent, sid, args.get('text'))
+        return None
+    if name not in ('claim', 'handoff', 'release', 'done'):
         return None
     run = args.get('run_id') or own_run
     agent = args.get('agent') or own_agent

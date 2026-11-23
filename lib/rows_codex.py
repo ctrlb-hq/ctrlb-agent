@@ -134,8 +134,13 @@ def session_run(cfg, sid, parent='', path=''):
 
 def root_session(sid, parent='', path=''):
     """The session id at the top of a thread's ancestor chain (sid itself when it has no parent)."""
-    if not parent:
-        return sid
+    return root_rollout(sid, parent, path)[0]
+
+
+def root_rollout(sid, parent='', path=''):
+    """(session id, rollout file) at the top of a thread's ancestor chain; the file is path for a thread with no
+    parent, and '' when the root's file is not found."""
+    file = path
     seen = {sid}
     while parent and parent not in seen and len(seen) < 64:
         seen.add(parent)
@@ -144,12 +149,44 @@ def root_session(sid, parent='', path=''):
         # may be used here; normal Codex filenames are found by their UUID suffix, without reading other files.
         file = os.path.join(os.path.dirname(path), sid + '.jsonl') if path and re.fullmatch(r'[\w-]+', sid) else ''
         if not file or not os.path.isfile(file):
-            file = _session_files(os.path.join(codex_home(), 'sessions')).get(sid)
+            file = _session_files(os.path.join(codex_home(), 'sessions')).get(sid) or ''
         if file:
             meta = read_meta(file)
             if str(meta.get('id') or meta.get('session_id') or '') == sid:
                 parent = str(meta.get('parent_thread_id') or '')
-    return sid
+    return sid, file
+
+
+RELAY_WRITE_TOOLS = ('post', 'claim', 'handoff', 'release', 'done', 'task', 'brief', 'ask', 'answer', 'contract')
+
+
+def relay_call(path):
+    """(run_id, agent) of the last ctrlb relay tool call that writes to a run, from a Codex rollout's McpToolCall
+    items, or None. Codex has no hook after a tool call, so this is how a Codex session is known to be in a run."""
+    last = None
+    try:
+        with open(path, errors='replace') as fh:
+            for line in fh:
+                if 'McpToolCall' not in line:
+                    continue
+                try:
+                    item = (json.loads(line).get('payload') or {}).get('item') or {}
+                except (ValueError, AttributeError):
+                    continue
+                if (not isinstance(item, dict) or item.get('type') != 'McpToolCall' or item.get('tool') not in RELAY_WRITE_TOOLS
+                        or 'ctrlb' not in str(item.get('server') or '')):
+                    continue
+                args = item.get('arguments')
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except ValueError:
+                        args = {}
+                args = args if isinstance(args, dict) else {}
+                last = (str(args.get('run_id') or ''), str(args.get('agent') or ''))
+    except (OSError, TypeError):
+        return None
+    return last
 
 
 def ids_for_file(cfg, path):

@@ -104,7 +104,7 @@ def _record_path(pid):
     return os.path.join(_dir('procs'), f'{int(pid)}.json')
 
 
-def write_record(me, sid, run, agent, relay, base_agent=''):
+def write_record(me, sid, run, agent, relay, base_agent='', transcript=''):
     """The process record of this session's agent process me (pid, program, start), and the removal of records whose
     process has gone."""
     pid, prog, start = me
@@ -116,7 +116,7 @@ def write_record(me, sid, run, agent, relay, base_agent=''):
             except OSError:
                 pass
     _write_json(_record_path(pid), dict(session=sid, run=run, agent=agent, relay=bool(relay), program=prog, start=start,
-                                        base_agent=base_agent or ''))
+                                        base_agent=base_agent or '', transcript=transcript or ''))
 
 
 def _write_json(path, data):
@@ -152,7 +152,8 @@ def find_parent(me, sid, env=None):
         if rec.get('session') and rec.get('start') == q[2] and rec['session'] != sid:
             return _with_relay_run(dict(session=rec['session'], run=rec.get('run') or rec['session'],
                                         agent=rec.get('agent') or '', relay=bool(rec.get('relay')),
-                                        base_agent=rec.get('base_agent') or '', how='process'))
+                                        base_agent=rec.get('base_agent') or '', how='process'),
+                                   rec.get('transcript') if rec.get('program') == 'codex' else '')
     psid = (env.get('CTRLB_PARENT_SESSION') or '').strip()
     if psid and psid != sid:
         return _with_relay_run(dict(session=psid, run=(env.get('CTRLB_PARENT_RUN') or '').strip() or psid,
@@ -176,9 +177,15 @@ def note_relay(sid, run, agent):
     _write_json(_relay_path(sid), dict(run=run, agent=agent or ''))
 
 
-def _with_relay_run(parent):
-    """The parent with the run and agent of its latest relay tool call, when it made one."""
+def _with_relay_run(parent, codex_transcript=''):
+    """The parent with the run and agent of its latest relay tool call, when it made one: from the Claude Code
+    post-tool hook's file, or, for a Codex parent (no hook after a tool call), from its rollout."""
     r = _read_json(_relay_path(parent['session']))
+    if not r.get('run') and codex_transcript:
+        import rows_codex
+        call = rows_codex.relay_call(codex_transcript)
+        if call:
+            r = dict(run=call[0] or parent['run'], agent=call[1])
     if r.get('run'):
         parent.update(run=r['run'], agent=r.get('agent') or parent['agent'], relay=True)
     return parent
@@ -318,7 +325,7 @@ def session_start(cfg, sid, source='', env_file=None, transcript=''):
     relay = bool(cfg.get('run'))
     try:
         if me:
-            write_record(me, sid, run, agent, relay, base_agent)
+            write_record(me, sid, run, agent, relay, base_agent, transcript)
     except Exception as e:
         common.log(f"spawn record {sid}: {type(e).__name__}: {str(e)[:200]}")
     try:
@@ -433,6 +440,8 @@ def _watch_loop(payload, pid, start, sid, limit, began, fd, poll_s, grace_s):
             end = time.time() + grace_s
             while time.time() < end and _alive(pid, start):
                 time.sleep(1)
+            if not _same_session(pid, sid):
+                return
             try:
                 _signal(pid, start, fd, signal.SIGKILL)
             except OSError:

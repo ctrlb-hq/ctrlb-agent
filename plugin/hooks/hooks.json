@@ -34,7 +34,7 @@
         "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" post-tool", "timeout": 5 } ] },
       { "matcher": "Bash|mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done",
         "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" post-tool", "timeout": 5 } ] },
-      { "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__ctrlb__post|mcp__plugin_ctrlb-agent_ctrlb__post",
+      { "matcher": "Edit|Write|MultiEdit|NotebookEdit|mcp__ctrlb__post|mcp__plugin_ctrlb-agent_ctrlb__post|mcp__ctrlb__task|mcp__plugin_ctrlb-agent_ctrlb__task|mcp__ctrlb__brief|mcp__plugin_ctrlb-agent_ctrlb__brief|mcp__ctrlb__ask|mcp__plugin_ctrlb-agent_ctrlb__ask|mcp__ctrlb__answer|mcp__plugin_ctrlb-agent_ctrlb__answer|mcp__ctrlb__contract|mcp__plugin_ctrlb-agent_ctrlb__contract",
         "hooks": [ { "type": "command", "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\" post-tool", "timeout": 5 } ] }
     ],
     "PostToolUseFailure": [
