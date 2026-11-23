@@ -25,14 +25,15 @@ CODEX_HANDOFF_TEXT = 'Session ended (Codex: the hook keeps no record of edits or
 
 
 def session_end(cfg, inp, deadline=None):
-    """For Codex, in a relay run (CTRLB_RUN set), hand off every hold the agent still has, in one
-    write (common.handoff_all). CtrlB unreachable or an error: nothing is written."""
-    if common.relay_off(cfg) or not cfg.get('run'):
+    """For Codex, in a relay run (CTRLB_RUN set, joined to its starter's run, or a ctrlb relay tool called in the
+    session: in_relay), hand off every hold the agent still has in its own run, in one write (common.handoff_all).
+    CtrlB unreachable or an error: nothing is written."""
+    if common.relay_off(cfg):
         return None
     sid = inp.get('session_id') or ''
     run, parent = session_run(cfg, sid, inp.get('transcript_path'))
     agent = rows_codex.agent_for(cfg, sid, parent)
-    if not run or not agent:
+    if not run or not agent or not in_relay(cfg, run, agent, sid, inp.get('transcript_path')):
         return None
     remaining = min(HANDOFF_S, deadline - time.monotonic()) if deadline is not None else HANDOFF_S
     if remaining <= 0:

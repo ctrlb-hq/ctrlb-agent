@@ -1492,6 +1492,15 @@ def test_codex_hooks(seeker):
     seeker.state['check'] = 'allow'
     chook('pre-tool', dict(I['pre_tool_patch'], transcript_path=relay_rollout), dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-relay')))
     ccall = seeker.calls[0] if seeker.calls else {}
+    seeker.reset()
+    chook('session-end', dict(I['session_end'], transcript_path=relay_rollout), dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-relay')))
+    hand = [c for c in seeker.calls if c['path'].endswith('/handoffs')]
+    seeker.reset()
+    chook('session-end', I['session_end'], dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-relay-none')))
+    no_hand = [c for c in seeker.calls if c['path'].endswith('/handoffs')]
+    check('codex session-end with no CTRLB_RUN: hands off its holds in its own run when its rollout shows a relay call; '
+          'not when it shows none', len(hand) == 1 and hand[0]['path'] == f'/ai/relay/agent_sessions/runs/{CSID}/handoffs'
+          and hand[0]['body'].get('agent') == CSID and not no_hand, json.dumps([hand, no_hand])[:300])
     check('codex: a later hook of that session uses its own run (the edit check)',
           ccall.get('path') == f'/ai/relay/agent_sessions/runs/{CSID}/check' and (ccall.get('body') or {}).get('agent') == CSID,
           json.dumps(ccall)[:300])
@@ -2071,6 +2080,7 @@ def test_model_call_guard(seeker):
         'the second definition is the one called': 'f() { echo ok; }; f() { codex exec hi; }; f',
         'a function defined when another one runs': 'setup() { review() { codex exec hi; }; }; setup; review',
         'a function defined after then, called': 'if true; then f() { codex exec hi; }; fi; f',
+        'after --, --help is the prompt': 'codex exec -- --help',
         'a ( ) function body does not change a function outside it':
             'f() { codex exec hi; }; setup() ( f() { echo ok; }; ); setup; f',
     }
@@ -2105,6 +2115,11 @@ def test_model_call_guard(seeker):
         'a quoted } inside a function body that is not called': "f() { printf '%s' '}'; codex exec hi; }; echo ready",
         'echo } inside a function body that is not called': 'f() { echo }; codex exec hi; }; echo ready',
         'a function defined after then, not called': 'if true; then f() { codex exec hi; }; fi; echo ready',
+        'codex exec help': 'codex exec --help',
+        'codex review help': 'codex review -h',
+        'codex help before the subcommand': 'codex --help exec x',
+        'claude -p help': 'claude -p --help',
+        'command -v looks a name up': 'command -v codex exec',
         'empty': '',
     }
     bad = {n: reason(c) for n, c in allowed.items() if reason(c)}

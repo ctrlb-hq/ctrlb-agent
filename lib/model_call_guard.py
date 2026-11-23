@@ -29,6 +29,7 @@ CODEX_VALUE_OPTS = ('-c', '--config', '--enable', '--disable', '--remote', '--re
                     '-m', '--model', '--local-provider', '-p', '--profile', '-s', '--sandbox', '-C', '--cd', '--add-dir',
                     '-a', '--ask-for-approval')
 TIMEOUT_VALUE_OPTS = ('-k', '--kill-after', '-s', '--signal')
+HELP = ('-h', '--help', '-V', '--version')
 MAX_DEPTH = 4
 
 
@@ -298,18 +299,26 @@ def _model_call(words):
             a = args[i]
             if a == '--':
                 return ''
+            if a in HELP:
+                return ''      # codex --help, codex --version
             if a.startswith('-'):
                 i += 2 if a in CODEX_VALUE_OPTS else 1
                 continue
-            return f'codex {"exec" if a == "e" else a}' if a in CODEX_SUBCOMMANDS else ''
+            opts = args[i + 1:]
+            opts = opts[:opts.index('--')] if '--' in opts else opts     # after --, --help is the prompt
+            if a not in CODEX_SUBCOMMANDS or any(h in opts for h in HELP):
+                return ''      # another subcommand, or its help
+            return f'codex {"exec" if a == "e" else a}'
         return ''
     if prog == 'claude':
+        found = False
         for a in args:
             if a == '--':
                 break
-            if a in ('-p', '--print'):
-                return 'claude -p'
-        return ''
+            if a in HELP:
+                return ''      # help or version: no model call
+            found = found or a in ('-p', '--print')
+        return 'claude -p' if found else ''
     return ''
 
 
@@ -349,6 +358,8 @@ def _scan(seg, timeout, found, depth, funcs=None):
                 timeout = words[i] if _valid_duration(words[i]) else (timeout or '')
                 i += 1
             continue
+        if prog == 'command' and i + 1 < len(words) and words[i + 1] in ('-v', '-V'):
+            return      # command -v codex: looks the name up, runs nothing
         if prog in PASS_THROUGH:
             i += 1
             while i < len(words) and words[i].startswith('-'):
