@@ -2103,6 +2103,9 @@ def test_model_call_guard(seeker):
         'env -S joined to its value': 'env -S"codex exec" review',
         'env --split-string=': 'env --split-string="claude -p" hi',
         'a heredoc inside an open substitution': 'x=$(cat <<EOF\n$(codex exec q)\nEOF\n)',
+        "a prompt from a quoted heredoc in a quoted substitution": "codex exec \"$(cat <<'PROMPT'\nReview this PR's changes.\nPROMPT\n)\"",
+        'time with a format value': "/usr/bin/time -f '%e seconds' codex exec review",
+        'time with an output file': 'time -o t.txt claude -p hi',
         'timeout 0 is no limit': 'timeout 0 codex exec x',
         'run and agent but no time limit': 'CTRLB_RUN=r1 CTRLB_AGENT=worker-1 codex exec x',
         'after cd and &&': 'cd repo && codex exec x',
@@ -2181,6 +2184,8 @@ def test_model_call_guard(seeker):
         'a backslash-newline in an expanding body joins the delimiter line to it': 'cat <<EOF\ntext\\\nEOF\ncodex exec review\nEOF',
         'env -S with a timed call': 'env -S "timeout 60 codex exec" x',
         'timeout around env -S': 'timeout 60 env -S "codex exec" x',
+        'a timed call with a prompt from a quoted heredoc': "timeout 1200 codex exec \"$(cat <<'PROMPT'\nReview this PR's changes.\nPROMPT\n)\"",
+        'a quoted heredoc prompt that names a model CLI': "timeout 60 claude -p \"$(cat <<'P'\nDon't run codex exec here.\nP\n)\"",
     }
     bad = {n: reason(c) for n, c in allowed.items() if reason(c)}
     check('guard: lets through timed calls, other CLI commands and text that only names a model CLI', not bad,

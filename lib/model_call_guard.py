@@ -29,6 +29,7 @@ CODEX_SUBCOMMANDS = ('exec', 'e', 'review')
 CODEX_VALUE_OPTS = ('-c', '--config', '--enable', '--disable', '--remote', '--remote-auth-token-env', '-i', '--image',
                     '-m', '--model', '--local-provider', '-p', '--profile', '-s', '--sandbox', '-C', '--cd', '--add-dir',
                     '-a', '--ask-for-approval')
+TIME_VALUE_OPTS = ('-f', '--format', '-o', '--output')      # GNU time options that take a value
 TIMEOUT_VALUE_OPTS = ('-k', '--kill-after', '-s', '--signal')
 HELP = ('-h', '--help', '-V', '--version')
 MAX_DEPTH = 4
@@ -103,6 +104,15 @@ def _heredoc_ops(line):
         elif q == '"':
             if c == '\\':
                 i += 2
+                continue
+            if line.startswith('$(', i):
+                # "$(cat <<'PROMPT'": a substitution left open on this line is command text, where a heredoc can
+                # start; one closed on this line is skipped.
+                try:
+                    i = _sub_end(line, i)
+                except ValueError:
+                    q = None
+                    i += 2
                 continue
             q = None if c == '"' else q
             i += 1
@@ -514,7 +524,7 @@ def _scan(seg, timeout, found, depth, funcs=None):
         if prog in PASS_THROUGH:
             i += 1
             while i < len(words) and words[i].startswith('-'):
-                i += 1
+                i += 2 if prog == 'time' and words[i] in TIME_VALUE_OPTS else 1
             continue
         if prog == 'nice':
             i += 1
