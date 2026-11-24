@@ -92,47 +92,43 @@ def _heredoc_word(line, i):
     return ''.join(parts), quoted, i
 
 
-def _heredoc_ops(line):
+def _heredoc_ops(line, stack):
     """[(delimiter, expands, strip_tabs)] for each heredoc operator in line, in order, outside quotes and comments. A
-    body expands ($( ) and ` ` run) when its delimiter is not quoted. <<< (a here-string) is not a heredoc."""
-    ops, i, n, q = [], 0, len(line), None
+    body expands ($( ) and ` ` run) when its delimiter is not quoted. <<< (a here-string), and << in $(( )) or (( )),
+    are not heredocs. stack holds the quotes and substitutions still open from earlier lines (', ", $( and (): a quote
+    or a $( can span lines, as in codex exec "$(cat <<'PROMPT' ... )" <<'DIFF'. It is updated in place."""
+    ops, i, n = [], 0, len(line)
     while i < n:
+        top = stack[-1] if stack else None
         c = line[i]
-        if q == "'":
-            q = None if c == "'" else q
-            i += 1
-        elif q == '"':
-            if c == '\\':
-                i += 2
-                continue
-            if line.startswith('$(', i):
-                # "$(cat <<'PROMPT'": a substitution left open on this line is command text, where a heredoc can
-                # start; one closed on this line is skipped.
-                try:
-                    i = _sub_end(line, i)
-                except ValueError:
-                    q = None
-                    i += 2
-                continue
-            q = None if c == '"' else q
+        if top == "'":
+            if c == "'":
+                stack.pop()
             i += 1
         elif c == '\\':
             i += 2
+        elif line.startswith('$((', i) or (top != '"' and line.startswith('((', i)):      # arithmetic: << shifts
+            k = line.find('))', i + 2)
+            i = n if k == -1 else k + 2
+        elif line.startswith('$(', i):
+            stack.append('$(')
+            i += 2
+        elif top == '"':
+            if c == '"':
+                stack.pop()
+            i += 1
         elif c in '\'"':
-            q = c
+            stack.append(c)
+            i += 1
+        elif c == '(':
+            stack.append('(')
+            i += 1
+        elif c == ')':
+            if top in ('$(', '('):
+                stack.pop()
             i += 1
         elif c == '#' and (i == 0 or line[i - 1] in ' \t;&|()'):
             break
-        elif line.startswith('$(', i):
-            # $((1 << 2)) shifts; a substitution closed on this line holds no heredoc body. One left open (x=$(cat
-            # <<EOF) is scanned on, for the heredoc inside it.
-            try:
-                i = _sub_end(line, i)
-            except ValueError:
-                i += 2
-        elif line.startswith('((', i):      # (( x << 2 )): arithmetic
-            k = line.find('))', i + 2)
-            i = n if k == -1 else k + 2
         elif line.startswith('<<<', i):
             i += 3
         elif line.startswith('<<', i):
@@ -181,7 +177,7 @@ def _drop_heredocs(text):
             out.extend(_substitutions('\n'.join(body)))
         body.clear()
 
-    waiting, joined = [], False      # operators seen on a logical line that a backslash continues
+    waiting, joined, stack = [], False, []      # operators on a logical line a backslash continues; open quotes
     for line in text.split('\n'):
         if pending:
             end, expands, dash = pending[0]
@@ -195,7 +191,7 @@ def _drop_heredocs(text):
             joined = expands and _continues(line)
             continue
         out.append(line)
-        waiting += _heredoc_ops(line)
+        waiting += _heredoc_ops(line, stack)
         if not _continues(line):
             pending, waiting = waiting, []
     if pending:      # a body with no end line runs to the end of the command

@@ -2106,6 +2106,8 @@ def test_model_call_guard(seeker):
         "a prompt from a quoted heredoc in a quoted substitution": "codex exec \"$(cat <<'PROMPT'\nReview this PR's changes.\nPROMPT\n)\"",
         'time with a format value': "/usr/bin/time -f '%e seconds' codex exec review",
         'time with an output file': 'time -o t.txt claude -p hi',
+        'a second heredoc after a quoted substitution that spans lines': "codex exec \"$(cat <<'PROMPT'\nReview this diff.\nPROMPT\n)\" <<'DIFF'\n+// Don't expose this field.\nDIFF",
+        'a call after a double-quoted string that spans lines and shows <<': 'echo "a\nb <<EOF c"\ncodex exec x',
         'timeout 0 is no limit': 'timeout 0 codex exec x',
         'run and agent but no time limit': 'CTRLB_RUN=r1 CTRLB_AGENT=worker-1 codex exec x',
         'after cd and &&': 'cd repo && codex exec x',
@@ -2186,6 +2188,7 @@ def test_model_call_guard(seeker):
         'timeout around env -S': 'timeout 60 env -S "codex exec" x',
         'a timed call with a prompt from a quoted heredoc': "timeout 1200 codex exec \"$(cat <<'PROMPT'\nReview this PR's changes.\nPROMPT\n)\"",
         'a quoted heredoc prompt that names a model CLI': "timeout 60 claude -p \"$(cat <<'P'\nDon't run codex exec here.\nP\n)\"",
+        'a timed call with a prompt and an input heredoc that names a model CLI': "timeout 60 codex exec \"$(cat <<'PROMPT'\nReview.\nPROMPT\n)\" <<'DIFF'\ncodex exec example\nDIFF",
     }
     bad = {n: reason(c) for n, c in allowed.items() if reason(c)}
     check('guard: lets through timed calls, other CLI commands and text that only names a model CLI', not bad,
