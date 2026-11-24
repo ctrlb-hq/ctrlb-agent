@@ -235,6 +235,65 @@ def _relay_item(line):
     return [str(args.get('run_id') or ''), str(args.get('agent') or '')]
 
 
+def _answer(item):
+    """The JSON object a completed McpToolCall answered, or None: a failed call (status failed, an error), an error
+    answer (isError) and text that is not a JSON object are no answer."""
+    if item.get('status') != 'completed' or item.get('error'):
+        return None
+    res = item.get('result')
+    if not isinstance(res, dict) or res.get('isError') or res.get('is_error'):
+        return None
+    structured = res.get('structuredContent', res.get('structured_content'))
+    if isinstance(structured, dict):
+        return structured
+    content = res.get('content')
+    if not isinstance(content, list):
+        return None
+    text = ''.join(b.get('text') or '' for b in content if isinstance(b, dict) and b.get('type') == 'text')
+    try:
+        out = json.loads(text)
+    except ValueError:
+        return None
+    return out if isinstance(out, dict) else None
+
+
+def claim_calls(path, thread=''):
+    """Every ctrlb claim call of a Codex rollout with its answer, in order: [(arguments, answer)]. A McpToolCall item
+    holds the call (arguments) and, once completed, its answer (result) under one item id; an item seen again (started,
+    then completed) is matched by that id and keeps its last state. answer is the JSON object the claim answered, or
+    None (still running, failed, an error answer, or text that does not parse). thread keeps only the items of that
+    thread when an event names one."""
+    calls = {}
+    try:
+        fh = open(path, 'rb')
+    except (OSError, TypeError, ValueError):
+        return []
+    with fh:
+        for n, line in enumerate(fh):
+            if b'McpToolCall' not in line or b'claim' not in line:
+                continue
+            try:
+                payload = json.loads(line).get('payload') or {}
+                item = payload.get('item') or {}
+            except (ValueError, AttributeError):
+                continue
+            if (not isinstance(item, dict) or item.get('type') != 'McpToolCall' or item.get('server') != 'ctrlb'
+                    or item.get('tool') != 'claim'):
+                continue
+            if thread and payload.get('thread_id') and payload['thread_id'] != thread:
+                continue
+            args = item.get('arguments')
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except ValueError:
+                    args = {}
+            key = str(item.get('id') or f'line-{n}')
+            first = calls[key][0] if key in calls else n
+            calls[key] = (first, args if isinstance(args, dict) else {}, _answer(item))
+    return [(a, ans) for _, a, ans in sorted(calls.values(), key=lambda c: c[0])]
+
+
 def ids_for_file(cfg, path):
     meta = read_meta(path)
     m = UUID_RE.search(os.path.basename(path))
