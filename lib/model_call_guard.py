@@ -95,7 +95,7 @@ def _heredoc_word(line, i):
 def _heredoc_ops(line, stack):
     """[(delimiter, expands, strip_tabs)] for each heredoc operator in line, in order, outside quotes and comments. A
     body expands ($( ) and ` ` run) when its delimiter is not quoted. <<< (a here-string), and << in $(( )) or (( )),
-    are not heredocs. stack holds the quotes and substitutions still open from earlier lines (', ", $( and (): a quote
+    are not heredocs. stack holds the quotes, substitutions and arithmetic still open from earlier lines (', ", $(, ( and ((): a quote
     or a $( can span lines, as in codex exec "$(cat <<'PROMPT' ... )" <<'DIFF'. It is updated in place."""
     ops, i, n = [], 0, len(line)
     while i < n:
@@ -105,11 +105,22 @@ def _heredoc_ops(line, stack):
             if c == "'":
                 stack.pop()
             i += 1
+        elif top == '((':      # arithmetic left open on an earlier line: << shifts until its ))
+            k = line.find('))', i)
+            if k == -1:
+                i = n
+            else:
+                stack.pop()
+                i = k + 2
         elif c == '\\':
             i += 2
         elif line.startswith('$((', i) or (top != '"' and line.startswith('((', i)):      # arithmetic: << shifts
             k = line.find('))', i + 2)
-            i = n if k == -1 else k + 2
+            if k == -1:
+                stack.append('((')
+                i = n
+            else:
+                i = k + 2
         elif line.startswith('$(', i):
             stack.append('$(')
             i += 2
@@ -239,6 +250,10 @@ def _sub_end(text, i):
             if j >= n:
                 raise ValueError('unclosed "')
             j += 1
+            continue
+        if c == '#' and text[j - 1] in ' \t\n;&|(':      # a comment: an apostrophe in it is text
+            k = text.find('\n', j)
+            j = n if k == -1 else k
             continue
         if c == '(':
             depth += 1
