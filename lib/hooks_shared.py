@@ -227,9 +227,17 @@ def _deny(reason):
                                    'permissionDecisionReason': redact(reason)[0]}}
 
 
+def _tool_error(resp):
+    """Whether a PostToolUse tool_response is an MCP error result (isError true): its text is an error, never an
+    answer, even when it parses as JSON."""
+    return isinstance(resp, dict) and (resp.get('isError') is True or resp.get('is_error') is True)
+
+
 def _tool_answer(resp):
     """The JSON answer of an MCP tool from a PostToolUse tool_response: a dict, a list of content blocks, a dict with
-    content, or text."""
+    content, or text. An MCP error result answers {}."""
+    if _tool_error(resp):
+        return {}
     if isinstance(resp, dict) and ('held' in resp or 'handed' in resp or 'released' in resp or 'done' in resp):
         return resp
     if isinstance(resp, dict):

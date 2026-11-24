@@ -17,7 +17,7 @@ import model_call_guard  # noqa: E402
 if __name__ == '__main__' and sys.argv[1:2] == ['pre-bash'] and model_call_guard.off_before_load():
     sys.exit(0)         # pre-bash runs before every Bash call: with guardModelCalls off, stop before loading the rest
 import common, launch, relay_hooks, rows_claude, spawn  # noqa: E402
-from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, relay_text, launch_text, start_context, spawned_text, decide, record_tokens, _tool_answer,  # noqa: E402
+from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, relay_text, launch_text, start_context, spawned_text, decide, record_tokens, _tool_answer, _tool_error,  # noqa: E402
                           bash_result, evidence_hint, is_test_command, record_test, record_bash, record_edit, record_note,
                           mark_relay, handoff_text, witness, _deny)
 from paths import edit_paths as normalise_edit_paths  # noqa: E402
@@ -27,6 +27,8 @@ SYNC_S, ASYNC_S = 5, 90
 # gives up after HANDOFF_S, so the transcript flush still gets the rest.
 HANDOFF_S = 0.8
 DONE_TOOLS = ('mcp__ctrlb__done', 'mcp__plugin_ctrlb-agent_ctrlb__done')
+# The CtrlB server's tool names: a server added by hand (mcp__ctrlb__<tool>) or the plugin's (mcp__plugin_ctrlb-agent_ctrlb__<tool>).
+CTRLB_TOOL_PREFIXES = ('mcp__ctrlb__', 'mcp__plugin_ctrlb-agent_ctrlb__')
 AGENT_TOOLS = ('Agent', 'Task')         # the sub-agent tool (Task is its earlier name)
 AGENT_ALARM_S = relay_hooks.REGISTER_S + 0.5
 
@@ -179,7 +181,7 @@ def post_tool(cfg, inp):
                 except Exception as e:
                     common.log(f"artifact: {type(e).__name__}: {str(e)[:200]}")
         return None
-    name = tool.rsplit('__', 1)[-1] if tool.startswith('mcp__') else ''
+    name = _ctrlb_tool(tool)       # another MCP server's post or claim is not a CtrlB call
     if name not in ('post', 'claim', 'handoff', 'release', 'done', 'task', 'brief', 'ask', 'answer', 'contract'):
         return None
     mark_relay(own_run, own_agent, sid)      # in a relay run from now on: whole rule, handoff, agents it starts join
@@ -192,7 +194,8 @@ def post_tool(cfg, inp):
     agent = args.get('agent') or own_agent
     answer = _tool_answer(inp.get('tool_response'))
     record_tokens(run, agent, tool, answer)
-    if name == 'claim' and inp.get('hook_event_name') != 'PostToolUseFailure' and not inp.get('agent_id'):
+    if (name == 'claim' and inp.get('hook_event_name') != 'PostToolUseFailure' and not inp.get('agent_id')
+            and not _tool_error(inp.get('tool_response'))):
         # the worker of a launch: its claim of the named task, as answered, for the starter (lib/launch.py)
         info = launch.current()
         if info:
@@ -201,6 +204,14 @@ def post_tool(cfg, inp):
             except Exception as e:
                 common.log(f"launch result: {type(e).__name__}: {str(e)[:200]}")
     return evidence_hint(run, agent, answer, inp.get('transcript_path') or '', keys=[(own_run, own_agent)])
+
+
+def _ctrlb_tool(tool):
+    """The CtrlB tool's short name (claim, done, ...) for a CtrlB MCP tool name; '' for any other tool."""
+    for prefix in CTRLB_TOOL_PREFIXES:
+        if tool.startswith(prefix) and '__' not in tool[len(prefix):]:
+            return tool[len(prefix):]
+    return ''
 
 
 def _alarm(*_):

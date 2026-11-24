@@ -279,5 +279,44 @@
     "text": "next picks the task itself: leave resource, paths, reopen and takeover out, or claim the resource without next"
    }
   ]
+ },
+ "post_tool_claim_other_server": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__tracker__claim",
+  "tool_use_id": "t16",
+  "tool_input": {
+   "resource": "task 07 latency"
+  },
+  "tool_response": [
+   {
+    "type": "text",
+    "text": "{\"held\": false, \"resource\": \"task 07 latency\", \"held_by\": \"someone\"}"
+   }
+  ]
+ },
+ "post_tool_claim_is_error": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__ctrlb__claim",
+  "tool_use_id": "t17",
+  "tool_input": {
+   "resource": "task 07 latency"
+  },
+  "tool_response": {
+   "isError": true,
+   "content": [
+    {
+     "type": "text",
+     "text": "{\"held\": false, \"resource\": \"task 07 latency\", \"error\": \"relay unavailable\"}"
+    }
+   ]
+  }
  }
 }

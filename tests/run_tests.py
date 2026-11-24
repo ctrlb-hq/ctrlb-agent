@@ -5777,6 +5777,10 @@ def test_launch_result_claude(seeker):
     hook('session-start', I['session_start'], env)
     seen = []
     for name, mode, inp in (('an error answer that is not JSON', 'post-tool', I['post_tool_claim_error_text']),
+                            ('an MCP error result (isError) whose text parses as a refusal', 'post-tool',
+                             I['post_tool_claim_is_error']),
+                            ('another MCP server\'s claim tool answering held false', 'post-tool',
+                             I['post_tool_claim_other_server']),
                             ('a failed call (PostToolUseFailure)', 'post-tool-failure', I['post_tool_claim_failure']),
                             ('a claim inside a subagent (agent_id set)', 'post-tool', I['post_tool_subagent_claim']),
                             ('a claim by another session of the launch', 'post-tool',
@@ -5792,8 +5796,8 @@ def test_launch_result_claude(seeker):
         hook(mode, inp, env)
         if result() is not None:
             seen.append(name)
-    check('claude: no result file from '
-          'an error answer, a failed call, a subagent claim, another session, another task, run or agent, or next',
+    check('claude: no result file from an error answer, an MCP error result, another server\'s claim tool, '
+          'a failed call, a subagent claim, another session, another task, run or agent, or next',
           not seen, ', '.join(seen))
     hook('post-tool', I['post_tool_claim_refused'], env)
     refused = result()
