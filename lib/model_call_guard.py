@@ -23,7 +23,6 @@ TIMEOUTS = ('timeout', 'gtimeout')
 PASS_THROUGH = ('nohup', 'exec', 'command', 'time', 'setsid', 'builtin')
 ASSIGN_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$', re.S)
 DURATION_RE = re.compile(r'^(\d+(?:\.\d*)?|\.\d+)([smhd]?)$')
-HEREDOC_RE = re.compile(r'<<-?[ \t]*(\\|([\'"]?))([A-Za-z_][A-Za-z0-9_]*)(?(2)\2)')
 REDIRECT_RE = re.compile(r'^\d*(?:<<?<?-?|>>?|<>|<&|>&|>\||&>>?)$')
 CODEX_SUBCOMMANDS = ('exec', 'e', 'review')
 # codex options before the subcommand that take a value (codex --help, 0.166)
@@ -59,9 +58,39 @@ def off_before_load():
     return not switch(os.environ.get('CTRLB_GUARD_MODEL_CALLS'), f.get('guardModelCalls') if isinstance(f, dict) else None)
 
 
+def _heredoc_word(line, i):
+    """The heredoc delimiter word that starts at line[i]: (delimiter after quote removal, quoted, index past it), or
+    None. The word runs to a blank or an operator character; any quoting in it (\\, '...', "...") makes it quoted."""
+    n, parts, quoted = len(line), [], False
+    while i < n and line[i] not in ' \t;&|()<>':
+        c = line[i]
+        if c == "'":
+            k = line.find("'", i + 1)
+            k = n if k == -1 else k
+            parts.append(line[i + 1:k])
+            quoted, i = True, k + 1
+        elif c == '"':
+            i += 1
+            while i < n and line[i] != '"':
+                if line[i] == '\\' and i + 1 < n and line[i + 1] in '"\\$`':
+                    i += 1
+                parts.append(line[i])
+                i += 1
+            quoted, i = True, i + 1
+        elif c == '\\':
+            parts.append(line[i + 1:i + 2])
+            quoted, i = True, i + 2
+        else:
+            parts.append(c)
+            i += 1
+    if not parts and not quoted:
+        return None
+    return ''.join(parts), quoted, i
+
+
 def _heredoc_ops(line):
-    """[(delimiter, expands)] for each heredoc operator in line, in order, outside quotes and comments. A body
-    expands ($( ) and ` ` run) when its delimiter is not quoted. <<< (a here-string) is not a heredoc."""
+    """[(delimiter, expands, strip_tabs)] for each heredoc operator in line, in order, outside quotes and comments. A
+    body expands ($( ) and ` ` run) when its delimiter is not quoted. <<< (a here-string) is not a heredoc."""
     ops, i, n, q = [], 0, len(line), None
     while i < n:
         c = line[i]
@@ -84,19 +113,24 @@ def _heredoc_ops(line):
         elif line.startswith('<<<', i):
             i += 3
         elif line.startswith('<<', i):
-            m = HEREDOC_RE.match(line, i)
-            if m:
-                ops.append((m.group(3), not m.group(1)))
-                i = m.end()
+            dash = line.startswith('<<-', i)
+            j = i + (3 if dash else 2)
+            while j < n and line[j] in ' \t':
+                j += 1
+            w = _heredoc_word(line, j)
+            if w:
+                ops.append((w[0], not w[1], dash))
+                i = w[2]
             else:
-                i += 2
+                i = j
         else:
             i += 1
     return ops
 
 
 def _substitutions(line):
-    """The $( ) and ` ` substitutions in one line of an expanding heredoc body (quotes there are plain text)."""
+    """The $( ) and ` ` substitutions in an expanding heredoc body (quotes outside them are plain text). One may span
+    lines."""
     subs, i, n = [], 0, len(line)
     while i < n:
         if line[i] == '\\':
@@ -115,18 +149,28 @@ def _substitutions(line):
 
 def _drop_heredocs(text):
     """The command without heredoc bodies: their lines are data, not commands. A body whose delimiter is not quoted
-    keeps its $( ) and ` ` substitutions, each on a line of its own, because the shell runs them."""
-    out, pending = [], []
+    keeps its $( ) and ` ` substitutions, each as a line of its own after the operator's line, because the shell runs
+    them. A body ends at a line that is exactly its delimiter (<<- strips leading tabs first)."""
+    out, pending, body = [], [], []
+
+    def close(expands):
+        if expands:
+            out.extend(_substitutions('\n'.join(body)))
+        body.clear()
+
     for line in text.split('\n'):
         if pending:
-            end, expands = pending[0]
-            if line.strip() == end:
+            end, expands, dash = pending[0]
+            if (line.lstrip('\t') if dash else line) == end:
+                close(expands)
                 pending.pop(0)
-            elif expands:
-                out.extend(_substitutions(line))
+            else:
+                body.append(line)
             continue
         out.append(line)
         pending = _heredoc_ops(line)
+    if pending:      # a body with no end line runs to the end of the command
+        close(pending[0][1])
     return '\n'.join(out)
 
 

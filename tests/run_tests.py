@@ -2091,6 +2091,10 @@ def test_model_call_guard(seeker):
         'a leading fd redirect': '2>/dev/null claude -p hi',
         'two leading redirects': '2>&1 >log codex exec x',
         'a substitution in a redirect target': 'ls > "$(codex exec q)"',
+        'a substitution over several lines of a heredoc body': 'cat <<EOF\n$(\ncodex exec review\n)\nEOF',
+        'a call after a heredoc whose delimiter has a hyphen': 'cat <<END-OF-PROMPT\ndata\nEND-OF-PROMPT\ncodex exec review',
+        'a call after a heredoc with a partly quoted delimiter': 'cat <<E"OF"\n$(codex exec q)\nEOF\nclaude -p x',
+        'an indented delimiter does not end a << body': 'cat <<EOF\n  EOF\n$(codex exec x)\nEOF',
         'timeout 0 is no limit': 'timeout 0 codex exec x',
         'run and agent but no time limit': 'CTRLB_RUN=r1 CTRLB_AGENT=worker-1 codex exec x',
         'after cd and &&': 'cd repo && codex exec x',
@@ -2163,6 +2167,9 @@ def test_model_call_guard(seeker):
         'a timed call after a leading redirect': 'timeout 60 >/dev/null codex exec x',
         'a quoted > is an argument': 'echo ">" codex exec',
         'a number before a spaced redirect is an argument': 'echo 2 > f',
+        'a partly quoted delimiter makes the body data': 'cat <<E"OF"\n$(codex exec q)\nEOF',
+        'a quoted hyphenated delimiter': "cat <<'END-X'\n$(codex exec q)\nEND-X\nls",
+        'an indented delimiter does not end a quoted body: the next line is data': "cat <<'EOF'\n  EOF\ncodex exec x\nEOF",
     }
     bad = {n: reason(c) for n, c in allowed.items() if reason(c)}
     check('guard: lets through timed calls, other CLI commands and text that only names a model CLI', not bad,
@@ -2283,6 +2290,28 @@ def test_spawned_agents(seeker):
     check('apply: a saved decision still applies after joinSpawned is turned off while the session runs (a renamed '
           "child never goes back to its parent's name)", off_cfg['run'] == 'run-s1' and off_cfg['agent'] == 'lead.claude-0000d00e',
           json.dumps(off_cfg))
+    spawn._write_json(spawn._session_path(saved_sid), dict(parent=PSID, parent_agent='lead', run='run-s1', agent='lead.claude-0000d00e',
+                                                            joined=True, renamed=True, noted=True))
+    with mock.patch.dict(os.environ, {'CTRLB_HOME': home, 'CTRLB_JOIN_SPAWNED': '0', 'CTRLB_AGENT': 'lead', 'CTRLB_RUN': ''}):
+        resume_cfg = common.config()
+        resumed_decision = spawn.session_start(resume_cfg, saved_sid, 'resume')
+    check('session_start with joinSpawned off: after a resume the session keeps the saved name and run, not its '
+          "parent's name", resumed_decision.get('agent') == 'lead.claude-0000d00e' and resume_cfg['agent'] == 'lead.claude-0000d00e'
+          and resume_cfg['run'] == 'run-s1', json.dumps([resumed_decision, resume_cfg.get('agent'), resume_cfg.get('run')]))
+    os.utime(spawn._session_path(saved_sid), (time.time() - spawn.KEEP_SESSIONS_S - 60,) * 2)
+    spawn.apply({'run': '', 'agent': 'lead'}, saved_sid)
+    check('apply: reading a decision keeps it from being pruned (its age restarts)',
+          time.time() - os.path.getmtime(spawn._session_path(saved_sid)) < 60)
+    watched = []
+    with mock.patch.dict(os.environ, {'CTRLB_HOME': home, 'CTRLB_SPAWN_IDLE_MINUTES': '30', 'CTRLB_AGENT': 'lead', 'CTRLB_RUN': ''}), \
+            mock.patch.object(spawn, 'agent_process', lambda pid=None: (os.getpid(), 'claude', 'test-start')), \
+            mock.patch.object(spawn, 'watch', lambda payload: watched.append((source, payload))), \
+            mock.patch.object(spawn, 'write_record', lambda *a, **k: None):
+        for source in ('resume', 'compact'):
+            spawn.session_start(common.config(), saved_sid, source)
+    check('spawnIdleMinutes: a resumed session gets a watchdog for its new process; a compacted one keeps the one it has',
+          [w[0] for w in watched] == ['resume'] and watched[0][1]['agent'] == 'lead.claude-0000d00e' and watched[0][1]['minutes'] == 30,
+          json.dumps(watched)[:300])
     d = spawn.decide({'run': 'run-s1', 'agent': 'lead'}, SID, lead, 'claude')
     check("decide: a child that inherited the parent's run and agent name joins under a name of its own",
           d['joined'] and d['renamed'] and d['agent'] == 'lead.claude-' + SID8, json.dumps(d))

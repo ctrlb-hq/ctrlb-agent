@@ -209,13 +209,16 @@ def parent_in_relay(parent):
 
 # ---------------------------------------------------------------- the child side
 
-def _session_path(sid):
-    return os.path.join(_dir('sessions'), re.sub(r'[^A-Za-z0-9_.-]', '_', sid)[:128] + '.json')
+def _session_path(sid, create=True):
+    """The file of a session's decision. create=False only names it: a read must not make the spawn folder (with
+    joinSpawned off nothing is written)."""
+    d = _dir('sessions') if create else os.path.join(common.HOME, 'spawn', 'sessions')
+    return os.path.join(d, re.sub(r'[^A-Za-z0-9_.-]', '_', sid)[:128] + '.json')
 
 
 def joined(sid):
     """What session-start decided for this session: {parent, parent_agent, run, agent, joined, renamed, ...}, or {}."""
-    return _read_json(_session_path(sid)) if sid else {}
+    return _read_json(_session_path(sid, create=False)) if sid else {}
 
 
 def short_id(sid):
@@ -265,6 +268,11 @@ def apply(cfg, sid):
     except Exception as e:
         common.log(f"spawn apply {sid}: {type(e).__name__}: {str(e)[:200]}")
         return {}
+    if j:
+        try:
+            os.utime(_session_path(sid, create=False))      # in use: pruning keeps the decisions read in the last KEEP_SESSIONS_S
+        except OSError:
+            pass
     if j.get('joined') and j.get('run'):
         cfg['run'] = j['run']
     if j.get('agent') and (j.get('joined') or j.get('renamed')):
@@ -297,9 +305,13 @@ def _prune_sessions():
 
 def session_start(cfg, sid, source='', env_file=None, transcript=''):
     """At session start: find the parent, keep the decision, apply it to cfg, and leave this session's own marks for
-    the agents it starts. Returns the decision ({} when the session was not started by an agent). Never raises."""
-    if not sid or not cfg.get('join_spawned'):
+    the agents it starts. Returns the decision ({} when the session was not started by an agent). Never raises.
+    With joinSpawned off it makes no new decision and leaves no marks, but a decision saved earlier still applies
+    (after compaction or resume, the session keeps the name it joined under)."""
+    if not sid:
         return {}
+    if not cfg.get('join_spawned'):
+        return apply(cfg, sid)
     decision = {}
     me = None
     base_agent = cfg.get('agent') or ''
@@ -339,7 +351,9 @@ def session_start(cfg, sid, source='', env_file=None, transcript=''):
         except Exception as e:
             common.log(f"spawn note {decision['run']}/{decision['agent']}: {type(e).__name__}: {str(e)[:200]}")
     minutes = cfg.get('spawn_idle_minutes') or 0
-    if decision and minutes > 0 and me and source not in ('compact', 'resume'):
+    # A resumed session runs in a process the first watchdog did not watch (that one ended with its process, or when
+    # this process took another session); after compaction the process and its watchdog are the same.
+    if decision and minutes > 0 and me and source != 'compact':
         try:
             watch(dict(pid=me[0], start=me[2], transcript=transcript or '', minutes=minutes, run=decision.get('run') or '',
                        agent=decision.get('agent') or '', joined=bool(decision.get('joined')), sid=sid))
