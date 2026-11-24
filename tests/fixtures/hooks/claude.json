@@ -1,5 +1,5 @@
 {
- "_note": "Claude Code hook inputs (stdin JSON), in the shapes Claude Code 2.1.318 sends. The tests replace {transcript} and {subagent_transcript} with the copied fixture paths. post_tool_claim and post_tool_release: PostToolUse after the ctrlb claim and release tools, tool_response as MCP content blocks (written by hand from the hook docs).",
+ "_note": "Claude Code hook inputs (stdin JSON), in the shapes Claude Code 2.1.318 sends. The tests replace {transcript} and {subagent_transcript} with the copied fixture paths. post_tool_claim and post_tool_release: PostToolUse after the ctrlb claim and release tools, tool_response as MCP content blocks (written by hand from the hook docs). post_tool_claim_refused, post_tool_claim_takeover, post_tool_subagent_claim (agent_id set: a claim made inside a subagent), post_tool_claim_failure (PostToolUseFailure with the error text) and post_tool_claim_error_text (an error answer that is not JSON): claim answers in the same shape, for a session started for one task.",
  "session_start": {
   "session_id": "5f0c7a52-0000-4000-8000-000000000001",
   "transcript_path": "{transcript}",
@@ -181,6 +181,102 @@
    {
     "type": "text",
     "text": "{\"released\": 1, \"finished\": true, \"resource\": \"task 07 latency\", \"key\": \"name:task 07 latency\", \"paths\": [\"path:src/panels/Latency.tsx\"]}"
+   }
+  ]
+ },
+ "session_start_resume": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "SessionStart",
+  "source": "resume"
+ },
+ "post_tool_claim_refused": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__ctrlb__claim",
+  "tool_use_id": "t11",
+  "tool_input": {
+   "resource": "task 07 latency"
+  },
+  "tool_response": [
+   {
+    "type": "text",
+    "text": "{\"held\": false, \"resource\": \"task 07 latency\", \"key\": \"name:task 07 latency\", \"held_by\": \"builder-2\", \"since\": 1793000000000000, \"paths\": [\"path:src/panels/Latency.tsx\"], \"free_tasks\": []}"
+   }
+  ]
+ },
+ "post_tool_claim_takeover": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__plugin_ctrlb-agent_ctrlb__claim",
+  "tool_use_id": "t12",
+  "tool_input": {
+   "resource": "task 07 latency",
+   "takeover": true
+  },
+  "tool_response": [
+   {
+    "type": "text",
+    "text": "{\"held\": true, \"resource\": \"task 07 latency\", \"key\": \"name:task 07 latency\", \"lease_until\": 1793000600000000, \"paths\": [\"path:src/panels/Latency.tsx\"], \"token\": \"<hold nonce>\", \"taken_over_from\": \"builder-2\", \"stall\": {\"holder\": \"builder-2\", \"last_activity\": 1792999000000000, \"idle_s\": 1200, \"stall_after_s\": 900}}"
+   }
+  ]
+ },
+ "post_tool_subagent_claim": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__ctrlb__claim",
+  "tool_use_id": "t13",
+  "tool_input": {
+   "resource": "task 07 latency"
+  },
+  "tool_response": [
+   {
+    "type": "text",
+    "text": "{\"held\": true, \"resource\": \"task 07 latency\", \"key\": \"name:task 07 latency\", \"lease_until\": 1793000600000000, \"paths\": [\"path:src/panels/Latency.tsx\"], \"token\": \"<hold nonce>\"}"
+   }
+  ],
+  "agent_id": "def456",
+  "agent_type": "general-purpose"
+ },
+ "post_tool_claim_failure": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUseFailure",
+  "tool_name": "mcp__ctrlb__claim",
+  "tool_use_id": "t14",
+  "tool_input": {
+   "resource": "task 07 latency"
+  },
+  "error": "MCP error -32603: connection closed"
+ },
+ "post_tool_claim_error_text": {
+  "session_id": "5f0c7a52-0000-4000-8000-000000000001",
+  "transcript_path": "{transcript}",
+  "cwd": "/work/dash",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__ctrlb__claim",
+  "tool_use_id": "t15",
+  "tool_input": {
+   "resource": "task 07 latency"
+  },
+  "tool_response": [
+   {
+    "type": "text",
+    "text": "next picks the task itself: leave resource, paths, reopen and takeover out, or claim the resource without next"
    }
   ]
  }
