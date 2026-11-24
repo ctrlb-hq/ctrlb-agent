@@ -218,10 +218,16 @@ def joined(sid):
     return _read_json(_session_path(sid)) if sid else {}
 
 
+def short_id(sid):
+    """The last 8 hex digits of a session id (random in UUIDv4 and v7)."""
+    return sid.replace('-', '')[-8:]
+
+
 def child_name(parent_agent, parent_session, program, sid):
-    """<parent label>.<program>-<first 8 of the session id>, without the label when the parent has none (its agent
-    name is its session id)."""
-    own = f'{program or "agent"}-{sid[:8]}'
+    """<parent label>.<program>-<last 8 hex digits of the session id>, without the label when the parent has none (its
+    agent name is its session id). The last digits, because Codex session ids are UUIDv7: their first 8 digits are a
+    timestamp that siblings started within about a minute share; the last 8 are random in v4 and v7 alike."""
+    own = f'{program or "agent"}-{short_id(sid)}'
     if parent_agent and parent_agent != parent_session and not UUID_RE.match(parent_agent):
         return f'{parent_agent}.{own}'
     return own
@@ -249,7 +255,10 @@ def apply(cfg, sid):
     """Put the session's decided run and agent name in cfg (every hook calls this after config()). Returns the
     decision, or {}. Never raises: a spawn folder that cannot be read leaves cfg as it is, so the hook's own work (the
     edit check, the guard) still runs."""
-    if not sid or not cfg.get('join_spawned'):
+    # A saved decision applies for the session's whole life, even when joinSpawned is turned off while it runs:
+    # otherwise a renamed child would go back to its parent's name and its session end could release the parent's
+    # holds. The setting only decides new joins (session_start).
+    if not sid:
         return {}
     try:
         j = joined(sid)
@@ -421,6 +430,10 @@ def _watch_loop(payload, pid, start, sid, limit, began, fd, poll_s, grace_s):
                     common.log(f"spawn watchdog note: {type(e).__name__}: {str(e)[:200]}")
             if not _same_session(pid, sid):
                 return
+            # The note can take seconds; a tool that finished meanwhile shows the worker is still working.
+            if time.time() - _last_change(payload.get('transcript') or '', began) < limit:
+                common.log(f"spawn watchdog {payload.get('sid')}: transcript changed, not stopping pid {pid}")
+                continue
             try:
                 _signal(pid, start, fd, signal.SIGTERM)
             except OSError:

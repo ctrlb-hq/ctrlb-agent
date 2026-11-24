@@ -93,7 +93,7 @@ If your organization already installs the plugin through managed settings, remov
 
 ## 3. Runs
 
-A session is its own run, and its subagents join it. A session with no run set is not told to claim a task: its context says no Relay tasks are waiting and to do the work it was asked to do. The whole Relay rule (claim the next free task, stop when none is free) is given to a session in a run: one with `CTRLB_RUN`, one that has called a ctrlb relay tool, or one that joined the run of the agent that started it. To put several sessions in one run, give them the same `CTRLB_RUN`:
+A session is its own run, and its subagents join it. A session with no run set is not told to claim a task: its context says no Relay tasks are waiting and to do the work it was asked to do. The whole Relay rule (claim the next free task, stop when none is free) is given to a session in a run: one with `CTRLB_RUN`, or one that has called a ctrlb relay tool. A session that joined the run of the agent that started it gets a shorter rule instead: do the work it was asked to do, claim the task its instructions name or else the files it will edit, and post one note when it finishes. To put several sessions in one run, give them the same `CTRLB_RUN`:
 
 ```sh
 CTRLB_RUN=nightly-refactor-1 claude -p "Fix the failing tests in src/parser"

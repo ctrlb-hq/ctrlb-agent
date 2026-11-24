@@ -7,7 +7,8 @@ need the command: the started agent finds its parent when it starts (lib/spawn.p
 `timeout <duration>` (a duration above zero) in front of the model CLI.
 
 The check reads only the command text. It sees through env assignments, env, timeout, nohup, exec, command, time,
-setsid, nice, stdbuf, `bash -c` (sh, zsh, dash) and $( ) substitutions. A model CLI started from a script, or through
+setsid, nice, stdbuf, redirections, `bash -c` (sh, zsh, dash) and $( ) substitutions, including those in a heredoc body
+whose delimiter is not quoted. A model CLI started from a script, or through
 another program (xargs, npx, a Makefile), is not seen; spawnIdleMinutes (lib/spawn.py) covers those. A command the
 tokenizer cannot read is let through."""
 import json
@@ -22,7 +23,8 @@ TIMEOUTS = ('timeout', 'gtimeout')
 PASS_THROUGH = ('nohup', 'exec', 'command', 'time', 'setsid', 'builtin')
 ASSIGN_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$', re.S)
 DURATION_RE = re.compile(r'^(\d+(?:\.\d*)?|\.\d+)([smhd]?)$')
-HEREDOC_RE = re.compile(r'<<-?\s*([\'"]?)([A-Za-z_][A-Za-z0-9_]*)\1')
+HEREDOC_RE = re.compile(r'<<-?[ \t]*(\\|([\'"]?))([A-Za-z_][A-Za-z0-9_]*)(?(2)\2)')
+REDIRECT_RE = re.compile(r'^\d*(?:<<?<?-?|>>?|<>|<&|>&|>\||&>>?)$')
 CODEX_SUBCOMMANDS = ('exec', 'e', 'review')
 # codex options before the subcommand that take a value (codex --help, 0.166)
 CODEX_VALUE_OPTS = ('-c', '--config', '--enable', '--disable', '--remote', '--remote-auth-token-env', '-i', '--image',
@@ -57,18 +59,74 @@ def off_before_load():
     return not switch(os.environ.get('CTRLB_GUARD_MODEL_CALLS'), f.get('guardModelCalls') if isinstance(f, dict) else None)
 
 
+def _heredoc_ops(line):
+    """[(delimiter, expands)] for each heredoc operator in line, in order, outside quotes and comments. A body
+    expands ($( ) and ` ` run) when its delimiter is not quoted. <<< (a here-string) is not a heredoc."""
+    ops, i, n, q = [], 0, len(line), None
+    while i < n:
+        c = line[i]
+        if q == "'":
+            q = None if c == "'" else q
+            i += 1
+        elif q == '"':
+            if c == '\\':
+                i += 2
+                continue
+            q = None if c == '"' else q
+            i += 1
+        elif c == '\\':
+            i += 2
+        elif c in '\'"':
+            q = c
+            i += 1
+        elif c == '#' and (i == 0 or line[i - 1] in ' \t;&|()'):
+            break
+        elif line.startswith('<<<', i):
+            i += 3
+        elif line.startswith('<<', i):
+            m = HEREDOC_RE.match(line, i)
+            if m:
+                ops.append((m.group(3), not m.group(1)))
+                i = m.end()
+            else:
+                i += 2
+        else:
+            i += 1
+    return ops
+
+
+def _substitutions(line):
+    """The $( ) and ` ` substitutions in one line of an expanding heredoc body (quotes there are plain text)."""
+    subs, i, n = [], 0, len(line)
+    while i < n:
+        if line[i] == '\\':
+            i += 2
+        elif line.startswith('$(', i) or line[i] == '`':
+            try:
+                j = _sub_end(line, i)
+            except ValueError:
+                break
+            subs.append(line[i:j])
+            i = j
+        else:
+            i += 1
+    return subs
+
+
 def _drop_heredocs(text):
-    """The command without heredoc bodies: their lines are data, not commands."""
-    out, end = [], None
+    """The command without heredoc bodies: their lines are data, not commands. A body whose delimiter is not quoted
+    keeps its $( ) and ` ` substitutions, each on a line of its own, because the shell runs them."""
+    out, pending = [], []
     for line in text.split('\n'):
-        if end is not None:
+        if pending:
+            end, expands = pending[0]
             if line.strip() == end:
-                end = None
+                pending.pop(0)
+            elif expands:
+                out.extend(_substitutions(line))
             continue
         out.append(line)
-        m = HEREDOC_RE.search(line)
-        if m:
-            end = m.group(2)
+        pending = _heredoc_ops(line)
     return '\n'.join(out)
 
 
@@ -145,11 +203,15 @@ def _lex(text):
             k = text.find('\n', i)
             i = n if k == -1 else k
         elif c in '<>' or (c == '&' and text.startswith('&>', i)):
+            fd = ''
+            if inword and not quoted and not subs and ''.join(word).isdigit():      # 2>file: 2 is the fd, not a word
+                fd = ''.join(word)
+                word, inword = [], False
             end()
             j = i + 1
             while j < n and text[j] in '<>&|':
                 j += 1
-            out.append(('word', text[i:j], []))
+            out.append(('word', fd + text[i:j], []))
             i = j
         elif c in SEPARATORS:
             end()
@@ -247,6 +309,15 @@ def _parts(items):
     i, n, seg = 0, len(items), []
     while i < n:
         kind, text, subs = items[i]
+        if kind == 'word' and REDIRECT_RE.match(text):
+            # A redirection and its target are not words of the command (>/dev/null codex exec runs codex). The
+            # target's substitutions still run: they stay in the segment under a None word.
+            if i + 1 < n and items[i + 1][0] != 'sep':
+                i += 1
+                if items[i][2]:
+                    seg.append((None, items[i][2]))
+            i += 1
+            continue
         name, j = None, i
         at_cmd = all(w in RESERVED for w, _ in seg)      # nothing but if, then, do ... before it
         if at_cmd and kind == 'word' and text == 'function' and i + 1 < n and items[i + 1][0] != 'sep':
@@ -337,7 +408,7 @@ def _scan(seg, timeout, found, depth, funcs=None):
     for _, subs in seg:
         for inner in subs:
             _walk(inner, timeout, found, depth + 1, funcs)
-    words = [w for w, _ in seg]
+    words = [w for w, _ in seg if w is not None]
     i = 0
     while i < len(words):
         w = words[i]

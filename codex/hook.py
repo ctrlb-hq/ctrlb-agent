@@ -65,14 +65,17 @@ def upload(cfg, paths, budget, event, sid):
 
 def in_relay(cfg, run, agent, sid, transcript):
     """Whether a Codex session or thread is in a relay run: CTRLB_RUN set (or joined to its starter's run), or its root
-    session's rollout shows a ctrlb relay tool call that writes to a run (Codex has no hook after a tool call). Its run
-    stays its own."""
+    session's rollout, or its own, shows a ctrlb relay tool call that writes to a run (Codex has no hook after a tool
+    call). A subagent thread that claimed files itself counts even when its root made no relay call. Its run stays its
+    own."""
     if relay_hooks.in_relay(cfg, run, agent, sid):
         return True
     try:
         parent = str(rows_codex.read_meta(transcript).get('parent_thread_id') or '') if transcript else ''
         rollout = rows_codex.root_rollout(sid, parent, transcript or '')[1]
-        return bool(rollout and rows_codex.relay_call(rollout))
+        if rollout and rows_codex.relay_call(rollout):
+            return True
+        return bool(transcript and transcript != rollout and rows_codex.relay_call(transcript))
     except Exception as e:
         common.log(f"codex relay check {sid}: {type(e).__name__}: {str(e)[:200]}")
         return False
