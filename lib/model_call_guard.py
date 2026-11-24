@@ -64,6 +64,9 @@ def _heredoc_word(line, i):
     n, parts, quoted = len(line), [], False
     while i < n and line[i] not in ' \t;&|()<>':
         c = line[i]
+        if c == '$' and line[i + 1:i + 2] in ("'", '"'):      # $'EOF' and $"EOF": the $ goes with the quotes
+            i += 1
+            continue
         if c == "'":
             k = line.find("'", i + 1)
             k = n if k == -1 else k
@@ -110,6 +113,16 @@ def _heredoc_ops(line):
             i += 1
         elif c == '#' and (i == 0 or line[i - 1] in ' \t;&|()'):
             break
+        elif line.startswith('$(', i):
+            # $((1 << 2)) shifts; a substitution closed on this line holds no heredoc body. One left open (x=$(cat
+            # <<EOF) is scanned on, for the heredoc inside it.
+            try:
+                i = _sub_end(line, i)
+            except ValueError:
+                i += 2
+        elif line.startswith('((', i):      # (( x << 2 )): arithmetic
+            k = line.find('))', i + 2)
+            i = n if k == -1 else k + 2
         elif line.startswith('<<<', i):
             i += 3
         elif line.startswith('<<', i):
@@ -158,20 +171,31 @@ def _drop_heredocs(text):
             out.extend(_substitutions('\n'.join(body)))
         body.clear()
 
+    waiting, joined = [], False      # operators seen on a logical line that a backslash continues
     for line in text.split('\n'):
         if pending:
             end, expands, dash = pending[0]
-            if (line.lstrip('\t') if dash else line) == end:
+            # In an expanding body a backslash-newline joins lines, so a line it continues is never the delimiter;
+            # in a quoted body it is plain text.
+            if not joined and (line.lstrip('\t') if dash else line) == end:
                 close(expands)
                 pending.pop(0)
             else:
                 body.append(line)
+            joined = expands and _continues(line)
             continue
         out.append(line)
-        pending = _heredoc_ops(line)
+        waiting += _heredoc_ops(line)
+        if not _continues(line):
+            pending, waiting = waiting, []
     if pending:      # a body with no end line runs to the end of the command
         close(pending[0][1])
     return '\n'.join(out)
+
+
+def _continues(line):
+    """Whether line ends with a backslash that escapes the newline (an odd number of them)."""
+    return (len(line) - len(line.rstrip('\\'))) % 2 == 1
 
 
 def _sub_end(text, i):
@@ -463,7 +487,15 @@ def _scan(seg, timeout, found, depth, funcs=None):
         if prog == 'env':
             i += 1
             while i < len(words) and words[i].startswith('-'):
-                i += 2 if words[i] in ('-u', '--unset', '-C', '--chdir', '-S', '--split-string') else 1
+                w = words[i]
+                split = (words[i + 1] if i + 1 < len(words) else '') if w in ('-S', '--split-string') else \
+                    w[len('--split-string='):] if w.startswith('--split-string=') else \
+                    w[2:] if w.startswith('-S') and len(w) > 2 else None
+                if split is not None:      # env -S "codex exec" review: the string is split into the command
+                    rest = words[i + (2 if w in ('-S', '--split-string') else 1):]
+                    _walk(split + ' ' + shlex.join(rest), timeout, found, depth + 1, funcs)
+                    return
+                i += 2 if w in ('-u', '--unset', '-C', '--chdir') else 1
             continue
         if prog in TIMEOUTS:
             i += 1
@@ -518,7 +550,7 @@ def _scan(seg, timeout, found, depth, funcs=None):
 def _walk(text, timeout, found, depth=0, funcs=None):
     if depth > MAX_DEPTH:
         return
-    _run(_lex(_drop_heredocs(text.replace('\\\n', ' '))), timeout, found, depth, funcs)
+    _run(_lex(_drop_heredocs(text).replace('\\\n', ' ')), timeout, found, depth, funcs)
 
 
 def model_calls(command):
