@@ -21,6 +21,8 @@ Pass `run_id="$ARGUMENTS"` on every one of those calls. Pass `agent` as the agen
 
 Start with `claim(next=true)`: it claims the first free task your orchestrator registered, with its files, and answers it as `next_task` (its `name`, `brief`, `paths` and `test`). When your test passes, call `done` with the evidence and `next=true`: it finishes the task and claims your next one in the same call. Call `peers` only when you are waiting for an answer or a handoff, or need context from the run's record; do not poll before each task. Put helper scripts and binaries in the run's scratch directory (your session rule names it), not in `/tmp`.
 
+If your session rule says you were started for one task, that rule wins over this page: claim that task by name, and if the claim is refused, post one note and stop; when its test passes, call `done` without `next`, then stop. If your session rule says you work for the agent that started you, do not claim, reopen or finish a task: claim the files you edit, and tell that agent what you did.
+
 Follow these three rules for the rest of the session.
 
 1. Other agents may be working in the same files. Start with `claim(next=true)`; once held, inspect the task's files and notes before changing them.

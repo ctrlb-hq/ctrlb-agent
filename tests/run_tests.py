@@ -1274,9 +1274,9 @@ def citem(payload, ts):
     return crec('response_item', payload, ts)
 
 
-def setup_codex():
+def setup_codex(home=None):
     """A Codex home in tests/work with the fixture rollout and a subagent rollout (synthetic, written here)."""
-    home = os.path.join(WORK, 'codex-home')
+    home = home or os.path.join(WORK, 'codex-home')
     shutil.rmtree(home, ignore_errors=True)
     day = os.path.join(home, 'sessions', '2026', '09', '06')
     os.makedirs(day)
@@ -5560,6 +5560,437 @@ def test_witness_docs():
           and "contains the evidence's command" not in relay)
 
 
+# ---------------------------------------------------------------- sessions started for one task (lib/launch.py)
+
+LAUNCH = '0a1b2c3d4e5f6071'
+LAUNCH_TASK = 'task 07 latency'           # the task the Claude Code claim fixtures answer for
+CODEX_TASK = 'task 03 watering'           # the task of tests/fixtures/codex-claims.jsonl, in run garden-run
+RELAY_STATE = dict(check='allow', handoff='ok', briefs='ok', claims='ok', release='ok', posts='ok', tasks='ok',
+                   contracts='ok', peers='ok', artifacts='ok')
+NO_LAUNCH_TEXTS = os.path.join(FIX, 'hooks', 'no-launch-texts.json')
+LEAD_SID = '7a7a7a7a-0000-4000-8000-0000000000bb'
+
+
+def launch_files():
+    """Copies of the Claude Code transcripts and a Codex home under tests/work/launch: (top, claude inputs, codex
+    inputs, codex home, codex main rollout)."""
+    top = os.path.join(WORK, 'launch')
+    shutil.rmtree(top, ignore_errors=True)
+    proj = os.path.join(top, 'projects', '-work-dash')
+    os.makedirs(os.path.join(proj, SID, 'subagents'))
+    main = os.path.join(proj, SID + '.jsonl')
+    sub = os.path.join(proj, SID, 'subagents', 'agent-abc123.jsonl')
+    shutil.copy(os.path.join(FIX, 'claude', 'session.jsonl'), main)
+    shutil.copy(os.path.join(FIX, 'claude', 'session', 'subagents', 'agent-abc123.jsonl'), sub)
+    chome, cmain, csub = setup_codex(os.path.join(top, 'codex-home'))
+    return top, inputs(main, sub), cinputs(cmain, csub), chome, cmain
+
+
+def start_paths(I, C):
+    """Every session-start and subagent-start path of both hooks: (name, hook function, mode, input, extra env)."""
+    run = dict(CTRLB_RUN='run-w', CTRLB_AGENT='w1')
+    joined = dict(CTRLB_PARENT_SESSION=LEAD_SID, CTRLB_PARENT_RUN='run-w', CTRLB_PARENT_AGENT='lead',
+                  CTRLB_PARENT_RELAY='1', CTRLB_RUN='run-w', CTRLB_AGENT='lead')
+    return [('claude session-start, no run', hook, 'session-start', I['session_start'], {}),
+            ('claude session-start, run', hook, 'session-start', I['session_start'], run),
+            ('claude session-start after compaction, run', hook, 'session-start', I['session_start_compact'], run),
+            ('claude session-start, joined', hook, 'session-start', I['session_start'], joined),
+            ('claude subagent-start, no run', hook, 'subagent-start', I['subagent_start'], {}),
+            ('claude subagent-start, run', hook, 'subagent-start', I['subagent_start'], run),
+            ('codex session-start, no run', chook, 'session-start', C['session_start'], {}),
+            ('codex session-start, run', chook, 'session-start', C['session_start'], run),
+            ('codex session-start of a subagent thread, run', chook, 'session-start', C['session_start_subagent'], run),
+            ('codex session-start, joined', chook, 'session-start', C['session_start'], joined),
+            ('codex subagent-start, no run', chook, 'subagent-start', C['subagent_start'], {}),
+            ('codex subagent-start, run', chook, 'subagent-start', C['subagent_start'], run)]
+
+
+def no_launch_texts(seeker, extra=None):
+    """The context of every start path of both hooks: {path: text}, with tests/work and the fake CtrlB's address
+    replaced by <work> and <url>. Each path runs in a home of its own."""
+    top, I, C, chome, _ = launch_files()
+    seeker.state.update(RELAY_STATE)
+    out = {}
+    for i, (name, fn, mode, inp, env) in enumerate(start_paths(I, C)):
+        e = base_env(seeker.url, os.path.join(top, f'home-{i}'), CODEX_HOME=chome, **env)
+        e.update(extra or {})
+        p, _ = fn(mode, inp, e)
+        out[name] = out_of(p).get('additionalContext', '').replace(WORK, '<work>').replace(seeker.url, '<url>')
+    return out
+
+
+def write_no_launch_texts():
+    seeker = Seeker()
+    texts = no_launch_texts(seeker)
+    seeker.httpd.shutdown()
+    seeker.httpd.server_close()
+    with open(NO_LAUNCH_TEXTS, 'w') as fh:
+        json.dump(texts, fh, indent=1, ensure_ascii=False)
+        fh.write('\n')
+    print(f'wrote {len(texts)} texts to {os.path.relpath(NO_LAUNCH_TEXTS, ROOT)}')
+    return 0 if all(texts.values()) else 1
+
+
+NEXT_TASK_WORDS = ('next=true', 'claim(next', 'free task', 'next free', 'done with next', 'claim the next',
+                   'claim one of them next', 'pick another', 'no task and stop')
+
+
+def no_next_task(text):
+    """No sentence that sends the agent to another task. (The session-start record lists tasks as "free"; that is
+    the run's state, not a rule.)"""
+    low = text.lower()
+    return not [w for w in NEXT_TASK_WORDS if w in low]
+
+
+def one_task_rule(text, task, run, agent, takeover=False):
+    call = f'claim(resource="{task}", run_id="{run}", agent="{agent}"' + (', takeover=true' if takeover else '') + ')'
+    reads = ("before your first edit, read the task's evidence and notes (tasks, and history with the task name) and the "
+             "earlier holder's steps (next_actions or fetch_records on its session)")
+    return (f'You were started for one task: "{task}". Work on that task only. First call {call}.' in text
+            and 'If held is false, post one note that says why the claim was refused, then stop: do not claim another task.' in text
+            and 'as the evidence, and without next.' in text and 'Then stop.' in text
+            and f'run id is {run} and your agent id is {agent}.' in text and (reads in text) == takeover
+            and 'You work for the agent that started you' not in text and no_next_task(text))
+
+
+def descendant_rule(text, task, run, agent):
+    return (f'run id is {run} and your agent id is {agent}.' in text
+            and f'You work for the agent that started you, which holds the task "{task}" in this run' in text
+            and 'Claim the files you will edit before you edit them (claim with paths)' in text
+            and 'Do not claim, reopen or finish a task' in text and 'You were started for one task' not in text
+            and 'If your instructions name a Relay task' not in text and no_next_task(text))
+
+
+def test_launch_no_change(seeker):
+    """Without CTRLB_LAUNCH (or with one that is not a launch id) every start text is the one the hooks wrote before."""
+    want = load('hooks/no-launch-texts.json')
+    got = no_launch_texts(seeker)
+    diff = [k for k in want if got.get(k) != want[k]]
+    check(f'no CTRLB_LAUNCH: the {len(want)} start texts of both hooks are byte for byte the earlier ones',
+          len(want) == 12 and not diff and set(got) == set(want), '; '.join(diff))
+    bad = no_launch_texts(seeker, dict(CTRLB_LAUNCH='not-a-launch', CTRLB_TASK=LAUNCH_TASK,
+                                       CTRLB_WATCH_DIR=os.path.join(WORK, 'launch-watch-bad')))
+    diff = [k for k in want if bad.get(k) != want[k]]
+    skill = read(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).decode()
+    check('relay skill: the one-task rule and the descendant rule win over the page',
+          'If your session rule says you were started for one task, that rule wins over this page' in skill
+          and 'call `done` without `next`, then stop' in skill
+          and 'If your session rule says you work for the agent that started you, do not claim, reopen or finish a task' in skill)
+    check('a CTRLB_LAUNCH that is not 16 hex digits changes no text and writes no marker',
+          not diff and not os.path.exists(os.path.join(WORK, 'launch-watch-bad', 'used')), '; '.join(diff))
+
+
+def test_launch_rules(seeker):
+    """The first session of a launch gets the one-task rule in every start path; every other session of the launch
+    (a subagent, a second session, an agent the worker starts from its shell) gets the descendant rule; the worker
+    keeps its role after compaction and resume; a subagent never takes the marker."""
+    spawn = _spawn_lib()
+    top, I, C, chome, _ = launch_files()
+    seeker.state.update(RELAY_STATE)
+    watch = os.path.join(top, 'watch')
+
+    def env_for(home, launch, mode='claim', task=LAUNCH_TASK, **extra):
+        e = base_env(seeker.url, os.path.join(top, home), CODEX_HOME=chome, CTRLB_RUN='run-w', CTRLB_AGENT='w1',
+                     CTRLB_TASK=task, CTRLB_TASK_MODE=mode, CTRLB_LAUNCH=launch, CTRLB_WATCH_DIR=watch)
+        e.update(extra)
+        return e
+
+    def ctx(fn, mode, inp, env):
+        p, _ = fn(mode, inp, env)
+        return out_of(p).get('additionalContext', '')
+
+    def owner(launch):
+        try:
+            return open(os.path.join(watch, 'used', launch)).read()
+        except OSError:
+            return None
+
+    # Claude Code: the worker, in every start path of its own session
+    L = '1111111111111111'
+    env = env_for('home-c', L)
+    texts = {n: ctx(hook, 'session-start', I[k], env) for n, k in (('startup', 'session_start'),
+                                                                   ('compact', 'session_start_compact'),
+                                                                   ('resume', 'session_start_resume'),
+                                                                   ('startup again', 'session_start'))}
+    bad = [n for n, t in texts.items() if not one_task_rule(t, LAUNCH_TASK, 'run-w', 'w1')]
+    check('claude: the first session of a launch gets the one-task rule, with no next-task sentence; it keeps it after '
+          'compaction, resume and a repeated start', not bad and owner(L) == SID, f'{bad} {texts["startup"][-1500:]}')
+    check('claude: the one-task rule replaces the whole relay rule and keeps the recall rule',
+          recall_rule(texts['startup'], SID) and REGISTERED not in texts['startup'] and 'reopen=true' not in texts['startup'])
+    st = os.stat(os.path.join(watch, 'used', L))
+    check('the launch marker holds the session id, mode 0600, made create-exclusive (no temporary file left)',
+          stat.S_IMODE(st.st_mode) == 0o600 and os.listdir(os.path.join(watch, 'used')) == [L])
+    sub = ctx(hook, 'subagent-start', I['subagent_start'], env)
+    check("claude: a subagent of the worker (the owner's session id, its own agent id) gets the descendant rule; the "
+          'marker is unchanged', descendant_rule(sub, LAUNCH_TASK, 'run-w', 'w1:agent-def456') and owner(L) == SID
+          and f'subagent of session {SID}' in sub, sub[-900:])
+    SID2 = '5f0c7a52-0000-4000-8000-0000000000b2'
+    second = ctx(hook, 'session-start', dict(I['session_start'], session_id=SID2), env)
+    check('claude: a second session with the same launch gets the descendant rule', descendant_rule(second, LAUNCH_TASK, 'run-w', 'w1')
+          and owner(L) == SID, second[-900:])
+    SID3 = '5f0c7a52-0000-4000-8000-0000000000b3'
+    child_env = env_for('home-c', L, CTRLB_PARENT_SESSION=SID, CTRLB_PARENT_RUN='run-w', CTRLB_PARENT_AGENT='w1',
+                        CTRLB_PARENT_RELAY='1')
+    child = ctx(hook, 'session-start', dict(I['session_start'], session_id=SID3), child_env)
+    name = spawn.child_name('w1', SID, '', SID3)
+    check("claude: an agent the worker starts from its shell (joined path) gets the descendant rule, not the started "
+          "agent's rule", descendant_rule(child, LAUNCH_TASK, 'run-w', name) and f'w1 (session {SID}) started you' in child
+          and 'Do the work you were asked to do' not in child, child[-900:])
+    L2 = '2222222222222222'
+    first_sub = ctx(hook, 'subagent-start', I['subagent_start'], env_for('home-c2', L2))
+    check('claude: a subagent event first on a launch gets the descendant rule and takes no marker',
+          descendant_rule(first_sub, LAUNCH_TASK, 'run-w', 'w1:agent-def456') and owner(L2) is None)
+    L3 = '3333333333333333'
+    lead_env = env_for('home-c3', L3, CTRLB_PARENT_SESSION=LEAD_SID, CTRLB_PARENT_RUN='run-w', CTRLB_PARENT_AGENT='lead',
+                       CTRLB_PARENT_RELAY='1')
+    joined_first = ctx(hook, 'session-start', I['session_start'], lead_env)
+    check('claude: the first session of a launch on the joined path (its starter ran from an agent\'s shell) gets the '
+          'one-task rule', one_task_rule(joined_first, LAUNCH_TASK, 'run-w', 'w1') and 'started you' in joined_first
+          and owner(L3) == SID, joined_first[-900:])
+    L4 = '4444444444444444'
+    take = ctx(hook, 'session-start', I['session_start'], env_for('home-c4', L4, mode='takeover'))
+    check('claude: CTRLB_TASK_MODE=takeover: claim with takeover=true, then read the evidence, notes and the earlier '
+          "holder's steps before the first edit", one_task_rule(take, LAUNCH_TASK, 'run-w', 'w1', takeover=True), take[-900:])
+    odd = 'fix "quotes" $(x)\nand a line'
+    q = ctx(hook, 'session-start', I['session_start'], env_for('home-c5', '5555555555555555', task=odd))
+    check('claude: the task name goes into the claim call quoted as JSON', f'claim(resource={json.dumps(odd)}, ' in q, q[-600:])
+
+    # Codex
+    C5 = '6666666666666666'
+    cenv = env_for('home-x', C5)
+    ctexts = {n: ctx(chook, 'session-start', C[k], cenv) for n, k in (('startup', 'session_start'),
+                                                                       ('resume', 'session_start_resume'),
+                                                                       ('startup again', 'session_start'))}
+    bad = [n for n, t in ctexts.items() if not one_task_rule(t, LAUNCH_TASK, 'run-w', 'w1')]
+    check('codex: the first session of a launch gets the one-task rule, with no next-task sentence; it keeps it after '
+          'resume and a repeated start', not bad and owner(C5) == CSID and recall_rule(ctexts['startup'], CSID),
+          f'{bad} {ctexts["startup"][-900:]}')
+    csub = ctx(chook, 'subagent-start', C['subagent_start'], cenv)
+    check("codex: a SubagentStart event with the owner's session id and another agent id gets the descendant rule; "
+          'the marker is unchanged', descendant_rule(csub, LAUNCH_TASK, 'run-w', f'w1:{CSUB}') and owner(C5) == CSID, csub[-900:])
+    thread = ctx(chook, 'session-start', C['session_start_subagent'], cenv)
+    check('codex: the session start of a subagent thread gets the descendant rule',
+          descendant_rule(thread, LAUNCH_TASK, 'run-w', f'w1:{CSUB}') and owner(C5) == CSID, thread[-900:])
+    C6 = '7777777777777777'
+    thread_first = ctx(chook, 'session-start', C['session_start_subagent'], env_for('home-x2', C6))
+    check('codex: a subagent thread first on a launch gets the descendant rule and takes no marker',
+          descendant_rule(thread_first, LAUNCH_TASK, 'run-w', f'w1:{CSUB}') and owner(C6) is None, thread_first[-600:])
+    other = '0190f0a0-1111-7000-8000-0000000000c2'
+    csecond = ctx(chook, 'session-start', dict(C['session_start'], session_id=other), cenv)
+    check('codex: a second session with the same launch gets the descendant rule',
+          descendant_rule(csecond, LAUNCH_TASK, 'run-w', 'w1') and owner(C5) == CSID, csecond[-600:])
+    cchild_env = env_for('home-x', C5, CTRLB_PARENT_SESSION=CSID, CTRLB_PARENT_RUN='run-w', CTRLB_PARENT_AGENT='w1',
+                         CTRLB_PARENT_RELAY='1')
+    cchild = ctx(chook, 'session-start', dict(C['session_start'], session_id=other.replace('c2', 'c3')), cchild_env)
+    check('codex: an agent the worker starts from its shell (joined path) gets the descendant rule',
+          descendant_rule(cchild, LAUNCH_TASK, 'run-w', spawn.child_name('w1', CSID, '', other.replace('c2', 'c3')))
+          and f'w1 (session {CSID}) started you' in cchild, cchild[-900:])
+    C7 = '8888888888888888'
+    cjoined = ctx(chook, 'session-start', C['session_start'], env_for('home-x3', C7, CTRLB_PARENT_SESSION=LEAD_SID,
+                                                                       CTRLB_PARENT_RUN='run-w', CTRLB_PARENT_AGENT='lead',
+                                                                       CTRLB_PARENT_RELAY='1'))
+    check('codex: the first session of a launch on the joined path gets the one-task rule',
+          one_task_rule(cjoined, LAUNCH_TASK, 'run-w', 'w1') and owner(C7) == CSID, cjoined[-600:])
+    ctake = ctx(chook, 'session-start', C['session_start'], env_for('home-x4', '9999999999999999', mode='takeover'))
+    check('codex: takeover mode', one_task_rule(ctake, LAUNCH_TASK, 'run-w', 'w1', takeover=True), ctake[-600:])
+
+    # a launch's sessions register no task for a subagent they spawn
+    ws = os.path.join(top, 'ws')
+    os.makedirs(os.path.join(ws, 'src'))
+    with open(os.path.join(ws, 'src', 'parse.py'), 'w') as fh:
+        fh.write('x\n')
+    agent_in = dict(session_id=SID, transcript_path='', cwd=ws, hook_event_name='PreToolUse', tool_name='Agent',
+                    tool_input={'prompt': 'Fix src/parse.py', 'description': 'fix parse'})
+    seeker.reset()
+    hook('pre-agent', agent_in, env)
+    in_launch = [c for c in seeker.calls if c['path'].endswith('/briefs')]
+    seeker.reset()
+    hook('pre-agent', agent_in, base_env(seeker.url, os.path.join(top, 'home-c'), CTRLB_RUN='run-w', CTRLB_AGENT='w1'))
+    plain = [c for c in seeker.calls if c['path'].endswith('/briefs')]
+    check('claude: a subagent spawned in a launch registers no task (it works for the worker); without a launch it does',
+          not in_launch and len(plain) == 1, f'{len(in_launch)} {len(plain)}')
+
+
+def test_launch_result_claude(seeker):
+    """Claude Code: the post-tool hook writes the result file from the worker's own claim of the named task."""
+    top, I, C, chome, _ = launch_files()
+    seeker.state.update(RELAY_STATE)
+    watch = os.path.join(top, 'watch')
+    L = 'abcdefabcdef0001'
+    env = base_env(seeker.url, os.path.join(top, 'home'), CTRLB_RUN='run-w', CTRLB_AGENT='w1', CTRLB_TASK=LAUNCH_TASK,
+                   CTRLB_TASK_MODE='claim', CTRLB_LAUNCH=L, CTRLB_WATCH_DIR=watch)
+    res = os.path.join(watch, 'result', L + '.json')
+
+    def result():
+        try:
+            return open(res).read()
+        except OSError:
+            return None
+    hook('session-start', I['session_start'], env)
+    seen = []
+    for name, mode, inp in (('an error answer that is not JSON', 'post-tool', I['post_tool_claim_error_text']),
+                            ('an MCP error result (isError) whose text parses as a refusal', 'post-tool',
+                             I['post_tool_claim_is_error']),
+                            ('another MCP server\'s claim tool answering held false', 'post-tool',
+                             I['post_tool_claim_other_server']),
+                            ('a failed call (PostToolUseFailure)', 'post-tool-failure', I['post_tool_claim_failure']),
+                            ('a claim inside a subagent (agent_id set)', 'post-tool', I['post_tool_subagent_claim']),
+                            ('a claim by another session of the launch', 'post-tool',
+                             dict(I['post_tool_claim'], session_id='5f0c7a52-0000-4000-8000-0000000000b2')),
+                            ('a claim of another task', 'post-tool',
+                             dict(I['post_tool_claim'], tool_input={'resource': 'task 08 errors'})),
+                            ('a claim in another run', 'post-tool',
+                             dict(I['post_tool_claim'], tool_input={'resource': LAUNCH_TASK, 'run_id': 'run-other'})),
+                            ('a claim as another agent', 'post-tool',
+                             dict(I['post_tool_claim'], tool_input={'resource': LAUNCH_TASK, 'agent': 'w2'})),
+                            ('a claim with next', 'post-tool',
+                             dict(I['post_tool_claim'], tool_input={'resource': LAUNCH_TASK, 'next': True}))):
+        hook(mode, inp, env)
+        if result() is not None:
+            seen.append(name)
+    check('claude: no result file from an error answer, an MCP error result, another server\'s claim tool, '
+          'a failed call, a subagent claim, another session, another task, run or agent, or next',
+          not seen, ', '.join(seen))
+    hook('post-tool', I['post_tool_claim_refused'], env)
+    refused = result()
+    hook('post-tool', I['post_tool_claim'], env)
+    held = result()
+    hook('post-tool', I['post_tool_claim_refused'], env)
+    still = result()
+    check('claude: a refused claim writes refused; a held claim then writes held; a later refusal never replaces held',
+          refused == '{"claim":"refused"}' and held == '{"claim":"held"}' and still == '{"claim":"held"}',
+          f'{refused} {held} {still}')
+    check('claude: the result file is mode 0600 and no temporary file is left',
+          stat.S_IMODE(os.stat(res).st_mode) == 0o600 and os.listdir(os.path.dirname(res)) == [L + '.json'])
+    L2 = 'abcdefabcdef0002'
+    env2 = dict(env, CTRLB_LAUNCH=L2, CTRLB_TASK_MODE='takeover')
+    hook('session-start', I['session_start'], env2)
+    hook('post-tool', I['post_tool_claim_takeover'], env2)
+    check('claude: a held takeover (plugin tool name) writes held',
+          open(os.path.join(watch, 'result', L2 + '.json')).read() == '{"claim":"held"}')
+    L3 = 'abcdefabcdef0003'
+    env3 = dict(env, CTRLB_LAUNCH=L3)
+    hook('post-tool', I['post_tool_claim'], env3)
+    check('claude: a session that never started as the worker (no marker) writes no result',
+          not os.path.exists(os.path.join(watch, 'result', L3 + '.json')) and not os.path.exists(os.path.join(watch, 'used', L3)))
+    plain = base_env(seeker.url, os.path.join(top, 'home-plain'), CTRLB_RUN='run-w', CTRLB_AGENT='w1',
+                     CTRLB_WATCH_DIR=os.path.join(top, 'watch-plain'))
+    hook('session-start', I['session_start'], plain)
+    hook('post-tool', I['post_tool_claim'], plain)
+    check('claude: without CTRLB_LAUNCH nothing is written to the watch folder', not os.path.exists(os.path.join(top, 'watch-plain')))
+
+
+def test_launch_result_codex(seeker):
+    """Codex: the result file is read from the worker's rollout (a claim call matched with its answer) at session end
+    and at the end of a turn."""
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import rows_codex
+    top, I, C, chome, cmain = launch_files()
+    seeker.state.update(RELAY_STATE)
+    watch = os.path.join(top, 'watch')
+    with open(os.path.join(FIX, 'codex-claims.jsonl')) as fh:
+        lines = {json.loads(ln)['payload']['item']['id']: ln for ln in fh if ln.strip()}
+    calls = rows_codex.claim_calls(os.path.join(FIX, 'codex-claims.jsonl'))
+    by_id = [a for a, _ in calls]
+    answers = [ans for _, ans in calls]
+    check('rows_codex.claim_calls: each claim call with its answer; no answer for a transport error, an error answer '
+          'or text that is not JSON', len(calls) == 9 and answers[0].get('held') is True and answers[1].get('held') is False
+          and answers[2] is None and answers[3] is None and answers[4] is None and by_id[5]['resource'] == 'task 04 pruning',
+          json.dumps(answers)[:400])
+    check('rows_codex.claim_calls: thread keeps only that thread\'s calls',
+          len(rows_codex.claim_calls(os.path.join(FIX, 'codex-claims.jsonl'), CSID)) == 8)
+
+    def rollout(name, ids):
+        path = os.path.join(top, f'rollout-{name}.jsonl')
+        shutil.copyfile(cmain, path)
+        with open(path, 'a') as fh:
+            fh.write('\n' + ''.join(lines[i] for i in ids))
+        return path
+
+    def env_for(launch):
+        return base_env(seeker.url, os.path.join(top, 'home-' + launch), CODEX_HOME=chome, CTRLB_RUN='garden-run',
+                        CTRLB_AGENT='garden.codex-0a1b2c3d', CTRLB_TASK=CODEX_TASK, CTRLB_TASK_MODE='claim',
+                        CTRLB_LAUNCH=launch, CTRLB_WATCH_DIR=watch)
+
+    def result(launch):
+        try:
+            return open(os.path.join(watch, 'result', launch + '.json')).read()
+        except OSError:
+            return None
+    L = 'c0dec0dec0de0001'
+    env = env_for(L)
+    chook('session-start', C['session_start'], env)
+    noise = rollout('noise', ['claim-transport', 'claim-error', 'claim-unparsable', 'claim-other-task', 'claim-other-run',
+                              'claim-next', 'claim-other-thread'])
+    chook('session-end', dict(C['session_end'], transcript_path=noise), env)
+    check('codex: no result from a transport error, an error answer, text that is not JSON, another task, another run, '
+          'a claim with next or another thread', result(L) is None, str(result(L)))
+    held = rollout('held', ['claim-transport', 'claim-held'])
+    chook('session-end', dict(C['session_end'], transcript_path=held, agent_id=CSUB, agent_type='worker'), env)
+    chook('session-end', dict(C['session_end'], transcript_path=held, session_id='0190f0a0-1111-7000-8000-0000000000c2'), env)
+    check("codex: a subagent's session end and another session's write no result", result(L) is None, str(result(L)))
+    refused = rollout('refused', ['claim-refused'])
+    chook('session-end', dict(C['session_end'], transcript_path=refused), env)
+    r1 = result(L)
+    chook('upload', dict(C['stop'], transcript_path=rollout('refused-held', ['claim-refused', 'claim-held'])), env)
+    r2 = result(L)
+    chook('session-end', dict(C['session_end'], transcript_path=refused), env)
+    r3 = result(L)
+    check('codex: session end writes refused; a turn end with a later held claim writes held; refused never replaces held',
+          r1 == '{"claim":"refused"}' and r2 == '{"claim":"held"}' and r3 == '{"claim":"held"}', f'{r1} {r2} {r3}')
+    check('codex: no temporary file is left', os.listdir(os.path.join(watch, 'result')) == [L + '.json'])
+    L2 = 'c0dec0dec0de0002'
+    env2 = env_for(L2)
+    chook('session-start', C['session_start_subagent'], env2)
+    chook('session-end', dict(C['session_end'], session_id=CSUB, transcript_path=C['session_start_subagent']['transcript_path']), env2)
+    chook('subagent-start', C['subagent_start'], env2)
+    check('codex: a subagent thread never takes the marker or writes a result',
+          not os.path.exists(os.path.join(watch, 'used', L2)) and result(L2) is None)
+    L3 = 'c0dec0dec0de0003'
+    env3 = env_for(L3)
+    chook('session-start', C['session_start'], env3)
+    chook('flush', dict(C['pre_compact'], transcript_path=held), env3)
+    check('codex: a compaction (PreCompact) of the worker writes the result too', result(L3) == '{"claim":"held"}', str(result(L3)))
+
+
+def test_launch_result_synced():
+    """The result file's rename is synced in its directory (and a directory made for it in its parent), so a power
+    failure cannot bring back a replaced refused result."""
+    import launch
+    top = os.path.join(WORK, 'launch-sync')
+    shutil.rmtree(top, ignore_errors=True)
+    os.makedirs(top)
+    watch = os.path.join(top, 'watch')
+    info = dict(launch='5ec5ec5ec5ec0001', task=LAUNCH_TASK, mode='claim', run='run-w')
+    events = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd):
+        st = os.fstat(fd)
+        events.append(('fsync-dir' if stat.S_ISDIR(st.st_mode) else 'fsync-file', st.st_ino))
+        return real_fsync(fd)
+
+    def replace(a, b):
+        events.append(('replace', os.path.basename(b)))
+        return real_replace(a, b)
+    with mock.patch.dict(os.environ, {'CTRLB_WATCH_DIR': watch}), mock.patch.object(launch.common, 'log'):
+        open(launch.marker_path(info), 'w').write('sid')
+        with mock.patch('os.fsync', fsync), mock.patch('os.replace', replace):
+            launch.write_result(info, 'refused')
+            refused = list(events)
+            events.clear()
+            launch.write_result(info, 'held')
+    res_ino = os.stat(os.path.join(watch, 'result')).st_ino
+    watch_ino = os.stat(watch).st_ino
+    name = info['launch'] + '.json'
+    for label, ev in (('refused', refused), ('held', events)):
+        at = ev.index(('replace', name)) if ('replace', name) in ev else -1
+        check(f'launch: the {label} result rename is followed by an fsync of the result directory',
+              at >= 0 and ('fsync-dir', res_ino) in ev[at + 1:], str(ev))
+    check('launch: the result directory made for the first result is synced in the watch directory',
+          ('fsync-dir', watch_ino) in refused, str(refused))
+    check('launch: the held result replaced refused', open(os.path.join(watch, 'result', name)).read() == '{"claim":"held"}')
+
 def main():
     seeker = Seeker()
     run_test(test_runner_failure_reporting)
@@ -5585,6 +6016,11 @@ def main():
     run_test(test_backfill_failure_status, seeker)
     run_test(test_redaction_linear_budget)
     run_test(test_witness_docs)
+    run_test(test_launch_no_change, seeker)
+    run_test(test_launch_rules, seeker)
+    run_test(test_launch_result_claude, seeker)
+    run_test(test_launch_result_codex, seeker)
+    run_test(test_launch_result_synced)
     run_test(test_pre_tool, seeker)
     run_test(test_model_call_guard, seeker)
     run_test(test_spawned_agents, seeker)
@@ -5641,4 +6077,6 @@ def main():
 
 
 if __name__ == '__main__':
+    if sys.argv[1:] == ['--write-no-launch-texts']:
+        sys.exit(write_no_launch_texts())
     sys.exit(main())

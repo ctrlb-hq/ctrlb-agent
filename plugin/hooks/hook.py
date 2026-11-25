@@ -3,8 +3,9 @@ pre-agent|pre-bash|post-tool|post-tool-failure>, with the hook's JSON on stdin. 
 ~/.ctrlb/hooks.log and the hook exits 0. pre-tool fails open (no output) on any error and gives up after two seconds;
 pre-agent (a sub-agent spawn registers a task) never prints anything and gives up after three. pre-bash (guardModelCalls)
 reads only the command text, calls nothing and fails open. session-start also finds the agent that started this session
-from its shell, if any, and leaves this session's marks for the agents it starts (lib/spawn.py). docs/relay-hooks.md
-lists each hook's event, fields, output and time budget."""
+from its shell, if any, and leaves this session's marks for the agents it starts (lib/spawn.py). A session started for
+one task (CTRLB_LAUNCH, lib/launch.py) gets the one-task rule or the descendant rule, and post-tool writes its claim's
+result. docs/relay-hooks.md lists each hook's event, fields, output and time budget."""
 import json, os, signal, sys, time
 sys.dont_write_bytecode = True
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -15,8 +16,8 @@ for _lib in (os.path.join(_HERE, '..', 'lib'), os.path.join(_HERE, '..', '..', '
 import model_call_guard  # noqa: E402
 if __name__ == '__main__' and sys.argv[1:2] == ['pre-bash'] and model_call_guard.off_before_load():
     sys.exit(0)         # pre-bash runs before every Bash call: with guardModelCalls off, stop before loading the rest
-import common, relay_hooks, rows_claude, spawn  # noqa: E402
-from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, relay_text, start_context, spawned_text, decide, record_tokens, _tool_answer,  # noqa: E402
+import common, launch, relay_hooks, rows_claude, spawn  # noqa: E402
+from hooks_shared import (CHECK_S, RECALL, SUBAGENT, RELAY, relay_text, launch_text, start_context, spawned_text, decide, record_tokens, _tool_answer, _tool_error,  # noqa: E402
                           bash_result, evidence_hint, is_test_command, record_test, record_bash, record_edit, record_note,
                           mark_relay, handoff_text, witness, _deny)
 from paths import edit_paths as normalise_edit_paths  # noqa: E402
@@ -26,6 +27,8 @@ SYNC_S, ASYNC_S = 5, 90
 # gives up after HANDOFF_S, so the transcript flush still gets the rest.
 HANDOFF_S = 0.8
 DONE_TOOLS = ('mcp__ctrlb__done', 'mcp__plugin_ctrlb-agent_ctrlb__done')
+# The CtrlB server's tool names: a server added by hand (mcp__ctrlb__<tool>) or the plugin's (mcp__plugin_ctrlb-agent_ctrlb__<tool>).
+CTRLB_TOOL_PREFIXES = ('mcp__ctrlb__', 'mcp__plugin_ctrlb-agent_ctrlb__')
 AGENT_TOOLS = ('Agent', 'Task')         # the sub-agent tool (Task is its earlier name)
 AGENT_ALARM_S = relay_hooks.REGISTER_S + 0.5
 
@@ -122,6 +125,8 @@ def pre_agent(cfg, inp):
     run, agent, sid = _who(cfg, inp)
     if not relay_hooks.in_relay(cfg, run, agent, sid):
         return None
+    if launch.current():      # a session started for one task: its subagents work for it and take no task
+        return None
     return relay_hooks.register_spawn(cfg, run, agent, inp.get('tool_input'), inp.get('cwd') or '')
 
 
@@ -176,7 +181,7 @@ def post_tool(cfg, inp):
                 except Exception as e:
                     common.log(f"artifact: {type(e).__name__}: {str(e)[:200]}")
         return None
-    name = tool.rsplit('__', 1)[-1] if tool.startswith('mcp__') else ''
+    name = _ctrlb_tool(tool)       # another MCP server's post or claim is not a CtrlB call
     if name not in ('post', 'claim', 'handoff', 'release', 'done', 'task', 'brief', 'ask', 'answer', 'contract'):
         return None
     mark_relay(own_run, own_agent, sid)      # in a relay run from now on: whole rule, handoff, agents it starts join
@@ -189,7 +194,24 @@ def post_tool(cfg, inp):
     agent = args.get('agent') or own_agent
     answer = _tool_answer(inp.get('tool_response'))
     record_tokens(run, agent, tool, answer)
+    if (name == 'claim' and inp.get('hook_event_name') != 'PostToolUseFailure' and not inp.get('agent_id')
+            and not _tool_error(inp.get('tool_response'))):
+        # the worker of a launch: its claim of the named task, as answered, for the starter (lib/launch.py)
+        info = launch.current()
+        if info:
+            try:
+                launch.record_claim(info, sid, args, answer, own_run, own_agent)
+            except Exception as e:
+                common.log(f"launch result: {type(e).__name__}: {str(e)[:200]}")
     return evidence_hint(run, agent, answer, inp.get('transcript_path') or '', keys=[(own_run, own_agent)])
+
+
+def _ctrlb_tool(tool):
+    """The CtrlB tool's short name (claim, done, ...) for a CtrlB MCP tool name; '' for any other tool."""
+    for prefix in CTRLB_TOOL_PREFIXES:
+        if tool.startswith(prefix) and '__' not in tool[len(prefix):]:
+            return tool[len(prefix):]
+    return ''
 
 
 def _alarm(*_):
@@ -223,12 +245,15 @@ def main():
             return
         run, agent = common.run_id(cfg, sid), common.agent_name(cfg, sid)
         scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
+        info = launch.current()      # started for one task: its worker, or another session of the same launch
+        rule = launch_text(info, launch.role(info, sid), run, agent, scratch) if info else ''
         if started.get('joined'):
-            text = RECALL.format(sid=sid) + spawned_text(started, run, agent, scratch)
+            text = RECALL.format(sid=sid) + (spawned_text(started, '', '', '') + '\n\n' + rule if rule else
+                                             spawned_text(started, run, agent, scratch))
             block = ''
         else:
             in_run = relay_hooks.in_relay(cfg, run, agent, sid)
-            text = RECALL.format(sid=sid) + spawned_text(started, '', '', '') + '\n\n' + relay_text(in_run, run, agent, scratch)
+            text = RECALL.format(sid=sid) + spawned_text(started, '', '', '') + '\n\n' + (rule or relay_text(in_run, run, agent, scratch))
             block = ''
             if in_run:
                 try:      # a relay run's session starts with the record
@@ -243,7 +268,10 @@ def main():
             return
         run = common.run_id(cfg, sid)
         in_run = relay_hooks.in_relay(cfg, run, common.agent_name(cfg, sid), sid)
-        relay = relay_text(in_run, run, common.agent_name(cfg, sid, inp.get('agent_id') or ''), common.scratch_dir(cfg, run))
+        sub = common.agent_name(cfg, sid, inp.get('agent_id') or '')
+        info = launch.current()      # a subagent is never a launch's worker: it gets the descendant rule
+        relay = (launch_text(info, launch.DESCENDANT, run, sub, common.scratch_dir(cfg, run)) if info else
+                 relay_text(in_run, run, sub, common.scratch_dir(cfg, run)))
         out = start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid) + '\n\n' + relay)
     elif mode == 'flush':
         upload(cfg, inp, SYNC_S)

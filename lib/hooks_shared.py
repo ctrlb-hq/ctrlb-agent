@@ -101,6 +101,42 @@ def relay_text(in_run, run, agent, scratch):
     return (RELAY if in_run else SOLO).format(run=run, agent=agent, scratch=scratch)
 
 
+# A session started for one named task (lib/launch.py): it works on that task only, in place of RELAY.
+ONE_TASK = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Pass run_id=\"{run}\" and agent=\"{agent}\" "
+            "to the ctrlb relay tools. You were started for one task: {task}. Work on that task only. First call "
+            "{call}. Its files come with it. If held is false, post one note that says why the claim was refused, "
+            "then stop: do not claim another task. {after}If the claim answers ask_about, ask the task's owner about "
+            "those before deciding them yourself. Work only while you hold the task. Claim any other file before you "
+            "edit it and release it when you are done with it. Run the task's test command (tasks and claim show it "
+            "as test); when it passes, call done on the task name with that command, its exit code and its last "
+            "output line as the evidence, and without next. When the task has no test command, give the check you "
+            "ran. Then stop. If you must leave the task before it is finished, use handoff. Put helper scripts and "
+            "binaries in the scratch directory {scratch}, not in /tmp.")
+# After a takeover: what the earlier holder did, before the first edit.
+TAKEOVER_READ = ("The task was stalled: after the takeover, before your first edit, read the task's evidence and notes "
+                 "(tasks, and history with the task name) and the earlier holder's steps (next_actions or "
+                 "fetch_records on its session). ")
+# Any other session of the same launch: a subagent of the worker, or an agent it started from its shell.
+DESCENDANT = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Pass run_id=\"{run}\" and "
+              "agent=\"{agent}\" to the ctrlb relay tools. You work for the agent that started you, which holds the "
+              "task {task} in this run: do the part of the work it asked of you. Claim the files you will edit before "
+              "you edit them (claim with paths) and release them when you finish. Do not claim, reopen or finish a "
+              "task: the agent that started you does that. When you finish, tell it what you did and the test you "
+              "ran. Put helper scripts and binaries in the scratch directory {scratch}, not in /tmp.")
+
+
+def launch_text(info, role, run, agent, scratch):
+    """The rule of a session started for one task: ONE_TASK for its worker, DESCENDANT for every other session of the
+    same launch. The task name is quoted as JSON, as it goes into the claim call."""
+    task = json.dumps(info['task'], ensure_ascii=False)
+    if role != 'worker':
+        return DESCENDANT.format(run=run, agent=agent, task=task, scratch=scratch)
+    takeover = info.get('mode') == 'takeover'
+    call = (f'claim(resource={task}, run_id="{run}", agent="{agent}"' + (', takeover=true' if takeover else '') + ')')
+    return ONE_TASK.format(run=run, agent=agent, task=task, call=call, after=TAKEOVER_READ if takeover else '',
+                           scratch=scratch)
+
+
 # A hold whose holder has stopped is taken over, not waited out.
 STALLED_HINT = ("If the holder has stopped, the hold shows as stalled (tasks lists stalled tasks); claim it with "
                 "takeover=true instead of waiting.")
@@ -191,9 +227,17 @@ def _deny(reason):
                                    'permissionDecisionReason': redact(reason)[0]}}
 
 
+def _tool_error(resp):
+    """Whether a PostToolUse tool_response is an MCP error result (isError true): its text is an error, never an
+    answer, even when it parses as JSON."""
+    return isinstance(resp, dict) and (resp.get('isError') is True or resp.get('is_error') is True)
+
+
 def _tool_answer(resp):
     """The JSON answer of an MCP tool from a PostToolUse tool_response: a dict, a list of content blocks, a dict with
-    content, or text."""
+    content, or text. An MCP error result answers {}."""
+    if _tool_error(resp):
+        return {}
     if isinstance(resp, dict) and ('held' in resp or 'handed' in resp or 'released' in resp or 'done' in resp):
         return resp
     if isinstance(resp, dict):
