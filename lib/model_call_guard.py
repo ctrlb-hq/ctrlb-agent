@@ -29,6 +29,34 @@ CODEX_SUBCOMMANDS = ('exec', 'e', 'review')
 CODEX_VALUE_OPTS = ('-c', '--config', '--enable', '--disable', '--remote', '--remote-auth-token-env', '-i', '--image',
                     '-m', '--model', '--local-provider', '-p', '--profile', '-s', '--sandbox', '-C', '--cd', '--add-dir',
                     '-a', '--ask-for-approval')
+# claude's options (2.1.331: the options its --help lists, and a few it accepts but does not list). A newer claude
+# can have more: an option not listed here makes the check fail closed (_claude_prints).
+# Options that take a value: the next word is the value, even one that starts with '-'.
+CLAUDE_VALUE_OPTS = ('--add-dir', '--agent', '--agents', '--allowed-tools', '--allowedTools',
+                     '--append-subagent-system-prompt', '--append-subagent-system-prompt-file',
+                     '--append-system-prompt', '--append-system-prompt-file', '--autocompact', '--betas',
+                     '--debug-file', '--disallowed-tools', '--disallowedTools', '--effort', '--environment',
+                     '--fallback-model', '--file', '--input-format', '--json-schema', '--max-budget-usd',
+                     '--max-thinking-tokens', '--max-turns', '--mcp-config', '--model', '--name', '--output-format',
+                     '--permission-mode', '--permission-prompt-tool', '--permission-prompts',
+                     '--plan-mode-instructions', '--plugin-dir', '--plugin-url', '--remote-control-session-name-prefix',
+                     '--resume-session-at', '--session-id', '--setting-sources', '--settings', '--system-prompt',
+                     '--system-prompt-file', '--system-prompt-snapshot', '--tools', '-n')
+# Options whose value is optional ([value]): they never take a word that starts with '-'.
+CLAUDE_OPTIONAL_OPTS = ('--cloud', '--debug', '--from-pr', '--prompt-suggestions', '--remote-control', '--resume',
+                        '--teleport', '--worktree', '-d', '-r', '-w')
+# Options that take no value (-p/--print and help/version are read on their own).
+CLAUDE_FLAGS = ('--allow-dangerously-skip-permissions', '--ax-screen-reader', '--background', '--bare', '--bg',
+                '--brief', '--chrome', '--continue', '--dangerously-skip-permissions', '--desktop',
+                '--disable-slash-commands', '--exclude-dynamic-system-prompt-sections', '--fork-session',
+                '--forward-subagent-text', '--ide', '--include-hook-events', '--include-partial-messages', '--init',
+                '--init-only', '--maintenance', '--no-chrome', '--no-session-persistence', '--replay-user-messages',
+                '--restricted', '--safe-mode', '--strict-mcp-config', '--tmux', '--verbose', '-c')
+CLAUDE_SHORT = 'cdhnprvw'       # claude's short options
+CLAUDE_SHORT_VALUE = 'ndrw'     # -n <name>, -d/-r/-w [value]: in -dp the rest of the word is the value of -d
+CLAUDE_SHORT_REQUIRED = 'n'     # with nothing after it in the word, -n takes the next word, even one that starts with -
+CLAUDE_HELP = ('-h', '--help', '-v', '--version')
+CLAUDE_MAYBE = 'claude'         # the call when an unknown option leaves print mode unsure
 TIME_VALUE_OPTS = ('-f', '--format', '-o', '--output')      # GNU time options that take a value
 TIMEOUT_VALUE_OPTS = ('-k', '--kill-after', '-s', '--signal')
 HELP = ('-h', '--help', '-V', '--version')
@@ -471,15 +499,59 @@ def _model_call(words):
             return f'codex {"exec" if a == "e" else a}'
         return ''
     if prog == 'claude':
-        found = False
-        for a in args:
-            if a == '--':
-                break
-            if a in HELP:
-                return ''      # help or version: no model call
-            found = found or a in ('-p', '--print')
-        return 'claude -p' if found else ''
+        return {'print': 'claude -p', 'maybe': CLAUDE_MAYBE}.get(_claude_prints(args), '')
     return ''
+
+
+def _claude_prints(args):
+    """'print' when claude args turn on -p/--print with no help or version, 'maybe' when an unknown option leaves
+    that unsure, else ''. Read as claude reads them. The value of an
+    option is never a flag: in `claude --system-prompt -p hi` the -p is the system prompt. --opt=value is one word.
+    Short options in one word are read flag by flag: -cp is -c -p; the first one that takes a value takes the rest of
+    the word (-pndemo1: the name is demo1), or the next word when nothing is left (-pn --help: the name is --help).
+
+    It fails closed. An option missing from the tables above (a newer claude) may take the next word as its value, so
+    with one on the line a -p anywhere (alone or in short options) counts, and help or version right after it does
+    not cancel the check. A wrong refusal costs a timeout; a missed call can hold the shell for hours."""
+    found = unknown = False
+    after_unknown = False          # this word may be the value of the unknown option before it
+    known = CLAUDE_VALUE_OPTS + CLAUDE_OPTIONAL_OPTS + CLAUDE_FLAGS + CLAUDE_HELP + ('-p', '--print')
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        maybe_value, after_unknown = after_unknown, False
+        if a == '--':
+            break
+        if a in CLAUDE_HELP:
+            if maybe_value:
+                continue
+            return False           # help or version: no model call
+        if a in CLAUDE_VALUE_OPTS:
+            i += 1                 # its value
+        elif a in ('-p', '--print'):
+            found = True
+        elif a.startswith('--'):
+            if a.split('=', 1)[0] not in known:
+                unknown, after_unknown = True, '=' not in a
+        elif len(a) > 1 and a[0] == '-' and a not in known:
+            for k, c in enumerate(a[1:], 2):
+                if c not in CLAUDE_SHORT:
+                    unknown, after_unknown = True, True
+                    break
+                if c in 'hv':
+                    if maybe_value:
+                        break
+                    return False
+                found = found or c == 'p'
+                if c in CLAUDE_SHORT_VALUE:
+                    if k == len(a) and c in CLAUDE_SHORT_REQUIRED:
+                        i += 1
+                    break
+    if unknown:
+        maybe = any(a in ('-p', '--print') or (a[:1] == '-' and a[1:2] != '-' and 'p' in a[1:]) for a in args)
+        return 'maybe' if maybe else ''
+    return 'print' if found else ''
 
 
 def _valid_duration(d):
@@ -599,6 +671,13 @@ def check(cfg, command):
 
 
 def refusal(call):
+    if call == CLAUDE_MAYBE:
+        return ('CtrlB Relay: this command may start `claude` in print mode without a time limit: it has a claude '
+                'option the guard does not know, so a -p in it may be a flag or that option\'s value. guardModelCalls '
+                'is on: a model CLI call needs a time limit, so a stuck call cannot hold this shell for hours. Put '
+                '`timeout <seconds>` directly before the `claude` word, after any NAME=value words, and keep every '
+                'other word as it is: `FOO=1 claude --opt x -p hi` becomes `FOO=1 timeout 600 claude --opt x -p hi`. '
+                'The agent it starts finds this session on its own, and joins its Relay run when it has one.')
     return (f'CtrlB Relay: this command starts `{call}` without a time limit. guardModelCalls is on: a model CLI call '
             'needs one, so a stuck call cannot hold this shell for hours. Run it like this: timeout 1200 '
             f'{call} ... The agent it starts finds this session on its own, and joins its Relay run when it has one.')
