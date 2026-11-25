@@ -20,11 +20,18 @@ Config comes from environment variables, falling back to ~/.ctrlb/config.json (w
                  (default <CTRLB_HOME>/relay/<run id>/scratch)          file key "scratchDir"
   CTRLB_AUTO_SLOTS   files the hooks claim as slot:<path> around each edit (relative paths, comma-separated;
                  empty turns it off; default REGISTRY.md)               file key "autoSlots" (a list)
+  CTRLB_JOIN_SPAWNED  0 (or false, off, no) stops an agent CLI started from another agent's shell from joining
+                 that agent's Relay run (lib/spawn.py; default on)          file key "joinSpawned"
+  CTRLB_SPAWN_IDLE_MINUTES  stop an agent CLI started from another agent's shell when its transcript has not changed
+                 for this many minutes (default 0, off)                     file key "spawnIdleMinutes"
+  CTRLB_GUARD_MODEL_CALLS  1 (or true, on, yes) refuses a shell command that starts codex exec, codex review or
+                 claude -p without a time limit (timeout) in front (default off)  file key "guardModelCalls"
   CTRLB_OFF=1    turns every hook off
   CTRLB_HOME     where config.json, hooks.log and upload state live (default ~/.ctrlb)
 
 Everything is off when the URL or the key is missing or the dataset name is not letters, digits and _."""
 import base64, fcntl, hashlib, ipaddress, json, os, re, shutil, socket, subprocess, time, urllib.error, urllib.parse, urllib.request
+import model_call_guard
 from redact import redact
 
 VERSION = '0.2.2'
@@ -80,8 +87,24 @@ def config():
     c['mcp_url'] = pick('CTRLB_MCP_URL', 'mcp_url', c['url'] + '/mcp' if c['url'] else '')
     c['scratch_dir'] = pick('CTRLB_SCRATCH_DIR', 'scratchDir')
     c['auto_slots'] = _auto_slots(env('CTRLB_AUTO_SLOTS'), f.get('autoSlots'))
+    c['guard_model_calls'] = model_call_guard.switch(env('CTRLB_GUARD_MODEL_CALLS'), f.get('guardModelCalls'))
+    join = env('CTRLB_JOIN_SPAWNED')
+    join = join if join not in (None, '') else f.get('joinSpawned')
+    c['join_spawned'] = True if join in (None, '') else model_call_guard.switch(join, None)
+    c['spawn_idle_minutes'] = _minutes(env('CTRLB_SPAWN_IDLE_MINUTES'), f.get('spawnIdleMinutes'))
     c['off'] = env('CTRLB_OFF') == '1' or not c['url'] or not c['key'] or not NAME_RE.match(c['dataset'])
     return c
+
+
+def _minutes(var, file_value):
+    """A number of minutes from the variable when set and not empty, else the file; 0 when missing, not a number or
+    not above zero."""
+    v = var if var not in (None, '') else file_value
+    try:
+        m = float(v)
+    except (TypeError, ValueError):
+        return 0
+    return m if m > 0 and m == m and m != float('inf') else 0
 
 
 def local_mode(cfg):

@@ -31,6 +31,28 @@ SUBAGENT = ("You are a subagent of session {sid}. That session's full record, in
             "After a command fails, call `find_command` with the command before changing it, then `next_actions` with "
             "a session_id and seq it returns to see what followed.")
 
+# A session started from another agent's shell (lib/spawn.py): who started it, and, when it joined that agent's run,
+# how to work in it. RELAY (claim the next free task) is not given: a started agent has its own job.
+STARTED_BY = ("{parent_agent} (session {parent}) started you from its shell. Its record is searchable: call "
+              "`search_sessions` with session_id {parent} before you redo its work or rerun its commands.")
+SPAWNED = ("CtrlB Relay: you joined the run of the agent that started you. Your run id is {run} and your agent id is "
+           "{agent}. Pass run_id=\"{run}\" and agent=\"{agent}\" to the ctrlb relay tools. Do the work you were asked "
+           "to do. If your instructions name a Relay task, claim it by that name; otherwise claim the files you will "
+           "edit before you edit them (claim with paths) and release them when you finish. When you finish, post one "
+           "note with what you did and the test you ran. Put helper files in {scratch}.")
+
+
+def spawned_text(started, run, agent, scratch):
+    """The context lines for a session started from another agent's shell: '' when it was not; who started it; and,
+    when it joined that agent's run and run is given, how to work in it."""
+    if not started or not started.get('parent'):
+        return ''
+    text = '\n\n' + STARTED_BY.format(parent_agent=started.get('parent_agent') or started['parent'], parent=started['parent'])
+    if started.get('joined') and run:
+        text += '\n\n' + SPAWNED.format(run=run, agent=agent, scratch=scratch)
+    return text
+
+
 # Claim before working, finish with evidence, and read peers for context or to wait for news.
 # The hooks manage autoSlots files; helper files go to the run's scratch directory.
 RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other agents in this run may be working in "
@@ -62,6 +84,21 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
          "stale, read the file it names and check your assumptions against it. Post a note "
          "only for what none of them covers. If you were asked to do a finished task again, claim its name with "
          "reopen=true. Put helper scripts and binaries in the scratch directory {scratch}, not in /tmp.")
+
+
+# A session with no run set (no CTRLB_RUN, no relay tool called, not joined to the run of the agent that started it):
+# its run is its own and nobody registered tasks in it, so it is not told to claim the next task (or to stop when none
+# is free).
+SOLO = ("CtrlB Relay: no run was set for this session (CTRLB_RUN), so no Relay tasks are waiting for you: do the work "
+        "you were asked to do; do not claim a task to find work. Your run id is {run} and your agent id is {agent}. "
+        "Pass run_id=\"{run}\" and agent=\"{agent}\" to the ctrlb relay tools only when you register tasks for "
+        "subagents or are asked to coordinate with other agents. Put helper scripts and binaries in the scratch "
+        "directory {scratch}, not in /tmp.")
+
+
+def relay_text(in_run, run, agent, scratch):
+    """RELAY for a session in a relay run, SOLO for one that is its own run."""
+    return (RELAY if in_run else SOLO).format(run=run, agent=agent, scratch=scratch)
 
 
 # A hold whose holder has stopped is taken over, not waited out.

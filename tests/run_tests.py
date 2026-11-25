@@ -3,7 +3,7 @@
 CtrlB is a local fake that answers with the synthetic responses in tests/fixtures/seeker/.
 Nothing is sent anywhere else, Claude is never called, and no real config is read: every CTRLB_* variable from the
 calling environment is dropped and CTRLB_HOME points into tests/work/."""
-import base64, glob, hashlib, http.server, json, os, re, shutil, signal, socket, socketserver, stat, subprocess, sys, threading, time, traceback
+import base64, glob, hashlib, http.server, json, os, re, shutil, signal, socket, socketserver, stat, subprocess, sys, textwrap, threading, time, traceback
 from unittest import mock
 sys.dont_write_bytecode = True
 
@@ -15,6 +15,7 @@ HOOK = os.path.join(ROOT, 'plugin', 'hooks', 'hook.py')
 CODEX_HOOK = os.path.join(ROOT, 'codex', 'hook.py')
 INSTALL = os.path.join(ROOT, 'codex', 'install.py')
 SID = '5f0c7a52-0000-4000-8000-000000000001'
+SID8 = SID.replace('-', '')[-8:]                       # the part of SID in a started agent's name (random in v4 and v7)
 CSID = '0190f0a0-1111-7000-8000-000000000001'        # the thread id of tests/fixtures/codex-rollout.jsonl
 CSUB = '01a0aaaa-0000-7000-8000-000000000002'        # a subagent thread of it, written by the tests
 KEY = 'test-key-not-a-real-key'
@@ -263,7 +264,7 @@ def closed_port():
 # ---------------------------------------------------------------- helpers
 
 def base_env(url, home, **extra):
-    env = {k: v for k, v in os.environ.items() if not k.startswith('CTRLB_')}
+    env = {k: v for k, v in os.environ.items() if not k.startswith('CTRLB_') and k != 'CLAUDE_ENV_FILE'}
     env.update(CTRLB_HOME=home, CTRLB_URL=url, CTRLB_KEY=KEY)
     env.update(extra)
     return env
@@ -705,33 +706,40 @@ def test_hooks(seeker):
     home = os.path.join(WORK, 'home')
     env = base_env(seeker.url, home)
 
+    # a session in a relay run gets the whole relay rule (CTRLB_RUN set; here the run id is the session id)
+    p, _ = hook('session-start', I['session_start'], dict(env, CTRLB_RUN=SID))
+    rctx = out_of(p).get('additionalContext', '')
+    seeker.reset()
     # session-start: the rule names the session, run and agent ids
     p, dt = hook('session-start', I['session_start'], env)
     o = out_of(p)
     ctx = o.get('additionalContext', '')
     check('session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {SID}' in ctx and f'run id is {SID}' in ctx and f'agent id is {SID}' in ctx and p.returncode == 0)
-    check('session-start: claims the registered task, its files come with it, holds one claim', registered_rule(ctx))
+    check('session-start with no run set: no task to find or stop rule, the ids for the relay tools',
+          'no Relay tasks are waiting for you' in ctx and 'claim(next=true)' not in ctx and 'no task and stop' not in ctx
+          and f'run_id="{SID}"' in ctx and 'helper scripts and binaries in the scratch directory' in ctx, ctx[-400:])
+    check('session-start: claims the registered task, its files come with it, holds one claim', registered_rule(rctx))
     check('session-start: the recall rule names its moments (first grep, file read or shell command; a failed command)',
           recall_rule(ctx, SID))
     check('session-start: refusals, unknown_task, reopen a finished task',
-          'held is false with finished_by, the task is done' in ctx and 'held is false with held_by, another agent has it' in ctx
-          and 'If reason is unknown_task, claim again with the suggestion' in ctx and 'claim its name with reopen=true' in ctx)
-    check('session-start: slots for things that are not files', 'is claimed as slot:<name> and released when you are done with it' in ctx
-          and ctx.index('slot:<name>') < ctx.index('reopen=true'))
+          'held is false with finished_by, the task is done' in rctx and 'held is false with held_by, another agent has it' in rctx
+          and 'If reason is unknown_task, claim again with the suggestion' in rctx and 'claim its name with reopen=true' in rctx)
+    check('session-start: slots for things that are not files', 'is claimed as slot:<name> and released when you are done with it' in rctx
+          and rctx.index('slot:<name>') < rctx.index('reopen=true'))
     check('relay skill and tools: slots, two-minute lease, never finished',
           'claimed as `slot:<name>` and released when you are done with it' in open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
           and all(n in open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read() for n in
                   ('## Slots', '`slot:devserver`', '`slot:port-3000`', '`slot:db-migrate`', '`slot:screenshots`', '`slot:commit`', 'lasts two minutes')))
     check('session-start: names the relay tools, contract and contracts among them',
-          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts, done)' in ctx)
+          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts, done)' in rctx)
     check('session-start: the coordination tools before a prose note, one sentence each',
           'Use the coordination tools before a prose note: handoff when you must leave a task you hold, so it moves to the agent '
           'you name in one step; ask when you are blocked on something only another agent or the orchestrator can decide; '
           "answer, with the question's id, when you can settle an open question; contract when you finish an interface others "
           'will build on (a type, a route, a config shape), with its name, the shape in a few lines and the files that define '
           "it. Before you build on a contract, read it with `contracts`. If it is stale, read the file it names and check your "
-          "assumptions against it. Post a note only for what none of them covers." in ctx)
+          "assumptions against it. Post a note only for what none of them covers." in rctx)
     check('session-start returns promptly', dt < 3.0, f'{dt:.2f}s')
     p, _ = hook('session-start', I['session_start_compact'], dict(env, CTRLB_RUN='relay-run-7', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
@@ -1408,20 +1416,25 @@ def test_codex_hooks(seeker):
     home = os.path.join(WORK, 'home-codex-pre')
     env = base_env(seeker.url, home, CODEX_HOME=chome)
 
+    p, _ = chook('session-start', I['session_start'], dict(env, CTRLB_RUN=CSID))     # in a relay run: the whole rule
+    rctx = out_of(p).get('additionalContext', '')
+    seeker.reset()
     p, dt = chook('session-start', I['session_start'], env)
     o = out_of(p)
     ctx = o.get('additionalContext', '')
     check('codex session-start: rule names session id, run id and agent id', o.get('hookEventName') == 'SessionStart'
           and f'session_id {CSID}' in ctx and f'run id is {CSID}' in ctx and f'agent id is {CSID}' in ctx and p.returncode == 0, f'{dt:.2f}s')
-    check('codex session-start: claims the registered task, its files come with it', registered_rule(ctx))
+    check('codex session-start with no run set: no task to find or stop rule',
+          'no Relay tasks are waiting for you' in ctx and 'claim(next=true)' not in ctx and 'no task and stop' not in ctx, ctx[-300:])
+    check('codex session-start: claims the registered task, its files come with it', registered_rule(rctx))
     check('codex session-start: the same recall rule as Claude Code', recall_rule(ctx, CSID))
     check('codex session-start: names the relay tools, ask and answer among them',
-          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts, done)' in ctx
-          and 'Use the coordination tools before a prose note: handoff when' in ctx and '; ask when you are blocked' in ctx)
-    check('codex session-start: slots', 'slot:<name>' in ctx)
+          'relay tools (peers, post, claim, release, handoff, ask, answer, brief, briefs, tasks, contract, contracts, done)' in rctx
+          and 'Use the coordination tools before a prose note: handoff when' in rctx and '; ask when you are blocked' in rctx)
+    check('codex session-start: slots', 'slot:<name>' in rctx)
     check('codex session-start: finish with evidence; reopen a finished task',
-          'as the evidence, and next=true' in ctx and 'release it with finished=true' not in ctx
-          and 'claim its name with reopen=true' in ctx)
+          'as the evidence, and next=true' in rctx and 'release it with finished=true' not in rctx
+          and 'claim its name with reopen=true' in rctx)
     p, _ = chook('session-start', I['session_start'], dict(env, CTRLB_RUN='relay-run-8', CTRLB_AGENT='builder-1'))
     ctx = out_of(p).get('additionalContext', '')
     check('codex session-start: CTRLB_RUN and CTRLB_AGENT win', 'run id is relay-run-8' in ctx and 'agent id is builder-1' in ctx)
@@ -1440,6 +1453,148 @@ def test_codex_hooks(seeker):
           and f'subagent of session {CSID}' in ctx and f'run id is {CSID}' in ctx and f'agent id is {CSUB}' in ctx, ctx[:160])
     check('codex subagent-start flushed the parent first (only the new line)', [r['tool_name'] for r in seeker.rows] == ['spawn_agent'],
           str([r['tool_name'] for r in seeker.rows]))
+    check('codex subagent-start in a session with no run and no relay call: the short rule',
+          'no Relay tasks are waiting' in ctx and 'claim(next=true)' not in ctx, ctx[-300:])
+    relay_rollout = os.path.join(WORK, 'codex-relay-rollout.jsonl')
+    shutil.copyfile(main, relay_rollout)
+    with open(relay_rollout, 'a') as fh:
+        fh.write('\n' + json.dumps(dict(timestamp='2026-09-06T12:07:00.000Z', type='event_msg', payload=dict(
+            type='item_completed', thread_id=CSID, item=dict(type='McpToolCall', id='exec-1', server='ctrlb', tool='task',
+                                                             arguments=dict(run_id=CSID, agent=CSID, name='task 01'),
+                                                             status='completed')))) + '\n')
+    p, _ = chook('subagent-start', dict(I['subagent_start'], transcript_path=relay_rollout), dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-relay')))
+    ctx = out_of(p).get('additionalContext', '')
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import rows_codex
+    check("codex: a ctrlb relay call in the root's rollout (Codex has no hook after a tool call) gives the whole rule; "
+          'relay_call reads its run and agent', 'claim(next=true)' in ctx and rows_codex.relay_call(relay_rollout) == (CSID, CSID)
+          and rows_codex.relay_call(main) is None, ctx[-300:])
+    mcp_line = lambda server, run: json.dumps(dict(timestamp='2026-09-06T12:08:00.000Z', type='event_msg', payload=dict(
+        type='item_completed', thread_id=CSID, item=dict(type='McpToolCall', id='exec-2', server=server, tool='claim',
+                                                         arguments=dict(run_id=run, agent='lead'), status='completed')))) + '\n'
+    with open(relay_rollout, 'a') as fh:
+        fh.write(mcp_line('other-ctrlb-service', 'not-this-run'))
+    other = rows_codex.relay_call(relay_rollout)
+    keep_dir = os.path.join(os.environ['CTRLB_HOME'], 'spawn', 'rollouts')
+    kept = [json.load(open(os.path.join(keep_dir, f))) for f in os.listdir(keep_dir)]
+    size_before = os.path.getsize(relay_rollout)
+    with open(relay_rollout, 'a') as fh:
+        fh.write(mcp_line('ctrlb', 'review-run') + '{"partial": ')
+    named = rows_codex.relay_call(relay_rollout)
+    kept2 = [json.load(open(os.path.join(keep_dir, f))) for f in os.listdir(keep_dir)]
+    check('codex relay_call: another server is not ctrlb; the part read is kept and only new full lines are read',
+          other == (CSID, CSID) and named == ('review-run', 'lead') and any(k['offset'] == size_before for k in kept)
+          and any(k['offset'] == os.path.getsize(relay_rollout) - len('{"partial": ') for k in kept2), json.dumps([other, named, kept2])[:300])
+    p, _ = chook('subagent-start', dict(I['subagent_start'], transcript_path=relay_rollout), dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-relay')))
+    ctx = out_of(p).get('additionalContext', '')
+    check('codex: a session with no CTRLB_RUN that called a relay tool naming another run keeps its own run in the rule',
+          'claim(next=true)' in ctx and f'run id is {CSID}' in ctx and 'review-run' not in ctx, ctx[-300:])
+    seeker.reset()
+    seeker.state['check'] = 'allow'
+    chook('pre-tool', dict(I['pre_tool_patch'], transcript_path=relay_rollout), dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-relay')))
+    ccall = seeker.calls[0] if seeker.calls else {}
+    seeker.reset()
+    chook('session-end', dict(I['session_end'], transcript_path=relay_rollout), dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-relay')))
+    hand = [c for c in seeker.calls if c['path'].endswith('/handoffs')]
+    seeker.reset()
+    chook('session-end', I['session_end'], dict(env, CTRLB_HOME=os.path.join(WORK, 'home-codex-relay-none')))
+    no_hand = [c for c in seeker.calls if c['path'].endswith('/handoffs')]
+    check('codex session-end with no CTRLB_RUN: hands off its holds in its own run when its rollout shows a relay call; '
+          'not when it shows none', len(hand) == 1 and hand[0]['path'] == f'/ai/relay/agent_sessions/runs/{CSID}/handoffs'
+          and hand[0]['body'].get('agent') == CSID and not no_hand, json.dumps([hand, no_hand])[:300])
+    check('codex: a later hook of that session uses its own run (the edit check)',
+          ccall.get('path') == f'/ai/relay/agent_sessions/runs/{CSID}/check' and (ccall.get('body') or {}).get('agent') == CSID,
+          json.dumps(ccall)[:300])
+    # A subagent thread that called a relay tool itself, while its root made none: in a relay run.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('codex_hook_for_test', os.path.join(ROOT, 'codex', 'hook.py'))
+    chk = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(chk)
+    sub_dir = os.path.join(WORK, 'codex-sub-relay')
+    shutil.rmtree(sub_dir, ignore_errors=True)
+    os.makedirs(sub_dir)
+    root_file = os.path.join(sub_dir, CSID + '.jsonl')
+    shutil.copy(os.path.join(FIX, 'codex-rollout.jsonl'), root_file)
+    sub_file = os.path.join(sub_dir, CSUB + '.jsonl')
+    with open(sub_file, 'w') as fh:
+        fh.write(crec('session_meta', dict(id=CSUB, session_id=CSUB, cwd='/work/garden', parent_thread_id=CSID, cli_version='0.166.0',
+                                           source={'subagent': {'other': 'worker'}}), '2026-09-06T12:02:00.000Z'))
+        fh.write(mcp_line('ctrlb', CSID))
+    quiet_sub = os.path.join(sub_dir, 'quiet-' + CSUB + '.jsonl')
+    with open(quiet_sub, 'w') as fh:
+        fh.write(crec('session_meta', dict(id=CSUB, session_id=CSUB, cwd='/work/garden', parent_thread_id=CSID, cli_version='0.166.0',
+                                           source={'subagent': {'other': 'worker'}}), '2026-09-06T12:02:00.000Z'))
+    with mock.patch.dict(os.environ, {'CTRLB_HOME': os.path.join(WORK, 'home-codex-sub-relay')}):
+        sub_cfg = dict(common.config(), run='')
+        own = chk.in_relay(sub_cfg, CSID, CSUB, CSUB, sub_file)
+        quiet = chk.in_relay(sub_cfg, CSID, CSUB, CSUB, quiet_sub)
+    check('codex in_relay: a subagent thread whose own rollout shows a relay call is in a relay run even when its root '
+          'made none; one whose rollout shows none is not', rows_codex.relay_call(root_file) is None and own and not quiet,
+          f'{own} {quiet}')
+    parsed = []
+    real_item = rows_codex._relay_item
+    with mock.patch.object(rows_codex, '_relay_item', lambda line: parsed.append(1) or real_item(line)):
+        with open(relay_rollout, 'a') as fh:
+            fh.write('2}\n' + mcp_line('ctrlb', 'third-run'))
+        third = rows_codex.relay_call(relay_rollout)
+    check('codex relay_call: a second read parses only the lines added since the first', third == ('third-run', 'lead') and len(parsed) == 1,
+          f'{third} {len(parsed)}')
+    early = os.path.join(WORK, 'codex-early-bytes-rollout.jsonl')
+    with open(early, 'w') as fh:
+        fh.write(mcp_line('ctrlb', 'aaa-run') + '{"type": "event_msg", "payload": {"type": "note", "text": "' + 'x' * 200 + '"}}\n')
+    first_read = rows_codex.relay_call(early)
+    with open(early, 'r+') as fh:       # an earlier line changed in place, far before the kept offset's last 64 bytes
+        text = fh.read()
+        fh.seek(0)
+        fh.write(text.replace('aaa-run', 'zzz-run'))
+    with open(early, 'a') as fh:
+        fh.write('{"type": "event_msg", "payload": {"type": "note"}}\n')
+    second_read = rows_codex.relay_call(early)
+    check('codex relay_call: the second read starts at the kept offset (an earlier line changed in place is not read again)',
+          first_read == ('aaa-run', 'lead') and second_read == ('aaa-run', 'lead'), json.dumps([first_read, second_read]))
+    with open(early, 'a') as fh:
+        fh.write(mcp_line('ctrlb', 'late-run'))
+    with mock.patch.object(rows_codex, '_relay_item', side_effect=TimeoutError('hook over its budget')):
+        timed_out = rows_codex.relay_call(early)
+    check("codex relay_call: when the hook's time runs out it answers what it had read before", timed_out == ('aaa-run', 'lead'),
+          json.dumps(timed_out))
+    rewritten = os.path.join(WORK, 'codex-rewritten-rollout.jsonl')
+    with open(rewritten, 'w') as fh:
+        fh.write(mcp_line('ctrlb', 'old-run'))
+    first = rows_codex.relay_call(rewritten)
+    with open(rewritten, 'r+') as fh:       # the same file (same inode), cut and written again, the same size
+        fh.truncate(0)
+        fh.write(mcp_line('ctrlb', 'new-run'))
+    second = rows_codex.relay_call(rewritten)
+    with mock.patch.object(rows_codex.common, 'private_dir', side_effect=OSError('read-only')):
+        no_keep = rows_codex.relay_call(rewritten)
+    check('codex relay_call: a file cut and written again is read again from the start; without a folder to keep the '
+          'offset in, the whole file is read', first == ('old-run', 'lead') and second == ('new-run', 'lead')
+          and no_keep == ('new-run', 'lead'), json.dumps([first, second, no_keep]))
+    sdir = os.path.join(home, 'spawn', 'sessions')
+    os.makedirs(sdir, mode=0o700, exist_ok=True)
+    root_decision = os.path.join(sdir, CSID + '.json')
+    with open(root_decision, 'w') as fh:
+        json.dump(dict(parent='7a7a7a7a-0000-4000-8000-0000000000aa', parent_agent='lead', run='run-L', agent='lead.codex-root0000',
+                       joined=True, renamed=False), fh)
+    try:
+        p, _ = chook('session-start', I['session_start_subagent'], dict(env, CTRLB_RUN='run-L'))
+        tctx = out_of(p).get('additionalContext', '')
+        seeker.reset()
+        seeker.state['check'] = 'allow'
+        chook('pre-tool', dict(I['pre_tool_patch'], session_id=CSUB, transcript_path=sub), dict(env, CTRLB_RUN='run-L'))
+        tcall = seeker.calls[0] if seeker.calls else {}
+        check("codex subagent thread with an inherited CTRLB_RUN other than its root's id: its start and a later hook use the "
+              "root's run and the root's agent name with the thread id",
+              'run id is run-L' in tctx and f'agent id is lead.codex-root0000:{CSUB}' in tctx
+              and tcall.get('path') == '/ai/relay/agent_sessions/runs/run-L/check'
+              and (tcall.get('body') or {}).get('agent') == f'lead.codex-root0000:{CSUB}', json.dumps([tctx[-200:], tcall.get('body')]))
+    finally:
+        for f in (root_decision, os.path.join(sdir, CSUB + '.json')):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
     def run(state, name='pre_tool_patch', e=None):
         seeker.reset()
@@ -1909,6 +2064,590 @@ def test_project_list_fences():
           project_rules._markers(project_rules.split_lines(indented)) == ([1], [3], None))
 
 
+def test_model_call_guard(seeker):
+    """guardModelCalls (docs/relay-hooks.md): with the setting on, a shell command that starts codex exec, codex review
+    or claude -p is refused unless a time limit (timeout) runs it. Off by default; reads only the command; calls
+    nothing. Joining the run is not its job: the started agent finds its parent (test_spawned_agents)."""
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import model_call_guard as g
+    on = {'guard_model_calls': True, 'run': ''}
+
+    def reason(cmd, cfg=on):
+        return g.check(cfg, cmd)
+
+    refused = {
+        'bare codex exec': 'codex exec "fix the parser"',
+        'codex alias e': 'codex e "fix it"',
+        'codex review': 'cat diff.txt | codex review -',
+        'codex option before exec': 'codex -m gpt-6-astra -c x=1 exec "go"',
+        'claude -p': 'claude -p "review this"',
+        'claude --print with a full path': '/usr/local/bin/claude --model x --print hi',
+        'a substitution in an unquoted heredoc body runs': 'cat <<EOF\n$(codex exec review)\nEOF',
+        'a backtick in an unquoted <<- heredoc body runs': 'cat <<-EOF\n\t`claude -p hi`\n\tEOF\nls',
+        'quoted <<EOF is text, the next line runs': 'echo "<<EOF"\ncodex exec x',
+        'a here-string is not a heredoc': 'cat <<<EOF\ncodex exec x',
+        'the second of two heredocs expands': "cat <<'A' <<B\n$(codex exec q)\nA\n$(codex exec r)\nB",
+        'a leading redirect': '>/dev/null codex exec review',
+        'a leading fd redirect': '2>/dev/null claude -p hi',
+        'two leading redirects': '2>&1 >log codex exec x',
+        'a substitution in a redirect target': 'ls > "$(codex exec q)"',
+        'a substitution over several lines of a heredoc body': 'cat <<EOF\n$(\ncodex exec review\n)\nEOF',
+        'a call after a heredoc whose delimiter has a hyphen': 'cat <<END-OF-PROMPT\ndata\nEND-OF-PROMPT\ncodex exec review',
+        'a call after a heredoc with a partly quoted delimiter': 'cat <<E"OF"\n$(codex exec q)\nEOF\nclaude -p x',
+        'an indented delimiter does not end a << body': 'cat <<EOF\n  EOF\n$(codex exec x)\nEOF',
+        "a call after a heredoc with a $'EOF' delimiter": "cat <<$'EOF'\ndata\nEOF\ncodex exec review",
+        'a backslash at the end of a quoted body line is text': "cat <<'EOF'\ntext\\\nEOF\ncodex exec review",
+        'a call after an arithmetic shift': 'echo $((1 << 2))\ncodex exec review',
+        'a call after an arithmetic command with a shift': '(( x = 1 << 2 ))\ncodex exec review',
+        'env -S': 'env -S "codex exec review"',
+        'env -S joined to its value': 'env -S"codex exec" review',
+        'env --split-string=': 'env --split-string="claude -p" hi',
+        'a heredoc inside an open substitution': 'x=$(cat <<EOF\n$(codex exec q)\nEOF\n)',
+        "a prompt from a quoted heredoc in a quoted substitution": "codex exec \"$(cat <<'PROMPT'\nReview this PR's changes.\nPROMPT\n)\"",
+        'time with a format value': "/usr/bin/time -f '%e seconds' codex exec review",
+        'time with an output file': 'time -o t.txt claude -p hi',
+        'a second heredoc after a quoted substitution that spans lines': "codex exec \"$(cat <<'PROMPT'\nReview this diff.\nPROMPT\n)\" <<'DIFF'\n+// Don't expose this field.\nDIFF",
+        'a call after a double-quoted string that spans lines and shows <<': 'echo "a\nb <<EOF c"\ncodex exec x',
+        'a comment with an apostrophe in a quoted substitution': 'codex exec "$(\n  # Read the user\'s request.\n  printf \'%s\' \'Review this change.\'\n)"',
+        'a call after arithmetic that spans lines': 'delay=$((\n  1 << attempt\n))\ncodex exec review',
+        'timeout 0 is no limit': 'timeout 0 codex exec x',
+        'run and agent but no time limit': 'CTRLB_RUN=r1 CTRLB_AGENT=worker-1 codex exec x',
+        'after cd and &&': 'cd repo && codex exec x',
+        'on a second line': 'ls\ncodex exec x',
+        'inside bash -lc': "cd repo && bash -lc 'codex exec hi' 2>&1",
+        'inside $( ) in quotes': 'echo "$(claude -p hi)"',
+        'in a subshell': '(cd d; codex exec x) > out.txt',
+        'in the background': 'nohup codex exec x > log 2>&1 &',
+        'a timeout on another command': 'timeout 5 make build; codex exec x',
+        'in $( ) under a timed command (it runs first)': 'timeout 5 echo "$(codex exec hi)"',
+        'in backquotes': 'echo `claude -p hi`',
+        'in an assignment substitution': 'OUT=$(codex exec hi) make',
+        'after if, then': 'if true; then codex exec hi; fi',
+        'in a for loop': 'for f in a b; do codex exec "$f"; done',
+        'in braces': '{ codex exec x; }',
+        'a quoted program name': "'codex' exec hi",
+        'a function defined and called': 'review() { codex exec hi; }; review',
+        'function keyword form, called on the next line': 'function r { claude -p x; }\nr',
+        'nested substitutions with a quoted parenthesis': 'echo "$(echo "$(codex exec "a)b")")"',
+        'a subshell-body function, called': 'f() ( codex exec hi ); f',
+        'after a function whose body prints a quoted {': "f() { printf '%s' '{'; }; codex exec hi",
+        'a call before the function is defined again': 'f() { codex exec hi; }; f; f() { echo ok; }',
+        'the second definition is the one called': 'f() { echo ok; }; f() { codex exec hi; }; f',
+        'a function defined when another one runs': 'setup() { review() { codex exec hi; }; }; setup; review',
+        'a function defined after then, called': 'if true; then f() { codex exec hi; }; fi; f',
+        'after --, --help is the prompt': 'codex exec -- --help',
+        'a ( ) function body does not change a function outside it':
+            'f() { codex exec hi; }; setup() ( f() { echo ok; }; ); setup; f',
+    }
+    bad = {n: c for n, c in refused.items() if not reason(c)}
+    check('guard: refuses each model CLI call with no time limit', not bad, json.dumps(bad))
+    allowed = {
+        'timeout alone': 'timeout 1200 codex exec "fix it"',
+        'assignments and timeout': 'CTRLB_RUN=r1 timeout 1200 codex exec "fix it"',
+        'env and timeout options': 'env A=1 timeout -k 10 --signal=TERM 20m claude -p hi',
+        'export earlier in the command': 'export CTRLB_RUN=r1 && timeout 600 codex e x',
+        'outer timeout around bash -lc': "timeout 1200 bash -lc 'codex exec hi'",
+        'timeout from a variable': 'timeout "$LIMIT" codex exec x',
+        'codex --version': 'codex --version',
+        'codex login status': 'codex login status',
+        'codex resume (interactive)': 'codex resume --last',
+        'claude mcp list': 'claude mcp list',
+        'grep for the text': 'grep -rn "codex exec" docs/',
+        'echo the text': 'echo claude -p hi',
+        'commit message': 'git commit -m "run claude -p in CI"',
+        'heredoc body': "cat > run.sh <<'EOF'\ncodex exec x\nclaude -p y\nEOF\nchmod +x run.sh",
+        'unreadable command': 'codex exec "unclosed',
+        '$( ) in single quotes is text': "printf %s '$(codex exec hi)'",
+        'a quoted ; is text': "printf %s ';' codex exec hi",
+        'a quoted && is text': 'echo "a && codex exec hi"',
+        'a comment': '# codex exec hi\nls',
+        'timed inside a substitution': 'echo "$(timeout 5 codex exec "a)b")"',
+        'timeout around bash -c with a substitution inside': "timeout 5 bash -c 'echo $(codex exec hi)'",
+        'a function defined and not called': 'review() { codex exec hi; }; echo ready',
+        'a timed call inside a called function': 'g() {\n  timeout 60 codex exec x\n}\ng',
+        'a function that calls itself': 'f() { f; }; f',
+        'a subshell-body function, not called': 'f() ( codex exec hi ); echo ready',
+        'a quoted } inside a function body that is not called': "f() { printf '%s' '}'; codex exec hi; }; echo ready",
+        'echo } inside a function body that is not called': 'f() { echo }; codex exec hi; }; echo ready',
+        'a function defined after then, not called': 'if true; then f() { codex exec hi; }; fi; echo ready',
+        'codex exec help': 'codex exec --help',
+        'codex review help': 'codex review -h',
+        'codex help before the subcommand': 'codex --help exec x',
+        'claude -p help': 'claude -p --help',
+        'command -v looks a name up': 'command -v codex exec',
+        'command -p -v and -pv look a name up': 'command -p -v codex exec; command -pv claude -p',
+        'empty': '',
+        'a quoted heredoc body is data': "cat <<'EOF'\n$(codex exec review)\nEOF",
+        'a backslash-quoted heredoc body is data': 'cat <<\\EOF\n$(codex exec review)\nEOF',
+        'a timed call after a leading redirect': 'timeout 60 >/dev/null codex exec x',
+        'a quoted > is an argument': 'echo ">" codex exec',
+        'a number before a spaced redirect is an argument': 'echo 2 > f',
+        'a partly quoted delimiter makes the body data': 'cat <<E"OF"\n$(codex exec q)\nEOF',
+        'a quoted hyphenated delimiter': "cat <<'END-X'\n$(codex exec q)\nEND-X\nls",
+        'an indented delimiter does not end a quoted body: the next line is data': "cat <<'EOF'\n  EOF\ncodex exec x\nEOF",
+        'a backslash-newline in an expanding body joins the delimiter line to it': 'cat <<EOF\ntext\\\nEOF\ncodex exec review\nEOF',
+        'env -S with a timed call': 'env -S "timeout 60 codex exec" x',
+        'timeout around env -S': 'timeout 60 env -S "codex exec" x',
+        'a timed call with a prompt from a quoted heredoc': "timeout 1200 codex exec \"$(cat <<'PROMPT'\nReview this PR's changes.\nPROMPT\n)\"",
+        'a quoted heredoc prompt that names a model CLI': "timeout 60 claude -p \"$(cat <<'P'\nDon't run codex exec here.\nP\n)\"",
+        'a timed call with a prompt and an input heredoc that names a model CLI': "timeout 60 codex exec \"$(cat <<'PROMPT'\nReview.\nPROMPT\n)\" <<'DIFF'\ncodex exec example\nDIFF",
+        'a timed call with a commented substitution': 'timeout 5 codex exec "$(\n # it\'s fine\n echo hi\n)"',
+        'a # inside a word in a substitution is not a comment': 'x=$(echo a#b\'c\'); timeout 5 codex exec y',
+    }
+    bad = {n: reason(c) for n, c in allowed.items() if reason(c)}
+    check('guard: lets through timed calls, other CLI commands and text that only names a model CLI', not bad,
+          json.dumps(bad)[:400])
+    check('guard: off by default (no setting), even for a bare call', g.check({'run': ''}, 'codex exec x') is None)
+    r = reason('codex exec x') or ''
+    check('guard: the refusal names the call, the time limit and the command to run instead, and asks for no run or name',
+          '`codex exec`' in r and 'without a time limit' in r and 'timeout 1200 codex exec' in r
+          and 'CTRLB_RUN' not in r and 'CTRLB_AGENT' not in r, r)
+
+    # the setting: environment first, then the config file
+    home = os.path.join(WORK, 'home-guard')
+    shutil.rmtree(home, ignore_errors=True)
+    os.makedirs(home)
+    env = base_env(seeker.url, home)
+    cfg_of = lambda e: json.loads(subprocess.run(
+        [sys.executable, '-I', '-c', 'import sys, json; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib')) + '); '
+         'import common; print(json.dumps(common.config()["guard_model_calls"]))'], capture_output=True, text=True, env=e).stdout)
+    with open(os.path.join(home, 'config.json'), 'w') as fh:
+        json.dump({'guardModelCalls': True}, fh)
+    check('setting: guardModelCalls in config.json turns it on; CTRLB_GUARD_MODEL_CALLS=0 turns it off; 1 turns it on',
+          cfg_of(env) is True and cfg_of(dict(env, CTRLB_GUARD_MODEL_CALLS='0')) is False
+          and cfg_of(dict(base_env(seeker.url, os.path.join(WORK, 'home-guard-none')), CTRLB_GUARD_MODEL_CALLS='1')) is True
+          and cfg_of(base_env(seeker.url, os.path.join(WORK, 'home-guard-none'))) is False)
+    os.remove(os.path.join(home, 'config.json'))
+
+    # the Claude Code hook
+    inp = {'session_id': SID, 'transcript_path': '', 'cwd': '/work/dash', 'hook_event_name': 'PreToolUse',
+           'tool_name': 'Bash', 'tool_input': {'command': 'codex exec "fix it"', 'description': 'run codex'}}
+    seeker.reset()
+    p, dt = hook('pre-bash', inp, dict(env, CTRLB_GUARD_MODEL_CALLS='1'))
+    o = out_of(p)
+    check('pre-bash: a bare codex exec is denied with the refusal, exit 0, no call to CtrlB',
+          p.returncode == 0 and o.get('permissionDecision') == 'deny' and '`codex exec`' in o.get('permissionDecisionReason', '')
+          and not seeker.calls, f'{json.dumps(o)[:300]} {dt:.2f}s')
+    p, _ = hook('pre-bash', dict(inp, tool_input={'command': 'timeout 1200 codex exec x'}), dict(env, CTRLB_GUARD_MODEL_CALLS='1'))
+    check('pre-bash: a timed call prints nothing', p.returncode == 0 and not p.stdout.strip(), p.stdout[:200])
+    p, _ = hook('pre-bash', inp, env)
+    check('pre-bash: setting off prints nothing, calls nothing', p.returncode == 0 and not p.stdout.strip() and not seeker.calls)
+    with open(os.path.join(home, 'config.json'), 'w') as fh:
+        json.dump({'guardModelCalls': True}, fh)
+    p, _ = hook('pre-bash', inp, env)
+    on_by_file = out_of(p).get('permissionDecision') == 'deny'
+    p, _ = hook('pre-bash', inp, dict(env, CTRLB_GUARD_MODEL_CALLS='off'))
+    check('pre-bash: the early exit reads the setting as config does (file on: denied; variable off: nothing)',
+          on_by_file and p.returncode == 0 and not p.stdout.strip())
+    os.remove(os.path.join(home, 'config.json'))
+    p, _ = hook('pre-bash', '{not json', dict(env, CTRLB_GUARD_MODEL_CALLS='1'))
+    check('pre-bash: unreadable input fails open', p.returncode == 0 and not p.stdout.strip())
+
+    hk = load('../../plugin/hooks/hooks.json')['hooks']
+    guard = [grp for grp in hk['PreToolUse'] if grp.get('matcher') == 'Bash']
+    check('hooks.json: PreToolUse Bash runs pre-bash (timeout 5, not async) only for a command that names codex or claude',
+          len(guard) == 1 and [h.get('if') for h in guard[0]['hooks']] == ['Bash(*codex*)', 'Bash(*claude*)']
+          and all(h['command'].endswith('hook.py" pre-bash') and h['timeout'] == 5 and 'async' not in h for h in guard[0]['hooks']))
+
+    # the Codex hook: Codex matches its shell tools as Bash, with tool_input.command
+    cinp = {'session_id': CSID, 'transcript_path': '', 'cwd': '/work/dash', 'hook_event_name': 'PreToolUse',
+            'tool_name': 'Bash', 'tool_input': {'command': 'claude -p "review"'}}
+    p, _ = chook('pre-bash', cinp, dict(env, CTRLB_GUARD_MODEL_CALLS='1'))
+    o = out_of(p)
+    check('codex pre-bash: a bare claude -p is denied', p.returncode == 0 and o.get('permissionDecision') == 'deny'
+          and '`claude -p`' in o.get('permissionDecisionReason', ''), json.dumps(o)[:200])
+    p, _ = chook('pre-bash', cinp, env)
+    check('codex pre-bash: setting off prints nothing', p.returncode == 0 and not p.stdout.strip())
+
+    if can_validate_toml():
+        chome = os.path.join(WORK, 'codex-guard')
+        for extra, want in (({}, False), ({'CTRLB_GUARD_MODEL_CALLS': '1'}, True)):
+            shutil.rmtree(chome, ignore_errors=True)
+            os.makedirs(chome)
+            p = install(['--mcp-url', 'http://127.0.0.1:8095/mcp'], chome, extra)
+            text = read(os.path.join(chome, 'config.toml')).decode() if p.returncode == 0 else ''
+            has = '[[hooks.PreToolUse]]\nmatcher = "Bash"\n[[hooks.PreToolUse.hooks]]\ntype = "command"\n' in text and ' pre-bash"' in text
+            check(f'codex install: the Bash pre-bash hook is written {"only " if want else "not "}when guardModelCalls is '
+                  f'{"on" if want else "off"}', p.returncode == 0 and has == want, p.stderr[-200:])
+
+    doc = open(os.path.join(ROOT, 'docs', 'relay-hooks.md')).read()
+    skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
+    check('docs: relay-hooks.md documents guardModelCalls, its variable, pre-bash and what it does not see',
+          'guardModelCalls' in doc and 'CTRLB_GUARD_MODEL_CALLS' in doc and '`pre-bash`' in doc and 'script' in doc)
+    check('relay skill: a model CLI call runs under timeout, and the agent it starts joins the run on its own',
+          'timeout' in skill and 'guardModelCalls' in skill and 'joinSpawned' in skill)
+
+
+def _spawn_lib():
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import spawn
+    return spawn
+
+
+def test_spawned_agents(seeker):
+    """joinSpawned (docs/relay-hooks.md, lib/spawn.py): an agent CLI started from another agent's shell finds that agent
+    when it starts, from a process record or the CTRLB_PARENT_* variables, joins its Relay run under its own name when
+    that agent is in one, and says who started it. No command text is read."""
+    spawn = _spawn_lib()
+    main, sub = setup_transcripts()
+    I = inputs(main, sub)
+    home = os.path.join(WORK, 'home-spawn')
+    shutil.rmtree(home, ignore_errors=True)
+    env = base_env(seeker.url, home)
+    PSID = '7a7a7a7a-0000-4000-8000-0000000000aa'
+
+    # the decision, alone
+    lead = dict(session=PSID, run='run-s1', agent='lead', relay=True, how='environment')
+    d = spawn.decide({'run': '', 'agent': ''}, SID, lead, 'codex')
+    check('decide: a child with no run of its own joins a parent in a run, named <parent>.<program>-<8 of its id>',
+          d['joined'] and d['run'] == 'run-s1' and d['agent'] == 'lead.codex-' + SID8 and not d['renamed'], json.dumps(d))
+    sib1, sib2 = '0190f0a0-1111-7000-8000-00000000c001', '0190f0a0-2222-7000-8000-00000000c002'
+    n1, n2 = spawn.child_name('lead', PSID, 'codex', sib1), spawn.child_name('lead', PSID, 'codex', sib2)
+    check('child_name: two Codex siblings started in the same minute (UUIDv7 ids with the same first 8 digits) get '
+          'different names, from the random last 8', n1 != n2 and n1 == 'lead.codex-0000c001', f'{n1} {n2}')
+    saved_sid = '5f0c7a52-0000-4000-8000-00000000d00e'
+    spawn._write_json(spawn._session_path(saved_sid), dict(parent=PSID, parent_agent='lead', run='run-s1',
+                                                            agent='lead.claude-0000d00e', joined=True, renamed=True))
+    off_cfg = {'run': '', 'agent': 'lead', 'join_spawned': False}
+    spawn.apply(off_cfg, saved_sid)
+    check('apply: a saved decision still applies after joinSpawned is turned off while the session runs (a renamed '
+          "child never goes back to its parent's name)", off_cfg['run'] == 'run-s1' and off_cfg['agent'] == 'lead.claude-0000d00e',
+          json.dumps(off_cfg))
+    spawn._write_json(spawn._session_path(saved_sid), dict(parent=PSID, parent_agent='lead', run='run-s1', agent='lead.claude-0000d00e',
+                                                            joined=True, renamed=True, noted=True))
+    with mock.patch.dict(os.environ, {'CTRLB_HOME': home, 'CTRLB_JOIN_SPAWNED': '0', 'CTRLB_AGENT': 'lead', 'CTRLB_RUN': ''}):
+        resume_cfg = common.config()
+        resumed_decision = spawn.session_start(resume_cfg, saved_sid, 'resume')
+    check('session_start with joinSpawned off: after a resume the session keeps the saved name and run, not its '
+          "parent's name", resumed_decision.get('agent') == 'lead.claude-0000d00e' and resume_cfg['agent'] == 'lead.claude-0000d00e'
+          and resume_cfg['run'] == 'run-s1', json.dumps([resumed_decision, resume_cfg.get('agent'), resume_cfg.get('run')]))
+    os.utime(spawn._session_path(saved_sid), (time.time() - spawn.KEEP_SESSIONS_S - 60,) * 2)
+    spawn.apply({'run': '', 'agent': 'lead'}, saved_sid)
+    check('apply: reading a decision keeps it from being pruned (its age restarts)',
+          time.time() - os.path.getmtime(spawn._session_path(saved_sid)) < 60)
+    watched = []
+    with mock.patch.dict(os.environ, {'CTRLB_HOME': home, 'CTRLB_SPAWN_IDLE_MINUTES': '30', 'CTRLB_AGENT': 'lead', 'CTRLB_RUN': ''}), \
+            mock.patch.object(spawn, 'agent_process', lambda pid=None: (os.getpid(), 'claude', 'test-start')), \
+            mock.patch.object(spawn, 'watch', lambda payload: watched.append((source, payload))), \
+            mock.patch.object(spawn, 'write_record', lambda *a, **k: None):
+        for source in ('resume', 'compact'):
+            spawn.session_start(common.config(), saved_sid, source)
+    check('spawnIdleMinutes: a resumed session gets a watchdog for its new process; a compacted one keeps the one it has',
+          [w[0] for w in watched] == ['resume'] and watched[0][1]['agent'] == 'lead.claude-0000d00e' and watched[0][1]['minutes'] == 30,
+          json.dumps(watched)[:300])
+    d = spawn.decide({'run': 'run-s1', 'agent': 'lead'}, SID, lead, 'claude')
+    check("decide: a child that inherited the parent's run and agent name joins under a name of its own",
+          d['joined'] and d['renamed'] and d['agent'] == 'lead.claude-' + SID8, json.dumps(d))
+    d = spawn.decide({'run': 'bench-4', 'agent': 'worker-2'}, SID, lead, 'claude')
+    check('decide: a child with its own run and agent name is left as it is',
+          not d['joined'] and not d['renamed'] and d['run'] == 'bench-4' and d['agent'] == 'worker-2', json.dumps(d))
+    d = spawn.decide({'run': 'bench-4', 'agent': 'lead'}, SID, lead, 'claude')
+    check("decide: its own run but the parent's agent name: stays in its run, renamed",
+          not d['joined'] and d['renamed'] and d['run'] == 'bench-4' and d['agent'] == 'lead.claude-' + SID8, json.dumps(d))
+    d = spawn.decide({'run': '', 'agent': 'lead'}, SID, dict(lead, agent='lead.codex-bbbbbbbb', base_agent='lead'), 'claude')
+    check("decide: a grandchild that inherited the first agent's CTRLB_AGENT is renamed below its own parent",
+          d['joined'] and d['renamed'] and d['agent'] == 'lead.codex-bbbbbbbb.claude-' + SID8, json.dumps(d))
+    with mock.patch.dict(os.environ, {'CTRLB_RUN': ''}):
+        d = spawn.decide({'run': '', 'agent': '', 'mode': 'local'}, SID, lead, 'codex')
+    check('decide: in local mode a child without CTRLB_RUN in its environment joins nothing (its relay tools need it)',
+          not d['joined'] and d['run'] == '', json.dumps(d))
+    d = spawn.decide({'run': '', 'agent': ''}, SID, dict(lead, relay=False, run=PSID, agent=PSID), 'codex')
+    check('decide: a parent in no relay run is not joined, and a parent with no label gives no prefix',
+          not d['joined'] and d['agent'] == '' and spawn.child_name(PSID, PSID, 'codex', SID) == 'codex-' + SID8, json.dumps(d))
+
+    # the Claude Code parent: CTRLB_PARENT_* in CLAUDE_ENV_FILE, appended, once
+    env_file = os.path.join(WORK, 'spawn-env-file')
+    with open(env_file, 'w') as fh:
+        fh.write('export OTHER_PLUGIN=1\n')
+    pin = dict(I['session_start'], session_id=PSID)
+    seeker.reset()
+    p, _ = hook('session-start', pin, dict(env, CTRLB_RUN='run-s1', CTRLB_AGENT='lead', CLAUDE_ENV_FILE=env_file))
+    hook('session-start', pin, dict(env, CTRLB_RUN='run-s1', CTRLB_AGENT='lead', CLAUDE_ENV_FILE=env_file))
+    text = open(env_file).read()
+    check('parent: session-start appends CTRLB_PARENT_SESSION, _RUN, _AGENT and _RELAY to CLAUDE_ENV_FILE once, keeping other lines',
+          text.startswith('export OTHER_PLUGIN=1\n') and text.count(f'export CTRLB_PARENT_SESSION={PSID}\n') == 1
+          and 'export CTRLB_PARENT_RUN=run-s1\n' in text and 'export CTRLB_PARENT_AGENT=lead\n' in text
+          and 'export CTRLB_PARENT_RELAY=1\n' in text and p.returncode == 0, text)
+    check('parent: its own context is unchanged and nothing is written to CtrlB', 'run id is run-s1' in out_of(p).get('additionalContext', '')
+          and 'started you' not in out_of(p).get('additionalContext', '') and not [c for c in seeker.calls if c['method'] != 'GET'])
+
+    # a Claude Code child that inherited the parent's variables (and its CTRLB_RUN and CTRLB_AGENT)
+    parent_env = dict(CTRLB_PARENT_SESSION=PSID, CTRLB_PARENT_RUN='run-s1', CTRLB_PARENT_AGENT='lead', CTRLB_PARENT_RELAY='1')
+    seeker.reset()
+    p, _ = hook('session-start', I['session_start'], dict(env, CTRLB_RUN='run-s1', CTRLB_AGENT='lead', **parent_env))
+    ctx = out_of(p).get('additionalContext', '')
+    name = spawn.child_name('lead', PSID, '', SID)
+    check('child: joins the run under its own name and is told who started it, with the parent session to search',
+          'run id is run-s1' in ctx and f'agent id is {name}' in ctx and f'lead (session {PSID}) started you' in ctx
+          and f'search_sessions` with session_id {PSID}' in ctx and 'Do the work you were asked to do' in ctx, ctx[-900:])
+    check('child: is not told to take the next free task', 'claim(next=true)' not in ctx and 'no task and stop' not in ctx)
+    posts = [c for c in seeker.calls if c['path'].endswith('/runs/run-s1/posts')]
+    check('child: posts one note in the run saying who started it', len(posts) == 1 and posts[0]['body']['agent'] == name
+          and f'Started by lead (session {PSID})' in posts[0]['body']['text'], json.dumps(seeker.calls)[:400])
+    seeker.reset()
+    p, _ = hook('session-start', I['session_start_compact'], dict(env, CTRLB_RUN='run-s1', CTRLB_AGENT='lead', **parent_env))
+    check('child after compaction: the same name, no second note', f'agent id is {name}' in out_of(p).get('additionalContext', '')
+          and not [c for c in seeker.calls if c['path'].endswith('/posts')])
+    seeker.reset()
+    hook('upload', I['stop'], dict(env, CTRLB_RUN='run-s1', CTRLB_AGENT='lead', **parent_env))
+    rows = [r for r in seeker.rows if r.get('session_id') == SID]
+    check("child: every later hook uses the decision: its rows carry the run and its own name, not the parent's",
+          rows and all(r.get('run_id') == 'run-s1' and r.get('agent') == name for r in rows),
+          json.dumps([(r.get('run_id'), r.get('agent')) for r in rows[:3]]))
+
+    # a parent in no relay run: the child is told who started it and joins nothing
+    shutil.rmtree(home, ignore_errors=True)
+    seeker.reset()
+    quiet = dict(parent_env, CTRLB_PARENT_RUN=PSID, CTRLB_PARENT_AGENT=PSID, CTRLB_PARENT_RELAY='0')
+    p, _ = hook('session-start', I['session_start'], dict(env, **quiet))
+    ctx = out_of(p).get('additionalContext', '')
+    check('child of a parent in no run: told who started it, keeps its own run, nothing sent',
+          f'(session {PSID}) started you' in ctx and f'run id is {SID}' in ctx and 'Do the work you were asked' not in ctx
+          and not seeker.calls, ctx[-600:])
+    # the same parent, once it called a relay tool: the next child joins
+    shutil.rmtree(home, ignore_errors=True)
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    subprocess.run([sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib')) + '); '
+                    f'import common; common.SessionRecord({PSID!r}, {PSID!r}).update({PSID!r}, lambda r: r.update(relay=True))'],
+                   env=env, check=True)
+    seeker.reset()
+    p, _ = hook('session-start', I['session_start'], dict(env, **quiet))
+    ctx = out_of(p).get('additionalContext', '')
+    check('child of a parent that called a relay tool after it started: joins that run (the session id), no label prefix',
+          f'run id is {PSID}' in ctx and f'agent id is agent-{SID8}' in ctx, ctx[-600:])
+
+    # joinSpawned off: nothing changes
+    shutil.rmtree(home, ignore_errors=True)
+    seeker.reset()
+    p, _ = hook('session-start', I['session_start'], dict(env, CTRLB_JOIN_SPAWNED='0', CTRLB_RUN='run-s1', CTRLB_AGENT='lead', **parent_env))
+    ctx = out_of(p).get('additionalContext', '')
+    check('joinSpawned off: the child keeps the inherited name, is told nothing, writes nothing to CtrlB',
+          'agent id is lead' in ctx and 'started you' not in ctx and not [c for c in seeker.calls if c['method'] != 'GET']
+          and not os.path.exists(os.path.join(home, 'spawn')))
+
+    # the process record: a Codex parent (no environment file) found by the child's process tree. Linux only: the fake
+    # agents are links to Python, which on macOS starts again under its own name; real agent CLIs do not.
+    if os.path.isdir('/proc/self'):
+        shutil.rmtree(home, ignore_errors=True)
+        bindir = os.path.join(WORK, 'spawn-bin')
+        shutil.rmtree(bindir, ignore_errors=True)
+        os.makedirs(bindir)
+        for prog in ('codex', 'claude'):
+            os.symlink(sys.executable, os.path.join(bindir, prog))
+        cin = load('hooks/codex.json')['session_start']
+        cin = dict(cin, session_id=PSID, transcript_path='')
+        # driver.py runs as "codex" (the parent): its own session-start hook writes its process record, then it starts
+        # child.py as "claude" without CTRLB_RUN or CTRLB_AGENT; child.py runs its session-start hook and prints its output
+        driver, child = os.path.join(WORK, 'spawn-driver.py'), os.path.join(WORK, 'spawn-child.py')
+        with open(os.path.join(WORK, 'spawn-in.json'), 'w') as fh:
+            json.dump(dict(parent=cin, child=I['session_start'], codex_hook=CODEX_HOOK, hook=HOOK,
+                           claude=os.path.join(bindir, 'claude'), child_py=child), fh)
+        with open(driver, 'w') as fh:
+            fh.write(textwrap.dedent("""
+                import json, os, subprocess, sys
+                d = json.load(open(sys.argv[1]))
+                subprocess.run([sys.executable, '-I', d['codex_hook'], 'session-start'], input=json.dumps(d['parent']),
+                               text=True, capture_output=True)
+                env = {k: v for k, v in os.environ.items() if k not in ('CTRLB_RUN', 'CTRLB_AGENT')}
+                out = subprocess.run([d['claude'], '-I', d['child_py'], sys.argv[1]], text=True, capture_output=True, env=env)
+                sys.stdout.write(out.stdout)
+                sys.stderr.write(out.stderr)
+            """))
+        with open(child, 'w') as fh:
+            fh.write(textwrap.dedent("""
+                import json, subprocess, sys
+                d = json.load(open(sys.argv[1]))
+                p = subprocess.run([sys.executable, '-I', d['hook'], 'session-start'], input=json.dumps(d['child']),
+                                   text=True, capture_output=True)
+                sys.stdout.write(p.stdout)
+            """))
+        seeker.reset()
+        p = subprocess.run([os.path.join(bindir, 'codex'), '-I', driver, os.path.join(WORK, 'spawn-in.json')],
+                           capture_output=True, text=True, timeout=60, env=dict(env, CTRLB_RUN='run-s2', CTRLB_AGENT='lead'))
+        ctx = out_of(subprocess.CompletedProcess([], 0, p.stdout.strip(), '')).get('additionalContext', '')
+        check('process record: a child of a Codex parent finds it with no variables, joins its run as lead.claude-<id>',
+              'run id is run-s2' in ctx and f'agent id is lead.claude-{SID8}' in ctx and f'lead (session {PSID}) started you' in ctx,
+              (ctx or p.stdout + p.stderr)[-600:])
+        j = json.load(open(os.path.join(home, 'spawn', 'sessions', SID + '.json')))
+        check('process record: the decision is kept, found by process', j.get('how') == 'process' and j.get('parent') == PSID, json.dumps(j))
+    ps_line = '  4242 Sun Nov  2 05:01:14 2026     /opt/homebrew/bin/codex exec "fix it"\n'
+    with mock.patch.object(spawn.os.path, 'isdir', lambda d: False), \
+            mock.patch('builtins.open', side_effect=FileNotFoundError), \
+            mock.patch.object(spawn.subprocess, 'run', lambda *a, **k: subprocess.CompletedProcess(a, 0, ps_line, '')):
+        got = spawn._proc(5000)
+    check('process lookup without /proc (macOS): ps gives the parent, the program and the start time',
+          got == (4242, 'codex', 'Sun Nov  2 05:01:14 2026'), repr(got))
+    got = []
+    for line in ('  4242 Sun Nov  2 05:01:14 2026     -zsh\n', '  4242 Sun Nov  2 05:01:14 2026     /bin/sh -c python3 -I hook.py\n'):
+        with mock.patch.object(spawn.os.path, 'isdir', lambda d: False), \
+                mock.patch('builtins.open', side_effect=FileNotFoundError), \
+                mock.patch.object(spawn.subprocess, 'run', lambda *a, _l=line, **k: subprocess.CompletedProcess(a, 0, _l, '')):
+            got.append(spawn._proc(5000))
+    check('process lookup without /proc (macOS): a login shell and /bin/sh are named as shells',
+          [g[1] for g in got] == ['zsh', 'sh'], repr(got))
+    ptree = {10: (20, 'python3', 'H'), 20: (30, 'sh', 'SH'), 30: (40, 'codex', 'C'), 40: (1, 'zsh', 'Z')}
+    with mock.patch.object(spawn, '_proc', lambda pid: ptree.get(pid)):
+        ap = spawn.agent_process(10)
+    check('own agent process: codex -> sh -> hook finds codex', ap == (30, 'codex', 'C'), repr(ap))
+    codex_parent_rollout = os.path.join(WORK, 'spawn-codex-parent.jsonl')
+    with open(codex_parent_rollout, 'w') as fh:
+        fh.write(json.dumps(dict(type='event_msg', payload=dict(type='item_completed', item=dict(
+            type='McpToolCall', server='ctrlb', tool='claim', arguments=dict(run_id='review', agent='lead'))))) + '\n')
+    ctree = {100: (200, 'claude', 'S1'), 200: (300, 'codex', 'S2'), 300: (1, 'zsh', 'S3')}
+    with mock.patch.object(spawn, '_proc', lambda pid: ctree.get(pid)):
+        spawn._write_json(spawn._record_path(200), dict(session=PSID, run=PSID, agent='', relay=False, start='S2',
+                                                        program='codex', transcript=codex_parent_rollout))
+        fp = spawn.find_parent((100, 'claude', 'S1'), SID, env={})
+    os.remove(spawn._record_path(200))
+    check("a Codex parent that called a relay tool (seen in its rollout) is in a run; its children join the parent's own "
+          'run, not a run the call named', fp and fp['relay'] and fp['run'] == PSID and fp['agent'] == '', json.dumps(fp))
+    spawn._write_json(spawn._session_path('root-x'), dict(parent=PSID, parent_agent='lead', run='run-L', agent='lead.codex-1234',
+                                                          joined=True, renamed=False))
+    spawn.link('thread-y', 'root-x')
+    lc = {'run': '', 'agent': '', 'join_spawned': True}
+    spawn.apply(lc, 'thread-y')
+    check("Codex subagent thread: every later hook reads its root session's run and agent name",
+          lc['run'] == 'run-L' and lc['agent'] == 'lead.codex-1234' and spawn.joined('thread-y').get('root') == 'root-x', json.dumps(lc))
+    tree = {100: (200, 'claude', 'S1'), 200: (300, 'codex', 'S2'), 300: (1, 'zsh', 'S3')}
+    with open(spawn._record_path(200), 'w') as fh:
+        json.dump(dict(session=PSID, run='run-s3', agent='lead', relay=True, start='OLD'), fh)
+    with mock.patch.object(spawn, '_proc', lambda pid: tree.get(pid)):
+        stale = spawn.find_parent((100, 'claude', 'S1'), SID, env={})
+        with open(spawn._record_path(200), 'w') as fh:
+            json.dump(dict(session=PSID, run='run-s3', agent='lead', relay=True, start='S2'), fh)
+        found = spawn.find_parent((100, 'claude', 'S1'), SID, env={})
+        own = spawn.find_parent((100, 'claude', 'S1'), PSID, env={})
+    os.remove(spawn._record_path(200))
+    check('process record: one whose start time does not match its process (a reused pid) is ignored; a match is found; '
+          'a record of the session itself is not its parent', stale is None and found and found['run'] == 'run-s3'
+          and found['how'] == 'process' and own is None, json.dumps([stale, found, own]))
+    p = subprocess.run([sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib'))
+                        + '); import spawn; print(spawn.agent_process())'], capture_output=True, text=True, env=env)
+    check('own agent process: a hook run by another program (not an agent or a shell under one) has none',
+          p.stdout.strip() == 'None', p.stdout + p.stderr[-200:])
+
+    # a session with no run that registers a task is in a relay run from then on: its subagents get the whole rule
+    TSID = '7a7a7a7a-0000-4000-8000-0000000000cc'
+    p, _ = hook('subagent-start', dict(I['subagent_start'], session_id=TSID), env)
+    before = out_of(p).get('additionalContext', '')
+    hook('post-tool', dict(session_id=TSID, transcript_path=main, cwd='/work/dash', hook_event_name='PostToolUse',
+                           tool_name='mcp__plugin_ctrlb-agent_ctrlb__task',
+                           tool_input=dict(run_id=TSID, agent=TSID, name='task 01 parser', text='fix it', paths=['src/p.py']),
+                           tool_response=[dict(type='text', text='{"ok": true}')]), env)
+    p, _ = hook('subagent-start', dict(I['subagent_start'], session_id=TSID), env)
+    after = out_of(p).get('additionalContext', '')
+    seeker.reset()
+    seeker.state['check'] = 'allow'
+    hook('pre-tool', dict(I['pre_tool_edit'], session_id=TSID), env)
+    edit_check = [c for c in seeker.calls if c['path'].endswith('/check')]
+    check('a session with no run that registered a task: its later hooks check edits in its own run',
+          len(edit_check) == 1 and edit_check[0]['path'].endswith(f'/runs/{TSID}/check')
+          and edit_check[0]['body'].get('agent') == TSID, json.dumps(seeker.calls)[:300])
+    check('a session with no run: its subagent gets the short rule; after a task call, the whole rule in its own run',
+          'no Relay tasks are waiting' in before and 'claim(next=true)' not in before
+          and 'claim(next=true)' in after and f'run id is {TSID}' in after, after[-300:])
+    hooks_json = open(os.path.join(ROOT, 'plugin', 'hooks', 'hooks.json')).read()
+    post_groups = [re.compile(g['matcher']) for g in json.loads(hooks_json)['hooks']['PostToolUse']]
+    runs_after = lambda t: any(m.search(t) for m in post_groups)
+    should = [p + n for p in ('mcp__ctrlb__', 'mcp__plugin_ctrlb-agent_ctrlb__')
+              for n in ('post', 'claim', 'release', 'handoff', 'done', 'task', 'brief', 'ask', 'answer', 'contract')]
+    should_not = [p + n for p in ('mcp__ctrlb__', 'mcp__plugin_ctrlb-agent_ctrlb__')
+                  for n in ('tasks', 'briefs', 'contracts', 'peers', 'search_sessions')]
+    check('hooks.json: the post-tool hook runs after every relay tool that writes to a run, and not after tasks, briefs, '
+          'contracts or the read tools (matchers read as regular expressions)',
+          all(runs_after(t) for t in should) and not any(runs_after(t) for t in should_not),
+          json.dumps([t for t in should if not runs_after(t)] + [t for t in should_not if runs_after(t)]))
+
+    # spawnIdleMinutes: the watchdog stops a process whose transcript does not change, and not one whose transcript does
+    tr = os.path.join(WORK, 'spawn-transcript.jsonl')
+    open(tr, 'w').close()
+    victim = subprocess.Popen(['sleep', '60'])
+    start = spawn._proc(victim.pid)[2]
+    t0 = time.monotonic()
+    stop_touch = time.monotonic() + 3
+    th = threading.Thread(target=spawn._watcher, args=(dict(pid=victim.pid, start=start, transcript=tr, minutes=1.5 / 60), 0.2, 1))
+    th.start()
+    while time.monotonic() < stop_touch:
+        os.utime(tr)
+        time.sleep(0.3)
+    alive_while_busy = victim.poll() is None
+    try:
+        victim.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        victim.kill()
+    th.join(5)
+    check('spawnIdleMinutes: alive while its transcript changes; stopped (SIGTERM) once it stops changing',
+          alive_while_busy and victim.returncode == -signal.SIGTERM and time.monotonic() - t0 < 9, f'{victim.returncode}')
+    resumed = subprocess.Popen(['sleep', '60'])
+    notes = []
+
+    def note_then_work(*a, **k):      # the first note takes long enough for a tool to finish: the transcript changes
+        notes.append(time.monotonic())
+        if len(notes) == 1:
+            os.utime(tr)
+    try:
+        rstart = spawn._proc(resumed.pid)[2]
+        with mock.patch.object(spawn.common, 'post_note', note_then_work), \
+                mock.patch.object(spawn.common, 'config', lambda: {'off': False}):
+            th = threading.Thread(target=spawn._watcher, args=(dict(pid=resumed.pid, start=rstart, transcript=tr, minutes=1 / 60,
+                                                                    joined=True, run='run-s1', agent='lead.codex-1'), 0.2, 1))
+            th.start()
+            while len(notes) < 1 and th.is_alive():
+                time.sleep(0.05)
+            time.sleep(0.3)
+            alive_after_first = resumed.poll() is None
+            try:
+                resumed.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            th.join(5)
+        check('spawnIdleMinutes: a transcript that changes while the note is posted means the worker is working: no '
+              'signal then; stopped after a later idle spell',
+              alive_after_first and len(notes) == 2 and resumed.returncode == -signal.SIGTERM, f'{alive_after_first} {len(notes)} {resumed.returncode}')
+    finally:
+        if resumed.poll() is None:
+            resumed.kill()
+            resumed.wait()
+    other = subprocess.Popen(['sleep', '60'])
+    try:
+        ostart = spawn._proc(other.pid)[2]
+        spawn._write_json(spawn._record_path(other.pid), dict(session='new-session-after-clear', start=ostart))
+        th = threading.Thread(target=spawn._watcher, args=(dict(pid=other.pid, start=ostart, transcript=tr, minutes=0.5 / 60,
+                                                                sid='watched-session'), 0.2, 1))
+        th.start()
+        th.join(8)
+        cleared = other.poll() is None and not th.is_alive()
+        try:
+            spawn._signal(other.pid, 'NOT-ITS-START', None, signal.SIGTERM)
+            refused = False
+        except ProcessLookupError:
+            refused = True
+        time.sleep(0.2)
+        check('spawnIdleMinutes: the watchdog ends without a signal when the process runs another session (/clear); '
+              'without a pidfd a signal goes only to the process with the watched start time',
+              cleared and refused and other.poll() is None, f'{cleared} {refused} {other.poll()}')
+    finally:
+        other.kill()
+        other.wait()
+        try:
+            os.remove(spawn._record_path(other.pid))
+        except OSError:
+            pass
+    check('setting: joinSpawned on by default; spawnIdleMinutes 0 by default and read as minutes',
+          json.loads(subprocess.run([sys.executable, '-I', '-c', 'import sys, json; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib'))
+                                     + '); import common; c = common.config(); print(json.dumps([c["join_spawned"], c["spawn_idle_minutes"]]))'],
+                                    capture_output=True, text=True, env=env).stdout) == [True, 0]
+          and json.loads(subprocess.run([sys.executable, '-I', '-c', 'import sys, json; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib'))
+                                         + '); import common; c = common.config(); print(json.dumps([c["join_spawned"], c["spawn_idle_minutes"]]))'],
+                                        capture_output=True, text=True,
+                                        env=dict(env, CTRLB_JOIN_SPAWNED='off', CTRLB_SPAWN_IDLE_MINUTES='30')).stdout) == [False, 30])
+
+    doc = open(os.path.join(ROOT, 'docs', 'relay-hooks.md')).read()
+    check('docs: relay-hooks.md documents joinSpawned, spawnIdleMinutes and how the parent is found',
+          'joinSpawned' in doc and 'CTRLB_JOIN_SPAWNED' in doc and 'spawnIdleMinutes' in doc and 'CLAUDE_ENV_FILE' in doc
+          and 'process record' in doc)
+
+
 def test_codex_install():
     if not can_validate_toml():
         print('SKIP Codex installer integration (needs Python 3.11+ or codex)')
@@ -2351,7 +3090,7 @@ def test_round6_hooks(seeker):
           json.dumps(o)[:200])
     hk = load('../../plugin/hooks/hooks.json')['hooks']
     check('hooks.json: PreToolUse on the done tool, PostToolUse on edits and post, PostToolUseFailure on Bash',
-          len(hk['PreToolUse']) == 3 and hk['PreToolUse'][1]['matcher'] == 'mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'
+          len(hk['PreToolUse']) == 4 and hk['PreToolUse'][1]['matcher'] == 'mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'
           and hk['PostToolUse'][2]['matcher'].startswith('Edit|Write|MultiEdit|NotebookEdit|mcp__ctrlb__post')
           and hk['PostToolUseFailure'][0]['matcher'] == 'Bash' and hk['SessionEnd'][0]['hooks'][0]['command'].endswith('session-end'))
     # Codex: the same session-end handoff in a relay run, with what it can say.
@@ -4847,6 +5586,8 @@ def main():
     run_test(test_redaction_linear_budget)
     run_test(test_witness_docs)
     run_test(test_pre_tool, seeker)
+    run_test(test_model_call_guard, seeker)
+    run_test(test_spawned_agents, seeker)
     run_test(test_keys)
     run_test(test_edit_keys_across_harnesses, seeker)
     run_test(test_docs)

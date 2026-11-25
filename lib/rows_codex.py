@@ -20,7 +20,7 @@ A rollout is ~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<time>-<thread id>.jsonl
 session_meta gives the ids, cwd and git branch; turn_context updates cwd. A rollout whose session_meta names a
 parent_thread_id is a subagent: parent_session is that id, agent_id its own thread id, and it joins its parent's
 run. Upload is incremental by byte offset with FileState, through rows_claude.upload_file."""
-import functools, glob, json, os, re, shlex
+import functools, glob, hashlib, json, os, re, shlex
 import common, rows_claude
 from paths import edit_paths as normalise_edit_paths
 from rows_claude import micros
@@ -129,6 +129,18 @@ def session_run(cfg, sid, parent='', path=''):
     known thread; cycles stop without looping. An explicit run always wins."""
     if cfg.get('run') or not parent:
         return common.run_id(cfg, sid, parent)
+    return root_session(sid, parent, path)
+
+
+def root_session(sid, parent='', path=''):
+    """The session id at the top of a thread's ancestor chain (sid itself when it has no parent)."""
+    return root_rollout(sid, parent, path)[0]
+
+
+def root_rollout(sid, parent='', path=''):
+    """(session id, rollout file) at the top of a thread's ancestor chain; the file is path for a thread with no
+    parent, and '' when the root's file is not found."""
+    file = path
     seen = {sid}
     while parent and parent not in seen and len(seen) < 64:
         seen.add(parent)
@@ -137,12 +149,90 @@ def session_run(cfg, sid, parent='', path=''):
         # may be used here; normal Codex filenames are found by their UUID suffix, without reading other files.
         file = os.path.join(os.path.dirname(path), sid + '.jsonl') if path and re.fullmatch(r'[\w-]+', sid) else ''
         if not file or not os.path.isfile(file):
-            file = _session_files(os.path.join(codex_home(), 'sessions')).get(sid)
+            file = _session_files(os.path.join(codex_home(), 'sessions')).get(sid) or ''
         if file:
             meta = read_meta(file)
             if str(meta.get('id') or meta.get('session_id') or '') == sid:
                 parent = str(meta.get('parent_thread_id') or '')
-    return sid
+    return sid, file
+
+
+RELAY_WRITE_TOOLS = ('post', 'claim', 'handoff', 'release', 'done', 'task', 'brief', 'ask', 'answer', 'contract')
+
+
+def relay_call(path):
+    """(run_id, agent) of the last ctrlb relay tool call that writes to a run, from a Codex rollout's McpToolCall
+    items (server ctrlb), or None. Codex has no hook after a tool call, so this is how a Codex session is known to be in
+    a run. A rollout only grows: the part read is kept under <CTRLB_HOME>/spawn/rollouts (its offset, its inode and
+    the 64 bytes before the offset, so a replaced or rewritten file is read again from the start), and each call reads
+    only what was added since the last one."""
+    try:
+        st = os.stat(path)
+    except (OSError, TypeError, ValueError):
+        return None
+    keep, c, last = '', {}, None
+    try:      # without the kept part (a folder that cannot be made, a bad file) the whole rollout is read
+        d = common.private_dir(os.path.join(common.HOME, 'spawn', 'rollouts'))
+        keep = os.path.join(d, hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:32] + '.json')
+        with open(keep) as fh:
+            c = json.load(fh)
+    except Exception:
+        pass
+    try:
+        with open(path, 'rb') as fh:
+            ok = (isinstance(c, dict) and c.get('ino') == st.st_ino and isinstance(c.get('offset'), int)
+                  and 0 <= c['offset'] <= st.st_size)
+            if ok and c['offset']:       # the bytes just before the offset are still the ones read (not a rewritten file)
+                fh.seek(max(0, c['offset'] - 64))
+                ok = fh.read(c['offset'] - max(0, c['offset'] - 64)).hex() == c.get('tail')
+            if not ok:
+                c = dict(ino=st.st_ino, offset=0, last=None, tail='')
+            last = c.get('last')
+            if c['offset'] < st.st_size:
+                fh.seek(c['offset'])
+                start = c['offset']
+                while True:
+                    line = fh.readline()
+                    if not line.endswith(b'\n'):
+                        break           # a line still being written is read next time
+                    c['offset'] += len(line)
+                    if b'McpToolCall' in line:
+                        last = _relay_item(line) or last
+                if c['offset'] > start:
+                    fh.seek(max(0, c['offset'] - 64))
+                    c['tail'] = fh.read(c['offset'] - max(0, c['offset'] - 64)).hex()
+                c['last'] = last
+                if keep:
+                    try:
+                        tmp = f'{keep}.{os.getpid()}.tmp'
+                        with common.private_open(tmp) as out:
+                            json.dump(c, out)
+                        os.replace(tmp, keep)
+                    except OSError:
+                        pass
+    except TimeoutError:      # the hook's time ran out: what was found so far, the kept part included
+        return tuple(last) if last else None
+    except OSError:
+        return None
+    return tuple(last) if last else None
+
+
+def _relay_item(line):
+    try:
+        item = (json.loads(line).get('payload') or {}).get('item') or {}
+    except (ValueError, AttributeError):
+        return None
+    if (not isinstance(item, dict) or item.get('type') != 'McpToolCall' or item.get('server') != 'ctrlb'
+            or item.get('tool') not in RELAY_WRITE_TOOLS):
+        return None
+    args = item.get('arguments')
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            args = {}
+    args = args if isinstance(args, dict) else {}
+    return [str(args.get('run_id') or ''), str(args.get('agent') or '')]
 
 
 def ids_for_file(cfg, path):

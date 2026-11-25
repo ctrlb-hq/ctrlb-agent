@@ -93,7 +93,7 @@ If your organization already installs the plugin through managed settings, remov
 
 ## 3. Runs
 
-A session is its own run, and its subagents join it. To put several sessions in one run, give them the same `CTRLB_RUN`:
+A session is its own run, and its subagents join it. A session with no run set is not told to claim a task: its context says no Relay tasks are waiting and to do the work it was asked to do. The whole Relay rule (claim the next free task, stop when none is free) is given to a session in a run: one with `CTRLB_RUN`, or one that has called a ctrlb relay tool. A session that joined the run of the agent that started it gets a shorter rule instead: do the work it was asked to do, claim the task its instructions name or else the files it will edit, and post one note when it finishes. To put several sessions in one run, give them the same `CTRLB_RUN`:
 
 ```sh
 CTRLB_RUN=nightly-refactor-1 claude -p "Fix the failing tests in src/parser"
@@ -146,6 +146,17 @@ Before an edit, the hook sends the file path, relative to the session's working 
 The check gives up after two seconds. If CtrlB does not answer, the edit goes ahead and the error is written to `~/.ctrlb/hooks.log`. Claims are advisory unless the workspace turns on `enforce`. `CTRLB_ENFORCE=off` skips the check on one machine.
 
 In a relay run the plugin also registers a task for each sub-agent it spawns, keeps small text files from the session's scratch directories in the record, starts each session with the run's open tasks, contracts and handoffs, and claims shared files such as `REGISTRY.md` around each edit (`CTRLB_AUTO_SLOTS`, `CTRLB_SCRATCH_DIR`). See [Relay hooks](relay-hooks.md).
+
+### Agents started from a shell
+
+When an agent starts another agent from a shell command (`codex exec`, `claude -p`, or a script that runs one), the new agent finds the agent that started it when its own session starts. If that agent is in a relay run (it has `CTRLB_RUN`, or it has called a ctrlb relay tool), the new one joins the same run under its own agent name and posts a note saying who started it, so it shows in the run view with its own holds and stalls. Its context names the parent's session, so it can search what the parent already did. Nothing reads the command, so this works through scripts, `xargs` and `make` too. On by default; `CTRLB_JOIN_SPAWNED=0` turns it off. In local mode the new agent also needs `CTRLB_RUN` in its environment, which it inherits from its parent unless the command removes it.
+
+Two optional settings:
+
+- `CTRLB_SPAWN_IDLE_MINUTES=30` (or `"spawnIdleMinutes": 30`) stops a started agent whose transcript has not changed for 30 minutes. It posts a note in the run, then sends SIGTERM, so the agent hands back its holds.
+- `CTRLB_GUARD_MODEL_CALLS=1` (or `"guardModelCalls": true`) refuses a shell command that starts `codex exec`, `codex review` or `claude -p` without `timeout` in front, for example `timeout 1200 codex exec "Review the diff in src/parser"`.
+
+See [Relay hooks](relay-hooks.md#an-agent-started-from-a-shell-joins-its-parents-run) for how the parent is found and what is not seen.
 
 ### When the session ends, and when the agent calls done
 
