@@ -34,7 +34,7 @@ import base64, fcntl, hashlib, ipaddress, json, os, re, shutil, socket, subproce
 import model_call_guard
 from redact import redact
 
-VERSION = '0.2.2'
+VERSION = '0.3.0'
 HOME = os.environ.get('CTRLB_HOME') or os.path.expanduser('~/.ctrlb')
 NAME_RE = re.compile(r'^[A-Za-z0-9_]{1,64}$')
 DEFAULT_DATASET = 'agent_sessions'
