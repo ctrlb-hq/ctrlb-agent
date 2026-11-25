@@ -47,12 +47,28 @@ def watch_dir(env=None):
 
 
 def _sub(name):
-    """<watch dir>/<name>, made (mode 0700, the watch dir too) when missing."""
+    """<watch dir>/<name>, made (mode 0700, the watch dir too) when missing; a directory made here is synced into
+    its parent."""
     top = watch_dir()
-    os.makedirs(top, mode=0o700, exist_ok=True)
     d = os.path.join(top, name)
+    if os.path.isdir(d):
+        return d
+    made = not os.path.isdir(top)
+    os.makedirs(top, mode=0o700, exist_ok=True)
+    if made:
+        _sync_dir(os.path.dirname(top))
     os.makedirs(d, mode=0o700, exist_ok=True)
+    _sync_dir(top)
     return d
+
+
+def _sync_dir(path):
+    """fsync a directory, so a name created or renamed in it survives a power failure."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def marker_path(info):
@@ -150,6 +166,7 @@ def write_result(info, claim):
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, path)
+            _sync_dir(os.path.dirname(path))     # the rename itself, or a power failure can bring back the old result
             common.log(f"launch {info['launch']}: claim of {info['task']!r} {claim}")
             return claim
         finally:

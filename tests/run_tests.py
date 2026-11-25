@@ -5901,6 +5901,44 @@ def test_launch_result_codex(seeker):
     check('codex: a compaction (PreCompact) of the worker writes the result too', result(L3) == '{"claim":"held"}', str(result(L3)))
 
 
+def test_launch_result_synced():
+    """The result file's rename is synced in its directory (and a directory made for it in its parent), so a power
+    failure cannot bring back a replaced refused result."""
+    import launch
+    top = os.path.join(WORK, 'launch-sync')
+    shutil.rmtree(top, ignore_errors=True)
+    os.makedirs(top)
+    watch = os.path.join(top, 'watch')
+    info = dict(launch='5ec5ec5ec5ec0001', task=LAUNCH_TASK, mode='claim', run='run-w')
+    events = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd):
+        st = os.fstat(fd)
+        events.append(('fsync-dir' if stat.S_ISDIR(st.st_mode) else 'fsync-file', st.st_ino))
+        return real_fsync(fd)
+
+    def replace(a, b):
+        events.append(('replace', os.path.basename(b)))
+        return real_replace(a, b)
+    with mock.patch.dict(os.environ, {'CTRLB_WATCH_DIR': watch}), mock.patch.object(launch.common, 'log'):
+        open(launch.marker_path(info), 'w').write('sid')
+        with mock.patch('os.fsync', fsync), mock.patch('os.replace', replace):
+            launch.write_result(info, 'refused')
+            refused = list(events)
+            events.clear()
+            launch.write_result(info, 'held')
+    res_ino = os.stat(os.path.join(watch, 'result')).st_ino
+    watch_ino = os.stat(watch).st_ino
+    name = info['launch'] + '.json'
+    for label, ev in (('refused', refused), ('held', events)):
+        at = ev.index(('replace', name)) if ('replace', name) in ev else -1
+        check(f'launch: the {label} result rename is followed by an fsync of the result directory',
+              at >= 0 and ('fsync-dir', res_ino) in ev[at + 1:], str(ev))
+    check('launch: the result directory made for the first result is synced in the watch directory',
+          ('fsync-dir', watch_ino) in refused, str(refused))
+    check('launch: the held result replaced refused', open(os.path.join(watch, 'result', name)).read() == '{"claim":"held"}')
+
 def main():
     seeker = Seeker()
     run_test(test_runner_failure_reporting)
@@ -5930,6 +5968,7 @@ def main():
     run_test(test_launch_rules, seeker)
     run_test(test_launch_result_claude, seeker)
     run_test(test_launch_result_codex, seeker)
+    run_test(test_launch_result_synced)
     run_test(test_pre_tool, seeker)
     run_test(test_model_call_guard, seeker)
     run_test(test_spawned_agents, seeker)
