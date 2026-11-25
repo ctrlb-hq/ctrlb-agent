@@ -15,7 +15,7 @@ ctrlb relay tool called in that session), and posts one note saying who started 
 CTRLB_RUN and its own CTRLB_AGENT is left as it is. A child that inherited its parent's CTRLB_AGENT gets a name of its
 own. joinSpawned (CTRLB_JOIN_SPAWNED) turns this off. spawnIdleMinutes (CTRLB_SPAWN_IDLE_MINUTES) stops a started agent
 whose transcript has not changed for that many minutes (off by default)."""
-import json, os, re, shlex, signal, subprocess, sys, time
+import errno, json, os, re, shlex, signal, subprocess, sys, time
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -405,11 +405,47 @@ def _signal(pid, start, fd, sig):
         raise ProcessLookupError(pid)
 
 
-def _last_change(path, since):
-    try:
-        return max(since, os.path.getmtime(path))
-    except OSError:
-        return since
+class _Activity:
+    """The transcript seen by one stat per turn. The time of its last change is on the monotonic clock; its mtime is
+    wall time, so it is read only to see that it changed: a wall clock set forward or back neither stops a working
+    agent nor keeps an idle one. A stat that fails changes nothing."""
+
+    def __init__(self, path):
+        self.path = path
+        self.seen = self.fail = self.fail_since = None
+        self.changed = time.monotonic()      # the last change seen (the watch's start until the first one)
+        self.look()
+
+    def _stat(self):
+        """(fingerprint, None), or (None, 'missing') when the file is not there, or (None, 'error')."""
+        try:
+            st = os.stat(self.path)
+            return (st.st_mtime_ns, st.st_size, st.st_ino), None
+        except OSError as e:
+            return None, 'missing' if e.errno == errno.ENOENT else 'error'
+        except ValueError:
+            return None, 'error'
+
+    def look(self):
+        """One stat: ('ok', seconds since the last change), or ('missing' or 'error', seconds the stat has failed in
+        that way on every look). A failed stat changes nothing: the last fingerprint and change time are kept."""
+        stamp, fail = self._stat()
+        now = time.monotonic()
+        if fail:
+            if fail != self.fail:
+                self.fail, self.fail_since = fail, now
+            return fail, now - self.fail_since
+        self.fail = self.fail_since = None
+        if stamp != self.seen:
+            self.seen, self.changed = stamp, now
+        return 'ok', now - self.changed
+
+
+def _due(look, limit):
+    """Stop: the latest stat works and shows no change for the whole limit, or the transcript has been missing for
+    the whole limit. A stat that fails in another way never stops the agent."""
+    state, secs = look
+    return state in ('ok', 'missing') and secs >= limit
 
 
 def _watcher(payload, poll_s=WATCH_POLL_S, grace_s=KILL_GRACE_S):
@@ -417,52 +453,79 @@ def _watcher(payload, poll_s=WATCH_POLL_S, grace_s=KILL_GRACE_S):
     hands its holds back), then SIGKILL after grace_s. Ends when the process ends, or when it starts another session."""
     pid, start, limit = int(payload['pid']), payload.get('start'), float(payload['minutes']) * 60
     sid = payload.get('sid') or ''
-    began = time.time()
     fd = _pidfd(pid)
     if not _alive(pid, start):      # the pid was taken by another process before the handle was opened
         return
     try:
-        _watch_loop(payload, pid, start, sid, limit, began, fd, poll_s, grace_s)
+        _watch_loop(payload, pid, start, sid, limit, _Activity(payload.get('transcript') or ''), fd, poll_s, grace_s)
     finally:
         if fd is not None:
             os.close(fd)
 
 
-def _watch_loop(payload, pid, start, sid, limit, began, fd, poll_s, grace_s):
+def _watch_loop(payload, pid, start, sid, limit, activity, fd, poll_s, grace_s):
+    """One turn: one look at the transcript, then one sleep. A turn whose stat fails changes nothing and signals
+    nothing (a stat that keeps failing is logged once and watched on). A stop takes two turns: the turn that finds the
+    agent due logs it and posts the run note (both can block for seconds), and the look of a later turn, taken after
+    them and right before the signal, decides. SIGTERM only when that look is still due: a good stat with no change
+    for the whole limit, or the transcript still missing. A change cancels the stop; a failed stat leaves it pending.
+    The run note is posted once per stop: again only after the transcript changed."""
+    noted = logged = pending = False
     while _alive(pid, start) and _same_session(pid, sid):
-        idle = time.time() - _last_change(payload.get('transcript') or '', began)
-        if idle >= limit:
-            common.log(f"spawn watchdog {payload.get('sid')}: no change for {int(idle)}s, stopping pid {pid}")
-            if payload.get('joined') and payload.get('run') and payload.get('agent'):
+        look = activity.look()
+        state, secs = look
+        due = _due(look, limit)
+        if state == 'error':
+            if secs >= limit and not logged:
+                common.log(f"spawn watchdog {payload.get('sid')}: the transcript's stat has failed for {int(secs)}s; "
+                           f"not stopping pid {pid}, still watching")
+                logged = True
+        else:
+            logged = False
+            if state == 'ok' and not due:
+                if pending:
+                    common.log(f"spawn watchdog {payload.get('sid')}: transcript changed, not stopping pid {pid}")
+                noted = pending = False
+        if pending and due:
+            _stop(pid, start, sid, fd, grace_s)
+            return
+        if due:
+            what = 'no change' if state == 'ok' else 'transcript missing'
+            common.log(f"spawn watchdog {payload.get('sid')}: {what} for {int(secs)}s, stopping pid {pid}")
+            if not noted and payload.get('joined') and payload.get('run') and payload.get('agent'):
+                noted = True
                 try:
                     cfg = common.config()
                     if not cfg['off']:
                         common.post_note(cfg, payload['run'], payload['agent'],
-                                         f"Stopped by spawnIdleMinutes: no progress for {int(idle // 60)} minutes.",
+                                         f"Stopped by spawnIdleMinutes: no progress for {int(secs // 60)} minutes.",
                                          timeout=5)
                 except Exception as e:
                     common.log(f"spawn watchdog note: {type(e).__name__}: {str(e)[:200]}")
-            if not _same_session(pid, sid):
-                return
-            # The note can take seconds; a tool that finished meanwhile shows the worker is still working.
-            if time.time() - _last_change(payload.get('transcript') or '', began) < limit:
-                common.log(f"spawn watchdog {payload.get('sid')}: transcript changed, not stopping pid {pid}")
-                continue
-            try:
-                _signal(pid, start, fd, signal.SIGTERM)
-            except OSError:
-                return
-            end = time.time() + grace_s
-            while time.time() < end and _alive(pid, start):
-                time.sleep(1)
-            if not _same_session(pid, sid):
-                return
-            try:
-                _signal(pid, start, fd, signal.SIGKILL)
-            except OSError:
-                pass
-            return
-        time.sleep(min(poll_s, max(1.0, limit - idle)))
+            pending = True
+        if state == 'error':
+            time.sleep(poll_s)
+        elif pending:
+            time.sleep(min(poll_s, 1.0))       # the look before the signal comes soon after the note
+        else:
+            time.sleep(min(poll_s, max(1.0, limit - secs)))
+
+
+def _stop(pid, start, sid, fd, grace_s):
+    """SIGTERM, then SIGKILL after grace_s (monotonic) unless the process ended or runs another session."""
+    try:
+        _signal(pid, start, fd, signal.SIGTERM)
+    except OSError:
+        return
+    end = time.monotonic() + grace_s
+    while time.monotonic() < end and _alive(pid, start):
+        time.sleep(1)
+    if not _same_session(pid, sid):
+        return
+    try:
+        _signal(pid, start, fd, signal.SIGKILL)
+    except OSError:
+        pass
 
 
 if __name__ == '__main__':

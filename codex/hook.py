@@ -11,12 +11,14 @@ As described in docs/relay-hooks.md, session-start creates the run's scratch dir
 the record block, and a session started from another agent's shell finds that agent (lib/spawn.py: a process record,
 since Codex has no environment file). Codex gets no spawn registration, no artefact posting and
 no autoSlots: its hooks have no sub-agent tool input to read and no hook after a tool call, so a slot
-claimed before a patch could not be released after it."""
+claimed before a patch could not be released after it. A session started for one task (CTRLB_LAUNCH, lib/launch.py)
+gets the one-task rule or the descendant rule; its claim's result is read from its rollout at Stop, PreCompact and
+SessionEnd."""
 import json, os, signal, sys, time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
-import common, model_call_guard, relay_hooks, rows_codex, spawn  # noqa: E402
-from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, relay_text, start_context, spawned_text, decide, _deny  # noqa: E402
+import common, launch, model_call_guard, relay_hooks, rows_codex, spawn  # noqa: E402
+from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, relay_text, launch_text, start_context, spawned_text, decide, starters, _deny  # noqa: E402
 
 SYNC_S, ASYNC_S = 5, 90
 HANDOFF_S = 0.8
@@ -45,6 +47,26 @@ def session_end(cfg, inp, deadline=None):
         return None
     common.log(f"codex session-end handoff {run}/{agent}: handed={ans.get('handed')} released={ans.get('released')}")
     return ans
+
+
+def launch_result(cfg, inp):
+    """The worker of a launch (lib/launch.py): its claim of the named task, read from its own rollout (Codex has no
+    hook after a tool call), as the result file. Nothing for a subagent thread, another session or no launch. Returns
+    the claim written, or None."""
+    info = launch.current()
+    sid = inp.get('session_id') or ''
+    transcript = inp.get('transcript_path') or ''
+    if not info or not sid or not transcript or inp.get('agent_id') or common.relay_off(cfg):
+        return None
+    if rows_codex.read_meta(transcript).get('parent_thread_id') or not launch.is_worker(info, sid):
+        return None
+    run, agent = rows_codex.session_run(cfg, sid), rows_codex.agent_for(cfg, sid)
+    found = None
+    for args, answer in rows_codex.claim_calls(transcript, sid):
+        claim = launch.claim_outcome(info, args, answer, run, agent)
+        if claim == 'held' or claim and not found:
+            found = claim
+    return launch.write_result(info, found) if found else None
 
 
 def upload(cfg, paths, budget, event, sid):
@@ -99,7 +121,21 @@ def pre_tool(cfg, inp):
     run, parent = session_run(cfg, sid, inp.get('transcript_path'))
     sub = inp.get('agent_id') or ''
     agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid, parent)
-    return decide(cfg, run, agent, paths, inp.get('cwd') or '')
+    # Who started this agent is looked up only after CtrlB's check found a conflict, to choose the words (decide).
+    return decide(cfg, run, agent, paths, inp.get('cwd') or '',
+                  lambda: _starters(cfg, sid, run, parent, sub, inp.get('transcript_path') or ''))
+
+
+def _starters(cfg, sid, run, parent, sub, transcript):
+    """The agents that started this one: the session's own agent for a subagent in it; for a subagent thread, its
+    parent thread's agent, known only when that thread is the root (a deeper parent's name is not recorded); then
+    the spawn records (starters())."""
+    starter = ''
+    if sub:
+        starter = rows_codex.agent_for(cfg, sid, parent)
+    elif parent and rows_codex.root_session(sid, parent, transcript) == parent:
+        starter = rows_codex.agent_for(cfg, parent, '')
+    return starters(sid, run, starter)
 
 
 def pre_bash(cfg, inp):
@@ -161,11 +197,15 @@ def main():
             return
         agent = rows_codex.agent_for(cfg, sid, parent)
         scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
+        # started for one task: its worker, or another session of the same launch (a subagent thread never is the worker)
+        info = launch.current()
+        rule = launch_text(info, launch.role(info, sid, subagent=bool(parent)), run, agent, scratch) if info else ''
         if started.get('joined'):
-            text, block = head + spawned_text(started, run, agent, scratch), ''
+            text = head + (spawned_text(started, '', '', '') + '\n\n' + rule if rule else spawned_text(started, run, agent, scratch))
+            block = ''
         else:
             in_run = in_relay(cfg, run, agent, sid, inp.get('transcript_path'))
-            text = head + spawned_text(started, '', '', '') + '\n\n' + relay_text(in_run, run, agent, scratch)
+            text = head + spawned_text(started, '', '', '') + '\n\n' + (rule or relay_text(in_run, run, agent, scratch))
             block = ''
             if in_run:
                 try:      # a relay run's session starts with the record
@@ -182,18 +222,32 @@ def main():
         sub = inp.get('agent_id') or ''
         agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid)
         in_run = in_relay(cfg, run, agent, sid, inp.get('transcript_path'))
+        info = launch.current()      # a subagent is never a launch's worker: it gets the descendant rule
         out = start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid) + '\n\n'
-                      + relay_text(in_run, run, agent, common.scratch_dir(cfg, run)))
+                      + (launch_text(info, launch.DESCENDANT, run, agent, common.scratch_dir(cfg, run)) if info else
+                         relay_text(in_run, run, agent, common.scratch_dir(cfg, run))))
     elif mode == 'flush':
+        try:
+            launch_result(cfg, inp)
+        except Exception as e:
+            common.log(f"codex launch result: {type(e).__name__}: {str(e)[:200]}")
         upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], SYNC_S, event, sid)
     elif mode == 'session-end':
         deadline = time.monotonic() + SYNC_S
+        try:
+            launch_result(cfg, inp)
+        except Exception as e:
+            common.log(f"codex launch result: {type(e).__name__}: {str(e)[:200]}")
         try:
             session_end(cfg, inp, deadline)
         except Exception as e:
             common.log(f"codex session-end: {type(e).__name__}: {str(e)[:200]}")
         upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], max(0, deadline - time.monotonic()), event, sid)
     elif mode == 'upload':
+        try:      # Stop: the end of a turn, before a session end that a killed worker may never reach
+            launch_result(cfg, inp)
+        except Exception as e:
+            common.log(f"codex launch result: {type(e).__name__}: {str(e)[:200]}")
         upload(cfg, [inp.get('agent_transcript_path') or inp.get('transcript_path')], ASYNC_S, event, sid)
     elif mode == 'pre-tool':
         try:

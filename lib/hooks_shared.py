@@ -101,6 +101,46 @@ def relay_text(in_run, run, agent, scratch):
     return (RELAY if in_run else SOLO).format(run=run, agent=agent, scratch=scratch)
 
 
+# A session started for one named task (lib/launch.py): it works on that task only, in place of RELAY.
+ONE_TASK = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Pass run_id=\"{run}\" and agent=\"{agent}\" "
+            "to the ctrlb relay tools. You were started for one task: {task}. Work on that task only. First call "
+            "{call}. Its files come with it. If held is false, post one note that says why the claim was refused, "
+            "then stop: do not claim another task. {after}If the claim answers ask_about, ask the task's owner about "
+            "those before deciding them yourself. Work only while you hold the task. Claim any other file before you "
+            "edit it and release it when you are done with it. Run the task's test command (tasks and claim show it "
+            "as test); when it passes, call done on the task name with that command, its exit code and its last "
+            "output line as the evidence, and without next. When the task has no test command, give the check you "
+            "ran. Then stop. If you must leave the task before it is finished, use handoff. Put helper scripts and "
+            "binaries in the scratch directory {scratch}, not in /tmp.")
+# After a takeover: what the earlier holder did, before the first edit.
+TAKEOVER_READ = ("The task was stalled: after the takeover, before your first edit, read the task's evidence and notes "
+                 "(tasks, and history with the task name) and the earlier holder's steps (next_actions or "
+                 "fetch_records on its session). ")
+# Any other session of the same launch: a subagent of the worker, or an agent it started from its shell.
+DESCENDANT = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Pass run_id=\"{run}\" and "
+              "agent=\"{agent}\" to the ctrlb relay tools. You work for the agent that started you, which holds the "
+              "task {task} in this run: do the part of the work it asked of you. The files of that task come with it, "
+              "and that agent holds them: do not claim them. Edit only the files it asked you to edit. If an edit of "
+              "one of them is refused, tell that agent the change you want, and it makes it. A file that belongs to no "
+              "task is claimed by its path (claim with paths): claim it before you edit it and release it when you "
+              "finish. If a claim answers belongs_to_task for another task, stop and tell the agent that started you. "
+              "Do not claim, reopen or finish a task: the agent that started you does that. When you finish, tell it "
+              "what you did and the test you ran. Put helper scripts and binaries in the scratch directory {scratch}, "
+              "not in /tmp.")
+
+
+def launch_text(info, role, run, agent, scratch):
+    """The rule of a session started for one task: ONE_TASK for its worker, DESCENDANT for every other session of the
+    same launch. The task name is quoted as JSON, as it goes into the claim call."""
+    task = json.dumps(info['task'], ensure_ascii=False)
+    if role != 'worker':
+        return DESCENDANT.format(run=run, agent=agent, task=task, scratch=scratch)
+    takeover = info.get('mode') == 'takeover'
+    call = (f'claim(resource={task}, run_id="{run}", agent="{agent}"' + (', takeover=true' if takeover else '') + ')')
+    return ONE_TASK.format(run=run, agent=agent, task=task, call=call, after=TAKEOVER_READ if takeover else '',
+                           scratch=scratch)
+
+
 # A hold whose holder has stopped is taken over, not waited out.
 STALLED_HINT = ("If the holder has stopped, the hold shows as stalled (tasks lists stalled tasks); claim it with "
                 "takeover=true instead of waiting.")
@@ -134,12 +174,17 @@ def _lease(c):
         return ''
 
 
-def decide(cfg, run, agent, paths, cwd=''):
+def decide(cfg, run, agent, paths, cwd='', find_starters=None):
     """Post the paths an edit is about to touch to CtrlB's check and turn the answer into the hook
     output, or None for no output (allowed, mode off, or no conflict). Raises on any CtrlB error; the caller fails
     open. The paths are sent as paths.edit_paths gives them (relative to cwd, once per key), so CtrlB keys them as it
     keys claims and as it keys the paths column of the session rows. The tokens the agent's claims answered are sent
-    with them, so CtrlB can tell a hold of an earlier round of the file's task."""
+    with them, so CtrlB can tell a hold of an earlier round of the file's task.
+
+    find_starters: called with no arguments, it returns the agents that started this one, as recorded (starters()).
+    It runs only after CtrlB's check has found a conflict, and only to choose the words: whatever it does (any
+    exception, KeyboardInterrupt and SystemExit included) the edit is still refused or warned about, with the
+    ordinary text when it fails."""
     paths = normalise_edit_paths(paths, cwd or '')
     if not paths or not run or not agent:
         return None
@@ -161,6 +206,15 @@ def decide(cfg, run, agent, paths, cwd=''):
     said = '; '.join(_said(c) for c in conflicts)
     if reasons == {'held'}:
         holder = conflicts[0]['held_by']
+        if _all_held_by_starters(find_starters, conflicts):
+            # The agent that started this one holds the file (a task's file comes with the task): a claim is refused
+            # with belongs_to_task, so the change goes to that agent.
+            if mode == 'enforce' and res.get('allowed') is False:
+                return _deny(f"CtrlB Relay (run {run}): {said}. You work for {holder}: do not claim the file. Tell the "
+                             f"agent that started you the change you want, and it makes it.")
+            return context('PreToolUse', f"CtrlB Relay (run {run}): {said}. You work for {holder}: do not claim the "
+                                         f"file. Edit it only if the agent that started you asked you to; otherwise "
+                                         f"tell it the change you want, and it makes it.")
         if mode == 'enforce' and res.get('allowed') is False:
             reason = (f"CtrlB Relay (run {run}): {said}. Do not edit it. Call {call} and edit only if held is true; "
                       f"otherwise pick other work or call peers to see what {holder} is doing. {STALLED_HINT}")
@@ -174,6 +228,64 @@ def decide(cfg, run, agent, paths, cwd=''):
     if mode == 'enforce' and res.get('allowed') is False:
         return _deny(text)
     return context('PreToolUse', text)
+
+
+def _all_held_by_starters(find_starters, conflicts):
+    """Whether every conflict is held by an agent that started this one. False when there is no lookup, or it fails
+    in any way (BaseException: an interrupt here must not end the hook before it refuses)."""
+    if find_starters is None:
+        return False
+    try:
+        found = find_starters()
+        return isinstance(found, list) and all(c['held_by'] in found for c in conflicts)
+    except BaseException as e:
+        try:
+            common.log(f"starters: {type(e).__name__}: {str(e)[:200]}")
+        except BaseException:
+            pass
+        return False
+
+
+def starters(sid, run, parent_agent=''):
+    """The agents that started this one, nearest first, from what the plugin recorded, never from the shape of a
+    name: parent_agent (the agent of the session whose subagent this is, from the hook input), then each agent that
+    started a session from its shell (lib/spawn.py's record of the session, then of its parent). A record counts only
+    when it says the session joined its parent's run, and both its run and its parent's run are this run; a record
+    without parent_run, or with any field that is not what spawn.py writes, means no starter at all. Callers still
+    guard the call (decide): a starter only chooses the words of a refusal.
+
+    No age check: a record is the session's own. Its file is named by the session id, and spawn.py writes it once, at
+    the session's first start; every hook of that session id (after compaction or resume too) applies the same record
+    as the session's run and agent name (spawn.apply), so the run and name this check runs under come from that record
+    too. A new session has a new id (/clear starts a new session), and a record not read for a long time is pruned."""
+    try:
+        import spawn
+        if not isinstance(parent_agent, str) or not isinstance(run, str) or not run:
+            return []
+        out = [parent_agent] if parent_agent else []
+        seen = set()
+        while isinstance(sid, str) and sid and sid not in seen and len(seen) < 8:
+            seen.add(sid)
+            rec = spawn.joined(sid)
+            if not isinstance(rec, dict):
+                return []
+            if not rec:
+                break                        # no record: the chain ends here
+            joined, rec_run, parent_run, agent, parent = (rec.get(k) for k in ('joined', 'run', 'parent_run',
+                                                                               'parent_agent', 'parent'))
+            if not isinstance(joined, bool) or not isinstance(rec_run, str) or not isinstance(parent_run, str) \
+                    or not isinstance(agent, str) or not isinstance(parent, str):
+                return []
+            if not joined:
+                break                        # it kept its own run: its parent is not a starter in this run
+            if rec_run != run or parent_run != run or not agent:
+                return []                    # a record that contradicts itself or this run: no starter
+            out.append(agent)
+            sid = parent
+        return out
+    except Exception as e:
+        common.log(f"starters {str(sid)[:40]}: {type(e).__name__}: {str(e)[:200]}")
+        return []
 
 
 def _said(c):
@@ -191,9 +303,17 @@ def _deny(reason):
                                    'permissionDecisionReason': redact(reason)[0]}}
 
 
+def _tool_error(resp):
+    """Whether a PostToolUse tool_response is an MCP error result (isError true): its text is an error, never an
+    answer, even when it parses as JSON."""
+    return isinstance(resp, dict) and (resp.get('isError') is True or resp.get('is_error') is True)
+
+
 def _tool_answer(resp):
     """The JSON answer of an MCP tool from a PostToolUse tool_response: a dict, a list of content blocks, a dict with
-    content, or text."""
+    content, or text. An MCP error result answers {}."""
+    if _tool_error(resp):
+        return {}
     if isinstance(resp, dict) and ('held' in resp or 'handed' in resp or 'released' in resp or 'done' in resp):
         return resp
     if isinstance(resp, dict):

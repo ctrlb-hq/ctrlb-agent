@@ -3,7 +3,7 @@
 CtrlB is a local fake that answers with the synthetic responses in tests/fixtures/seeker/.
 Nothing is sent anywhere else, Claude is never called, and no real config is read: every CTRLB_* variable from the
 calling environment is dropped and CTRLB_HOME points into tests/work/."""
-import base64, glob, hashlib, http.server, json, os, re, shutil, signal, socket, socketserver, stat, subprocess, sys, textwrap, threading, time, traceback
+import base64, errno, glob, hashlib, http.server, json, os, re, shutil, signal, socket, socketserver, stat, subprocess, sys, textwrap, threading, time, traceback
 from unittest import mock
 sys.dont_write_bytecode = True
 
@@ -1274,9 +1274,9 @@ def citem(payload, ts):
     return crec('response_item', payload, ts)
 
 
-def setup_codex():
+def setup_codex(home=None):
     """A Codex home in tests/work with the fixture rollout and a subagent rollout (synthetic, written here)."""
-    home = os.path.join(WORK, 'codex-home')
+    home = home or os.path.join(WORK, 'codex-home')
     shutil.rmtree(home, ignore_errors=True)
     day = os.path.join(home, 'sessions', '2026', '09', '06')
     os.makedirs(day)
@@ -2136,6 +2136,26 @@ def test_model_call_guard(seeker):
         'a function defined when another one runs': 'setup() { review() { codex exec hi; }; }; setup; review',
         'a function defined after then, called': 'if true; then f() { codex exec hi; }; fi; f',
         'after --, --help is the prompt': 'codex exec -- --help',
+        'claude -p after an option value': "claude --system-prompt 'be brief' -p hello",
+        'claude -p after a variadic option and its values': 'claude --allowed-tools Bash Edit -p hi',
+        'claude --print after --opt=value': 'claude --system-prompt=-x --print hi',
+        'claude -p after an optional value that it does not take': 'claude --debug -p hi',
+        'claude -p in short flags': 'claude -cp hi',
+        'claude -p in short flags after a value option': 'claude -n job -cp hi',
+        'claude -pn takes the next word as the name, even --help': 'claude -pn --help hello',
+        'claude -pn with a name joined to it (digits and punctuation)': 'claude -pnreview-1 hello',
+        'claude -pn with a name joined to it (letters and digits)': 'claude -pndemo1 hello',
+        'claude -cn takes the next word as the name; -p after it': 'claude -cn job -p hello',
+        'claude -pd: an optional value never takes a word that starts with -': 'claude -pd -c hello',
+        'claude: --help as the value of an option --help does not list': 'claude --append-subagent-system-prompt --help -p hello',
+        'claude: --version as the value of an option --help does not list': 'claude --plan-mode-instructions --version -p hi',
+        'claude: an unknown option fails closed: --help may be its value': 'claude --future-opt --help -p x',
+        'claude: an unknown option fails closed: -p may be its value': 'claude --future-opt -p x',
+        'claude: an unknown option with =value, then -p': 'claude --future-opt=1 -p x',
+        'claude: an unknown short option fails closed': 'claude -x -p hi',
+        'claude: an unknown option fails closed: p in short options': 'claude --future-opt x -cp hi',
+        'claude: an unknown option fails closed: -p after --': 'claude --future-opt -- -p',
+        'claude --help as an option value is not help': 'claude --append-system-prompt --help -p hi',
         'a ( ) function body does not change a function outside it':
             'f() { codex exec hi; }; setup() ( f() { echo ok; }; ); setup; f',
     }
@@ -2174,6 +2194,20 @@ def test_model_call_guard(seeker):
         'codex review help': 'codex review -h',
         'codex help before the subcommand': 'codex --help exec x',
         'claude -p help': 'claude -p --help',
+        'claude -p version': 'claude -p -v',
+        "claude: -p as an option's value": "claude --system-prompt '-p' hello",
+        "claude: --print as an option's =value": 'claude --system-prompt=--print hello',
+        "claude: -p as a variadic option's first value": 'claude --add-dir -p hello',
+        "claude: -p as the value of -n": 'claude -n -p hello',
+        "claude: p in the value joined to -d": 'claude -dp hello',
+        "claude: -p as the name after -cn": 'claude -cn -p hello',
+        "claude: p as the name joined to -cn": 'claude -cnp hello',
+        "claude: -pw does not take --help, so it is help": 'claude -pw --help',
+        "claude: -pv is the version": 'claude -pv',
+        "claude: -p as the value of an option --help does not list": 'claude --append-subagent-system-prompt -p hello',
+        'claude: an unknown option with no -p (interactive)': 'claude --future-opt x hello',
+        'claude: help that cannot be the value of the unknown option': 'claude --future-opt x --help -p hi',
+        'claude: -p after --': 'claude -- -p',
         'command -v looks a name up': 'command -v codex exec',
         'command -p -v and -pv look a name up': 'command -p -v codex exec; command -pv claude -p',
         'empty': '',
@@ -2202,6 +2236,16 @@ def test_model_call_guard(seeker):
     check('guard: the refusal names the call, the time limit and the command to run instead, and asks for no run or name',
           '`codex exec`' in r and 'without a time limit' in r and 'timeout 1200 codex exec' in r
           and 'CTRLB_RUN' not in r and 'CTRLB_AGENT' not in r, r)
+    unsure = {c: reason(c) or '' for c in ('claude --advisor opus --system-prompt -p hello',
+                                            'claude --advisor opus -dp hello', 'claude --advisor opus -- -p',
+                                            'CTRLB_RUN=demo claude --advisor opus -p hello')}
+    check('guard: an unknown claude option (fail closed): the refusal asks for timeout right before the claude word, '
+          'after any NAME=value words, with an example, and does not call it claude -p',
+          all('`timeout <seconds>` directly before the `claude` word, after any NAME=value words' in r
+              and '`FOO=1 timeout 600 claude' in r and 'claude -p`' not in r and 'without a time limit' in r
+              for r in unsure.values())
+          and reason('claude --advisor opus hello') is None and '`claude -p`' in (reason('claude -p hi') or ''),
+          json.dumps(unsure)[:500])
 
     # the setting: environment first, then the config file
     home = os.path.join(WORK, 'home-guard')
@@ -2633,6 +2677,147 @@ def test_spawned_agents(seeker):
             os.remove(spawn._record_path(other.pid))
         except OSError:
             pass
+    # The watchdog's clocks: idle time and the kill grace are monotonic; the transcript's mtime (wall time) only shows
+    # that it changed. A fake clock: sleep moves both clocks; events move the wall clock or write the transcript.
+    tr2 = os.path.join(WORK, 'spawn-transcript-clock.jsonl')
+    open(tr2, 'w').close()
+
+    class Clock:
+        def __init__(self):
+            self.mono, self.wall, self.events, self.signals = 1000.0, 1.7e9, {}, []
+
+        def monotonic(self):
+            return self.mono
+
+        def time(self):
+            return self.wall
+
+        def sleep(self, secs):
+            for _ in range(int(round(secs * 10))):
+                self.mono = round(self.mono + 0.1, 1)
+                self.wall += 0.1
+                ev = self.events.pop(round(self.mono - 1000.0, 1), None)
+                if ev:
+                    ev(self)
+            if self.mono > 1000.0 + 7200:
+                raise RuntimeError('the watchdog did not end')
+
+    def write_at_wall(c):
+        os.utime(tr2, (c.wall, c.wall))
+        with open(tr2, 'a') as fh:
+            fh.write('{}\n')
+        os.utime(tr2, (c.wall, c.wall))
+
+    def watch_with(c, alive_until):
+        os.utime(tr2, (c.wall, c.wall))
+        with mock.patch.object(spawn, 'time', c), \
+                mock.patch.object(spawn, '_alive', lambda pid, start: c.mono - 1000.0 < alive_until and
+                                  not any(s == signal.SIGKILL for s, _ in c.signals)), \
+                mock.patch.object(spawn, '_same_session', lambda pid, sid: True), \
+                mock.patch.object(spawn, '_signal', lambda pid, start, fd, sig: c.signals.append((sig, round(c.mono - 1000.0, 1)))):
+            spawn._watch_loop(dict(transcript=tr2, sid='clock'), 1, 'st', 'clock', 60, spawn._Activity(tr2), None, 5, 10)
+        return c.signals
+
+    c = Clock()
+    c.events[10.0] = lambda c: setattr(c, 'wall', c.wall + 60)        # 10 s idle, then the wall clock jumps the limit
+    jumped = watch_with(c, 45)
+    c = Clock()
+    c.events[10.0] = lambda c: setattr(c, 'wall', c.wall + 60)
+    c.events[30.0] = lambda c: (setattr(c, 'wall', c.wall - 3600), write_at_wall(c))   # set back, then a write
+    c.events[91.0] = lambda c: setattr(c, 'wall', c.wall + 86400)    # during the grace: forward a day
+    c.events[93.0] = lambda c: setattr(c, 'wall', c.wall - 2 * 86400)   # and back two days
+    idle = watch_with(c, 10000)
+    # One look and one sleep per turn. A turn whose stat fails changes nothing and signals nothing; the agent is
+    # stopped only when a stat that works shows no change for the whole limit, or the transcript is missing for it.
+    real_stat = os.stat
+
+    def run_watch(c, stat, alive_until=10 ** 9, poll=5, path=None, payload=None):
+        path = path or tr2
+        with mock.patch.object(spawn, 'time', c), mock.patch.object(spawn.os, 'stat', stat), \
+                mock.patch.object(spawn, '_alive', lambda pid, start: c.mono - 1000.0 < alive_until and
+                                  not any(s == signal.SIGKILL for s, _ in c.signals)), \
+                mock.patch.object(spawn, '_same_session', lambda pid, sid: True), \
+                mock.patch.object(spawn, '_signal', lambda pid, start, fd, sig: c.signals.append((sig, round(c.mono - 1000.0, 1)))):
+            spawn._watch_loop(dict(payload or {}, transcript=path, sid='clock'), 1, 'st', 'clock', 60,
+                              spawn._Activity(path), None, poll, 10)
+        return c.signals
+
+    def alternating():
+        calls = []
+
+        def stat(path, *a, **k):
+            if path == tr2:
+                calls.append(path)
+                if len(calls) % 2 == 0:
+                    raise OSError(errno.EIO, 'Input/output error')
+            return real_stat(path, *a, **k)
+        return stat
+    c = Clock()
+    os.utime(tr2, (c.wall, c.wall))
+    alt = run_watch(c, alternating())
+    notes = []
+    c = Clock()
+    os.utime(tr2, (c.wall, c.wall))
+    with mock.patch.object(spawn.common, 'post_note', lambda *a, **k: notes.append(round(c.mono - 1000.0, 1))), \
+            mock.patch.object(spawn.common, 'config', lambda: {'off': False}):
+        alt_joined = run_watch(c, alternating(), payload=dict(joined=True, run='run-s1', agent='lead.codex-1'))
+    check('spawnIdleMinutes: good and failing stats in turn, with no change: SIGTERM once a good stat shows a whole '
+          'idle minute; a joined session posts its run note once',
+          len(alt) == 2 and alt[0][0] == signal.SIGTERM and 60 <= alt[0][1] <= 80 and alt[1] == (signal.SIGKILL, alt[0][1] + 10)
+          and len(alt_joined) == 2 and alt_joined[0][0] == signal.SIGTERM and len(notes) == 1, f'{alt} {alt_joined} {notes}')
+
+    def failing_from(t0, t1=10 ** 9, err=errno.EIO):
+        def stat(path, *a, **k):
+            if path == tr2 and t0 <= c.mono - 1000.0 < t1:
+                raise OSError(err, os.strerror(err))
+            return real_stat(path, *a, **k)
+        return stat
+    c = Clock()
+    os.utime(tr2, (c.wall, c.wall))
+    for t in range(5, 600, 5):
+        c.events[float(t)] = write_at_wall
+    busy = run_watch(c, failing_from(60), alive_until=600)
+    # checks at 0, 30 and 60 s, an append at 55 s, the stat fails from 60 s: for good, or until 61 s
+    c = Clock()
+    os.utime(tr2, (c.wall, c.wall))
+    c.events[55.0] = write_at_wall
+    failed_on = run_watch(c, failing_from(60), alive_until=600, poll=30)
+    c = Clock()
+    os.utime(tr2, (c.wall, c.wall))
+    c.events[55.0] = write_at_wall
+    recovered = run_watch(c, failing_from(60, 61), poll=30)
+    check('spawnIdleMinutes: a stat that fails never signals: writes every 5 s with the stat failing from 60 s, and a '
+          'write at 55 s with the stat failing from 60 s, run 10 minutes unstopped; a stat that works again at 61 s '
+          'counts the write and waits a whole limit',
+          busy == [] and failed_on == [] and recovered == [(signal.SIGTERM, 151.0), (signal.SIGKILL, 161.0)],
+          f'{busy} {failed_on} {recovered}')
+    c = Clock()
+    missing = run_watch(c, real_stat, path=os.path.join(WORK, 'spawn-transcript-missing.jsonl'))
+    c = Clock()
+    os.utime(tr2, (c.wall, c.wall))
+    removed = run_watch(c, failing_from(20, err=errno.ENOENT))
+    check('spawnIdleMinutes: a transcript missing (ENOENT) for the whole limit stops the agent',
+          missing == [(signal.SIGTERM, 61.0), (signal.SIGKILL, 71.0)]
+          and removed == [(signal.SIGTERM, 81.0), (signal.SIGKILL, 91.0)], f'{missing} {removed}')
+    # The look before the signal comes after the log and the note: a log line that blocks 5 s at the deadline while
+    # the agent appends cancels that stop; the next stop comes a whole limit after the append.
+    c = Clock()
+    os.utime(tr2, (c.wall, c.wall))
+    blocked = []
+
+    def slow_log(msg):
+        if 'stopping pid' in msg and not blocked:
+            blocked.append(round(c.mono - 1000.0, 1))
+            c.events[round(c.mono - 1000.0 + 2, 1)] = write_at_wall
+            c.sleep(5)
+    with mock.patch.object(spawn.common, 'log', slow_log):
+        slow = run_watch(c, real_stat)
+    check('spawnIdleMinutes: an append while the stop is logged (5 s, blocking) at the deadline stops nothing; the '
+          'agent is stopped a whole limit after the look that saw the append', blocked == [60.0]
+          and slow == [(signal.SIGTERM, 127.0), (signal.SIGKILL, 137.0)], f'{blocked} {slow}')
+    check('spawnIdleMinutes: a wall clock set forward by the idle limit after 10 s idle stops nothing; a write after it '
+          'is set back counts as a change; SIGTERM after a monotonic minute idle; SIGKILL after a monotonic 10 s grace',
+          jumped == [] and idle == [(signal.SIGTERM, 91.0), (signal.SIGKILL, 101.0)], f'{jumped} {idle}')
     check('setting: joinSpawned on by default; spawnIdleMinutes 0 by default and read as minutes',
           json.loads(subprocess.run([sys.executable, '-I', '-c', 'import sys, json; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib'))
                                      + '); import common; c = common.config(); print(json.dumps([c["join_spawned"], c["spawn_idle_minutes"]]))'],
@@ -5560,6 +5745,591 @@ def test_witness_docs():
           and "contains the evidence's command" not in relay)
 
 
+# ---------------------------------------------------------------- sessions started for one task (lib/launch.py)
+
+LAUNCH = '0a1b2c3d4e5f6071'
+LAUNCH_TASK = 'task 07 latency'           # the task the Claude Code claim fixtures answer for
+CODEX_TASK = 'task 03 watering'           # the task of tests/fixtures/codex-claims.jsonl, in run garden-run
+RELAY_STATE = dict(check='allow', handoff='ok', briefs='ok', claims='ok', release='ok', posts='ok', tasks='ok',
+                   contracts='ok', peers='ok', artifacts='ok')
+NO_LAUNCH_TEXTS = os.path.join(FIX, 'hooks', 'no-launch-texts.json')
+LEAD_SID = '7a7a7a7a-0000-4000-8000-0000000000bb'
+
+
+def launch_files():
+    """Copies of the Claude Code transcripts and a Codex home under tests/work/launch: (top, claude inputs, codex
+    inputs, codex home, codex main rollout)."""
+    top = os.path.join(WORK, 'launch')
+    shutil.rmtree(top, ignore_errors=True)
+    proj = os.path.join(top, 'projects', '-work-dash')
+    os.makedirs(os.path.join(proj, SID, 'subagents'))
+    main = os.path.join(proj, SID + '.jsonl')
+    sub = os.path.join(proj, SID, 'subagents', 'agent-abc123.jsonl')
+    shutil.copy(os.path.join(FIX, 'claude', 'session.jsonl'), main)
+    shutil.copy(os.path.join(FIX, 'claude', 'session', 'subagents', 'agent-abc123.jsonl'), sub)
+    chome, cmain, csub = setup_codex(os.path.join(top, 'codex-home'))
+    return top, inputs(main, sub), cinputs(cmain, csub), chome, cmain
+
+
+def start_paths(I, C):
+    """Every session-start and subagent-start path of both hooks: (name, hook function, mode, input, extra env)."""
+    run = dict(CTRLB_RUN='run-w', CTRLB_AGENT='w1')
+    joined = dict(CTRLB_PARENT_SESSION=LEAD_SID, CTRLB_PARENT_RUN='run-w', CTRLB_PARENT_AGENT='lead',
+                  CTRLB_PARENT_RELAY='1', CTRLB_RUN='run-w', CTRLB_AGENT='lead')
+    return [('claude session-start, no run', hook, 'session-start', I['session_start'], {}),
+            ('claude session-start, run', hook, 'session-start', I['session_start'], run),
+            ('claude session-start after compaction, run', hook, 'session-start', I['session_start_compact'], run),
+            ('claude session-start, joined', hook, 'session-start', I['session_start'], joined),
+            ('claude subagent-start, no run', hook, 'subagent-start', I['subagent_start'], {}),
+            ('claude subagent-start, run', hook, 'subagent-start', I['subagent_start'], run),
+            ('codex session-start, no run', chook, 'session-start', C['session_start'], {}),
+            ('codex session-start, run', chook, 'session-start', C['session_start'], run),
+            ('codex session-start of a subagent thread, run', chook, 'session-start', C['session_start_subagent'], run),
+            ('codex session-start, joined', chook, 'session-start', C['session_start'], joined),
+            ('codex subagent-start, no run', chook, 'subagent-start', C['subagent_start'], {}),
+            ('codex subagent-start, run', chook, 'subagent-start', C['subagent_start'], run)]
+
+
+def no_launch_texts(seeker, extra=None):
+    """The context of every start path of both hooks: {path: text}, with tests/work and the fake CtrlB's address
+    replaced by <work> and <url>. Each path runs in a home of its own."""
+    top, I, C, chome, _ = launch_files()
+    seeker.state.update(RELAY_STATE)
+    out = {}
+    for i, (name, fn, mode, inp, env) in enumerate(start_paths(I, C)):
+        e = base_env(seeker.url, os.path.join(top, f'home-{i}'), CODEX_HOME=chome, **env)
+        e.update(extra or {})
+        p, _ = fn(mode, inp, e)
+        out[name] = out_of(p).get('additionalContext', '').replace(WORK, '<work>').replace(seeker.url, '<url>')
+    return out
+
+
+def write_no_launch_texts():
+    seeker = Seeker()
+    texts = no_launch_texts(seeker)
+    seeker.httpd.shutdown()
+    seeker.httpd.server_close()
+    with open(NO_LAUNCH_TEXTS, 'w') as fh:
+        json.dump(texts, fh, indent=1, ensure_ascii=False)
+        fh.write('\n')
+    print(f'wrote {len(texts)} texts to {os.path.relpath(NO_LAUNCH_TEXTS, ROOT)}')
+    return 0 if all(texts.values()) else 1
+
+
+NEXT_TASK_WORDS = ('next=true', 'claim(next', 'free task', 'next free', 'done with next', 'claim the next',
+                   'claim one of them next', 'pick another', 'no task and stop')
+
+
+def no_next_task(text):
+    """No sentence that sends the agent to another task. (The session-start record lists tasks as "free"; that is
+    the run's state, not a rule.)"""
+    low = text.lower()
+    return not [w for w in NEXT_TASK_WORDS if w in low]
+
+
+def one_task_rule(text, task, run, agent, takeover=False):
+    call = f'claim(resource="{task}", run_id="{run}", agent="{agent}"' + (', takeover=true' if takeover else '') + ')'
+    reads = ("before your first edit, read the task's evidence and notes (tasks, and history with the task name) and the "
+             "earlier holder's steps (next_actions or fetch_records on its session)")
+    return (f'You were started for one task: "{task}". Work on that task only. First call {call}.' in text
+            and 'If held is false, post one note that says why the claim was refused, then stop: do not claim another task.' in text
+            and 'as the evidence, and without next.' in text and 'Then stop.' in text
+            and f'run id is {run} and your agent id is {agent}.' in text and (reads in text) == takeover
+            and 'You work for the agent that started you' not in text and no_next_task(text))
+
+
+def descendant_rule(text, task, run, agent):
+    return (f'run id is {run} and your agent id is {agent}.' in text
+            and f'You work for the agent that started you, which holds the task "{task}" in this run' in text
+            and 'The files of that task come with it, and that agent holds them: do not claim them.' in text
+            and 'Edit only the files it asked you to edit.' in text
+            and 'A file that belongs to no task is claimed by its path (claim with paths)' in text
+            and 'If a claim answers belongs_to_task for another task, stop and tell the agent that started you.' in text
+            and 'Claim the files you will edit' not in text
+            and 'Do not claim, reopen or finish a task' in text and 'You were started for one task' not in text
+            and 'If your instructions name a Relay task' not in text and no_next_task(text))
+
+
+def test_launch_no_change(seeker):
+    """Without CTRLB_LAUNCH (or with one that is not a launch id) every start text is the one the hooks wrote before."""
+    want = load('hooks/no-launch-texts.json')
+    got = no_launch_texts(seeker)
+    diff = [k for k in want if got.get(k) != want[k]]
+    check(f'no CTRLB_LAUNCH: the {len(want)} start texts of both hooks are byte for byte the earlier ones',
+          len(want) == 12 and not diff and set(got) == set(want), '; '.join(diff))
+    bad = no_launch_texts(seeker, dict(CTRLB_LAUNCH='not-a-launch', CTRLB_TASK=LAUNCH_TASK,
+                                       CTRLB_WATCH_DIR=os.path.join(WORK, 'launch-watch-bad')))
+    diff = [k for k in want if bad.get(k) != want[k]]
+    skill = read(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).decode()
+    check('relay skill: the one-task rule and the descendant rule win over the page',
+          'If your session rule says you were started for one task, that rule wins over this page' in skill
+          and 'call `done` without `next`, then stop' in skill
+          and 'If your session rule says you work for the agent that started you, do not claim, reopen or finish a task' in skill
+          and 'The files of its task come with it and that agent holds them: do not claim them' in skill
+          and 'claim the files you edit' not in skill)
+    check('a CTRLB_LAUNCH that is not 16 hex digits changes no text and writes no marker',
+          not diff and not os.path.exists(os.path.join(WORK, 'launch-watch-bad', 'used')), '; '.join(diff))
+
+
+def test_launch_rules(seeker):
+    """The first session of a launch gets the one-task rule in every start path; every other session of the launch
+    (a subagent, a second session, an agent the worker starts from its shell) gets the descendant rule; the worker
+    keeps its role after compaction and resume; a subagent never takes the marker."""
+    spawn = _spawn_lib()
+    top, I, C, chome, _ = launch_files()
+    seeker.state.update(RELAY_STATE)
+    watch = os.path.join(top, 'watch')
+
+    def env_for(home, launch, mode='claim', task=LAUNCH_TASK, **extra):
+        e = base_env(seeker.url, os.path.join(top, home), CODEX_HOME=chome, CTRLB_RUN='run-w', CTRLB_AGENT='w1',
+                     CTRLB_TASK=task, CTRLB_TASK_MODE=mode, CTRLB_LAUNCH=launch, CTRLB_WATCH_DIR=watch)
+        e.update(extra)
+        return e
+
+    def ctx(fn, mode, inp, env):
+        p, _ = fn(mode, inp, env)
+        return out_of(p).get('additionalContext', '')
+
+    def owner(launch):
+        try:
+            return open(os.path.join(watch, 'used', launch)).read()
+        except OSError:
+            return None
+
+    # Claude Code: the worker, in every start path of its own session
+    L = '1111111111111111'
+    env = env_for('home-c', L)
+    texts = {n: ctx(hook, 'session-start', I[k], env) for n, k in (('startup', 'session_start'),
+                                                                   ('compact', 'session_start_compact'),
+                                                                   ('resume', 'session_start_resume'),
+                                                                   ('startup again', 'session_start'))}
+    bad = [n for n, t in texts.items() if not one_task_rule(t, LAUNCH_TASK, 'run-w', 'w1')]
+    check('claude: the first session of a launch gets the one-task rule, with no next-task sentence; it keeps it after '
+          'compaction, resume and a repeated start', not bad and owner(L) == SID, f'{bad} {texts["startup"][-1500:]}')
+    check('claude: the one-task rule replaces the whole relay rule and keeps the recall rule',
+          recall_rule(texts['startup'], SID) and REGISTERED not in texts['startup'] and 'reopen=true' not in texts['startup'])
+    st = os.stat(os.path.join(watch, 'used', L))
+    check('the launch marker holds the session id, mode 0600, made create-exclusive (no temporary file left)',
+          stat.S_IMODE(st.st_mode) == 0o600 and os.listdir(os.path.join(watch, 'used')) == [L])
+    sub = ctx(hook, 'subagent-start', I['subagent_start'], env)
+    check("claude: a subagent of the worker (the owner's session id, its own agent id) gets the descendant rule; the "
+          'marker is unchanged', descendant_rule(sub, LAUNCH_TASK, 'run-w', 'w1:agent-def456') and owner(L) == SID
+          and f'subagent of session {SID}' in sub, sub[-900:])
+    SID2 = '5f0c7a52-0000-4000-8000-0000000000b2'
+    second = ctx(hook, 'session-start', dict(I['session_start'], session_id=SID2), env)
+    check('claude: a second session with the same launch gets the descendant rule', descendant_rule(second, LAUNCH_TASK, 'run-w', 'w1')
+          and owner(L) == SID, second[-900:])
+    SID3 = '5f0c7a52-0000-4000-8000-0000000000b3'
+    child_env = env_for('home-c', L, CTRLB_PARENT_SESSION=SID, CTRLB_PARENT_RUN='run-w', CTRLB_PARENT_AGENT='w1',
+                        CTRLB_PARENT_RELAY='1')
+    child = ctx(hook, 'session-start', dict(I['session_start'], session_id=SID3), child_env)
+    name = spawn.child_name('w1', SID, '', SID3)
+    check("claude: an agent the worker starts from its shell (joined path) gets the descendant rule, not the started "
+          "agent's rule", descendant_rule(child, LAUNCH_TASK, 'run-w', name) and f'w1 (session {SID}) started you' in child
+          and 'Do the work you were asked to do' not in child, child[-900:])
+    L2 = '2222222222222222'
+    first_sub = ctx(hook, 'subagent-start', I['subagent_start'], env_for('home-c2', L2))
+    check('claude: a subagent event first on a launch gets the descendant rule and takes no marker',
+          descendant_rule(first_sub, LAUNCH_TASK, 'run-w', 'w1:agent-def456') and owner(L2) is None)
+    L3 = '3333333333333333'
+    lead_env = env_for('home-c3', L3, CTRLB_PARENT_SESSION=LEAD_SID, CTRLB_PARENT_RUN='run-w', CTRLB_PARENT_AGENT='lead',
+                       CTRLB_PARENT_RELAY='1')
+    joined_first = ctx(hook, 'session-start', I['session_start'], lead_env)
+    check('claude: the first session of a launch on the joined path (its starter ran from an agent\'s shell) gets the '
+          'one-task rule', one_task_rule(joined_first, LAUNCH_TASK, 'run-w', 'w1') and 'started you' in joined_first
+          and owner(L3) == SID, joined_first[-900:])
+    L4 = '4444444444444444'
+    take = ctx(hook, 'session-start', I['session_start'], env_for('home-c4', L4, mode='takeover'))
+    check('claude: CTRLB_TASK_MODE=takeover: claim with takeover=true, then read the evidence, notes and the earlier '
+          "holder's steps before the first edit", one_task_rule(take, LAUNCH_TASK, 'run-w', 'w1', takeover=True), take[-900:])
+    odd = 'fix "quotes" $(x)\nand a line'
+    q = ctx(hook, 'session-start', I['session_start'], env_for('home-c5', '5555555555555555', task=odd))
+    check('claude: the task name goes into the claim call quoted as JSON', f'claim(resource={json.dumps(odd)}, ' in q, q[-600:])
+
+    # Codex
+    C5 = '6666666666666666'
+    cenv = env_for('home-x', C5)
+    ctexts = {n: ctx(chook, 'session-start', C[k], cenv) for n, k in (('startup', 'session_start'),
+                                                                       ('resume', 'session_start_resume'),
+                                                                       ('startup again', 'session_start'))}
+    bad = [n for n, t in ctexts.items() if not one_task_rule(t, LAUNCH_TASK, 'run-w', 'w1')]
+    check('codex: the first session of a launch gets the one-task rule, with no next-task sentence; it keeps it after '
+          'resume and a repeated start', not bad and owner(C5) == CSID and recall_rule(ctexts['startup'], CSID),
+          f'{bad} {ctexts["startup"][-900:]}')
+    csub = ctx(chook, 'subagent-start', C['subagent_start'], cenv)
+    check("codex: a SubagentStart event with the owner's session id and another agent id gets the descendant rule; "
+          'the marker is unchanged', descendant_rule(csub, LAUNCH_TASK, 'run-w', f'w1:{CSUB}') and owner(C5) == CSID, csub[-900:])
+    thread = ctx(chook, 'session-start', C['session_start_subagent'], cenv)
+    check('codex: the session start of a subagent thread gets the descendant rule',
+          descendant_rule(thread, LAUNCH_TASK, 'run-w', f'w1:{CSUB}') and owner(C5) == CSID, thread[-900:])
+    C6 = '7777777777777777'
+    thread_first = ctx(chook, 'session-start', C['session_start_subagent'], env_for('home-x2', C6))
+    check('codex: a subagent thread first on a launch gets the descendant rule and takes no marker',
+          descendant_rule(thread_first, LAUNCH_TASK, 'run-w', f'w1:{CSUB}') and owner(C6) is None, thread_first[-600:])
+    other = '0190f0a0-1111-7000-8000-0000000000c2'
+    csecond = ctx(chook, 'session-start', dict(C['session_start'], session_id=other), cenv)
+    check('codex: a second session with the same launch gets the descendant rule',
+          descendant_rule(csecond, LAUNCH_TASK, 'run-w', 'w1') and owner(C5) == CSID, csecond[-600:])
+    cchild_env = env_for('home-x', C5, CTRLB_PARENT_SESSION=CSID, CTRLB_PARENT_RUN='run-w', CTRLB_PARENT_AGENT='w1',
+                         CTRLB_PARENT_RELAY='1')
+    cchild = ctx(chook, 'session-start', dict(C['session_start'], session_id=other.replace('c2', 'c3')), cchild_env)
+    check('codex: an agent the worker starts from its shell (joined path) gets the descendant rule',
+          descendant_rule(cchild, LAUNCH_TASK, 'run-w', spawn.child_name('w1', CSID, '', other.replace('c2', 'c3')))
+          and f'w1 (session {CSID}) started you' in cchild, cchild[-900:])
+    C7 = '8888888888888888'
+    cjoined = ctx(chook, 'session-start', C['session_start'], env_for('home-x3', C7, CTRLB_PARENT_SESSION=LEAD_SID,
+                                                                       CTRLB_PARENT_RUN='run-w', CTRLB_PARENT_AGENT='lead',
+                                                                       CTRLB_PARENT_RELAY='1'))
+    check('codex: the first session of a launch on the joined path gets the one-task rule',
+          one_task_rule(cjoined, LAUNCH_TASK, 'run-w', 'w1') and owner(C7) == CSID, cjoined[-600:])
+    ctake = ctx(chook, 'session-start', C['session_start'], env_for('home-x4', '9999999999999999', mode='takeover'))
+    check('codex: takeover mode', one_task_rule(ctake, LAUNCH_TASK, 'run-w', 'w1', takeover=True), ctake[-600:])
+
+    # a launch's sessions register no task for a subagent they spawn
+    ws = os.path.join(top, 'ws')
+    os.makedirs(os.path.join(ws, 'src'))
+    with open(os.path.join(ws, 'src', 'parse.py'), 'w') as fh:
+        fh.write('x\n')
+    agent_in = dict(session_id=SID, transcript_path='', cwd=ws, hook_event_name='PreToolUse', tool_name='Agent',
+                    tool_input={'prompt': 'Fix src/parse.py', 'description': 'fix parse'})
+    seeker.reset()
+    hook('pre-agent', agent_in, env)
+    in_launch = [c for c in seeker.calls if c['path'].endswith('/briefs')]
+    seeker.reset()
+    hook('pre-agent', agent_in, base_env(seeker.url, os.path.join(top, 'home-c'), CTRLB_RUN='run-w', CTRLB_AGENT='w1'))
+    plain = [c for c in seeker.calls if c['path'].endswith('/briefs')]
+    check('claude: a subagent spawned in a launch registers no task (it works for the worker); without a launch it does',
+          not in_launch and len(plain) == 1, f'{len(in_launch)} {len(plain)}')
+
+    # An edit of a file the agent that started this one holds: no claim (CtrlB answers belongs_to_task); the change
+    # goes to that agent. Who started an agent is read from the records (the hook input's subagent, the spawn
+    # record), never from its name. A file another agent holds, or an agent with no record, keeps the claim text.
+    import hooks_shared
+
+    def answer(mode, holder):
+        return {'mode': mode, 'allowed': mode != 'enforce', 'conflicts': [
+            {'path': 'src/parser.py', 'key': 'path:src/parser.py', 'held_by': holder, 'reason': 'held'}]}
+
+    def edit(agent, mode, holder, starters):
+        with mock.patch.object(hooks_shared.common, 'check', lambda *a, **k: answer(mode, holder)):
+            out = hooks_shared.decide({}, 'run-w', agent, ['src/parser.py'], '/work/w', lambda: starters) or {}
+        o = out.get('hookSpecificOutput', {})
+        return o.get('permissionDecision'), o.get('permissionDecisionReason') or o.get('additionalContext') or ''
+    tell = 'Tell the agent that started you the change you want, and it makes it.'
+    denied = [edit('w1:agent-def456', 'enforce', 'w1', ['w1']), edit('w1.codex-1a2b3c4d', 'enforce', 'w1', ['w1']),
+              edit('w1.codex-1a2b3c4d:agent-x', 'enforce', 'w1', ['w1.codex-1a2b3c4d', 'w1'])]
+    warned = edit('w1:agent-def456', 'advisory', 'w1', ['w1'])
+    other = edit('w1:agent-def456', 'enforce', 'w2', ['w1'])
+    unrelated = [edit('w1.docs', 'enforce', 'w1', []), edit('w1:docs:agent-x', 'enforce', 'w1', ['w1:docs']),
+                 edit('w1:agent-def456', 'enforce', 'w1', [])]
+    check('launch: a descendant whose edit is refused for a file the agent that started it holds is told to give that '
+          'agent the change, not to claim it; a file of another agent keeps the claim call',
+          all(d == 'deny' and 'You work for w1: do not claim the file.' in r and tell in r and 'claim(' not in r
+              and 'takeover' not in r for d, r in denied)
+          and warned[0] is None and 'do not claim the file' in warned[1] and 'claim(' not in warned[1]
+          and other[0] == 'deny' and 'claim(resource="src/parser.py"' in other[1] and 'You work for' not in other[1],
+          json.dumps([denied, warned, other])[:600])
+    check('launch: a name that only looks like a descendant (w1.docs, a subagent of an independent w1:docs, no record) '
+          'gets the claim text', all(d == 'deny' and 'claim(resource="src/parser.py"' in r and 'You work for' not in r
+                                     for d, r in unrelated), json.dumps(unrelated)[:600])
+    gp, par, kid, lone, own, other_run, bad = ('a0a0a0a0-0000-4000-8000-00000000000' + c for c in '1234567')
+    rec = dict(run='run-w', parent_run='run-w', joined=True, renamed=False)
+    spawn._write_json(spawn._session_path(par), dict(rec, parent=gp, parent_agent='w1'))
+    spawn._write_json(spawn._session_path(kid), dict(rec, parent=par, parent_agent='w1.codex-0000000a'))
+    spawn._write_json(spawn._session_path(own), dict(rec, parent=gp, parent_agent='w1', joined=False))
+    # started by w1 in run A with its own CTRLB_RUN (run-w) and w1's inherited CTRLB_AGENT: renamed, not joined
+    spawn._write_json(spawn._session_path(other_run), dict(parent=gp, parent_agent='w1', parent_run='run-a', run='run-w',
+                                                           joined=False, renamed=True))
+    spawn._write_json(spawn._session_path(bad), dict(joined=True, run='run-w', parent_agent='w1', parent=['bad-parent']))
+    contra, no_prun = 'a0a0a0a0-0000-4000-8000-000000000008', 'a0a0a0a0-0000-4000-8000-000000000009'
+    spawn._write_json(spawn._session_path(contra), dict(joined=True, run='run-w', parent_run='run-a', parent_agent='w1',
+                                                        parent='p'))
+    spawn._write_json(spawn._session_path(no_prun), dict(joined=True, run='run-w', parent_agent='w1', parent='p'))
+    try:
+        chain = [hooks_shared.starters(kid, 'run-w'),
+                 hooks_shared.starters(kid, 'run-w', 'w1.codex-0000000a.claude-0000000b'),
+                 hooks_shared.starters(lone, 'run-w'), hooks_shared.starters(lone, 'run-w', 'w1:docs'),
+                 hooks_shared.starters(own, 'run-w'), hooks_shared.starters(kid, 'run-other'),
+                 hooks_shared.starters(other_run, 'run-w'), hooks_shared.starters(bad, 'run-w'),
+                 hooks_shared.starters(bad, 'run-w', 'w1:docs'), hooks_shared.starters(['x'], 'run-w'),
+                 hooks_shared.starters(contra, 'run-w'), hooks_shared.starters(no_prun, 'run-w'),
+                 hooks_shared.starters(own, 'run-w', 'w1:docs')]
+    finally:
+        for s_ in (par, kid, own, other_run, bad, contra, no_prun):
+            os.remove(spawn._session_path(s_))
+    check("launch: starters come from the records: the subagent's session, then each spawn record that joined this "
+          'run (its run and its parent_run), up the chain; none without a record, for a session that kept its own run, '
+          'in another run, with a record that contradicts itself (joined run-w, parent_run run-a) or has no parent_run, '
+          'or with a record that is not what spawn.py writes (never an exception)',
+          chain == [['w1.codex-0000000a', 'w1'], ['w1.codex-0000000a.claude-0000000b', 'w1.codex-0000000a', 'w1'],
+                    [], ['w1:docs'], [], [], [], [], [], [], [], [], ['w1:docs']], json.dumps(chain))
+    # Through the Claude Code hook: CtrlB's answer names agent-b as the holder.
+    seeker.state['check'] = 'enforce'
+    hook_home = os.path.join(top, 'home-starter')
+    sessions = os.path.join(hook_home, 'spawn', 'sessions')
+    os.makedirs(sessions, exist_ok=True)
+    sub_edit = dict(I['pre_tool_edit'], agent_id='agent-5e5e5e5e')
+    outs = {}
+    for label, agent_env, inp, record in (
+            ('subagent of agent-b', 'agent-b', sub_edit, None),
+            ('agent-b.docs, no record', 'agent-b.docs', I['pre_tool_edit'], None),
+            ('subagent of agent-b:docs', 'agent-b:docs', sub_edit, None),
+            ('a malformed record', 'agent-b.claude-00000001', I['pre_tool_edit'],
+             {'joined': True, 'run': 'run-w', 'parent_agent': 'agent-b', 'parent': ['bad-parent']}),
+            ('started by agent-b in another run', 'agent-b', I['pre_tool_edit'],
+             {'parent': LEAD_SID, 'parent_agent': 'agent-b', 'parent_run': 'run-a', 'run': 'run-w',
+              'agent': 'agent-b.claude-00000001', 'joined': False, 'renamed': True}),
+            ('a record that contradicts itself', 'agent-b.claude-00000001', I['pre_tool_edit'],
+             {'parent': LEAD_SID, 'parent_agent': 'agent-b', 'parent_run': 'run-a', 'run': 'run-w', 'joined': True})):
+        path = os.path.join(sessions, I['pre_tool_edit']['session_id'] + '.json')
+        if record is None:
+            if os.path.exists(path):
+                os.remove(path)
+        else:
+            with open(path, 'w') as fh:
+                json.dump(record, fh)
+        p, _ = hook('pre-tool', inp, base_env(seeker.url, hook_home, CTRLB_RUN='run-w', CTRLB_AGENT=agent_env))
+        o = out_of(p)
+        outs[label] = (o.get('permissionDecision'), o.get('permissionDecisionReason', ''))
+    os.remove(os.path.join(sessions, I['pre_tool_edit']['session_id'] + '.json'))
+    seeker.state['check'] = 'allow'
+    claim_text = ('agent-b.docs, no record', 'subagent of agent-b:docs', 'a malformed record',
+                  'started by agent-b in another run', 'a record that contradicts itself')
+    check("claude pre-tool: a subagent refused on its session agent's file is told to give it the change; agent-b.docs "
+          '(no record), a subagent of agent-b:docs, a malformed spawn record and a session started by agent-b in '
+          'another run are refused with the claim call',
+          outs['subagent of agent-b'][0] == 'deny' and 'You work for agent-b: do not claim the file.' in outs['subagent of agent-b'][1]
+          and 'claim(' not in outs['subagent of agent-b'][1]
+          and all(outs[k][0] == 'deny' and 'claim(resource=' in outs[k][1] and 'You work for' not in outs[k][1]
+                  for k in claim_text), json.dumps(outs)[:1200])
+    # The ownership check comes first; who started the agent is looked up only to choose the words. An interrupt or
+    # exit in that lookup still refuses (the ordinary text), in both hooks, with one ownership check.
+    import importlib.util
+    hook_mods = {}
+    for name, path in (('claude', os.path.join(ROOT, 'plugin', 'hooks', 'hook.py')), ('codex', os.path.join(ROOT, 'codex', 'hook.py'))):
+        spec = importlib.util.spec_from_file_location(f'{name}_hook_starters_test', path)
+        hook_mods[name] = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook_mods[name])
+    cin = cinputs(*setup_codex(os.path.join(top, 'codex-home-starters'))[1:])
+    edits = {'claude': dict(I['pre_tool_edit'], agent_id='agent-5e5e5e5e'), 'codex': cin['pre_tool_subagent_patch']}
+    interrupted = {}
+    for name, mod in hook_mods.items():
+        for exc in (KeyboardInterrupt, SystemExit):
+            checks = []
+
+            def fake_check(*a, **k):
+                checks.append(a)
+                return {'mode': 'enforce', 'allowed': False, 'conflicts': [
+                    {'path': 'src/x.py', 'key': 'path:src/x.py', 'held_by': 'agent-b', 'reason': 'held'}]}
+
+            def boom(*a, **k):
+                raise exc('in the ancestry lookup')
+            cfg_t = dict(common.config(), run='run-w', agent='agent-b', enforce='enforce')
+            with mock.patch.object(hooks_shared.common, 'check', fake_check), mock.patch.object(mod, 'starters', boom):
+                out = mod.pre_tool(cfg_t, edits[name]) or {}
+            o = out.get('hookSpecificOutput', {})
+            interrupted[f'{name} {exc.__name__}'] = (o.get('permissionDecision'), len(checks),
+                                                     'claim(resource=' in (o.get('permissionDecisionReason') or ''))
+    check('pre-tool: KeyboardInterrupt or SystemExit in the ancestry lookup still refuses the edit (the ordinary '
+          'text), after one ownership check, in both hooks',
+          all(v == ('deny', 1, True) for v in interrupted.values()) and len(interrupted) == 4, json.dumps(interrupted))
+    skill = read(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).decode()
+    check('relay skill: a descendant whose edit of a task file is refused tells the agent that started it',
+          'If an edit of one of them is refused, tell that agent the change you want, and it makes it.' in skill)
+
+
+def test_launch_result_claude(seeker):
+    """Claude Code: the post-tool hook writes the result file from the worker's own claim of the named task."""
+    top, I, C, chome, _ = launch_files()
+    seeker.state.update(RELAY_STATE)
+    watch = os.path.join(top, 'watch')
+    L = 'abcdefabcdef0001'
+    env = base_env(seeker.url, os.path.join(top, 'home'), CTRLB_RUN='run-w', CTRLB_AGENT='w1', CTRLB_TASK=LAUNCH_TASK,
+                   CTRLB_TASK_MODE='claim', CTRLB_LAUNCH=L, CTRLB_WATCH_DIR=watch)
+    res = os.path.join(watch, 'result', L + '.json')
+
+    def result():
+        try:
+            return open(res).read()
+        except OSError:
+            return None
+    hook('session-start', I['session_start'], env)
+    seen = []
+    for name, mode, inp in (('an error answer that is not JSON', 'post-tool', I['post_tool_claim_error_text']),
+                            ('an MCP error result (isError) whose text parses as a refusal', 'post-tool',
+                             I['post_tool_claim_is_error']),
+                            ('another MCP server\'s claim tool answering held false', 'post-tool',
+                             I['post_tool_claim_other_server']),
+                            ('a failed call (PostToolUseFailure)', 'post-tool-failure', I['post_tool_claim_failure']),
+                            ('a claim inside a subagent (agent_id set)', 'post-tool', I['post_tool_subagent_claim']),
+                            ('a claim by another session of the launch', 'post-tool',
+                             dict(I['post_tool_claim'], session_id='5f0c7a52-0000-4000-8000-0000000000b2')),
+                            ('a claim of another task', 'post-tool',
+                             dict(I['post_tool_claim'], tool_input={'resource': 'task 08 errors'})),
+                            ('a claim in another run', 'post-tool',
+                             dict(I['post_tool_claim'], tool_input={'resource': LAUNCH_TASK, 'run_id': 'run-other'})),
+                            ('a claim as another agent', 'post-tool',
+                             dict(I['post_tool_claim'], tool_input={'resource': LAUNCH_TASK, 'agent': 'w2'})),
+                            ('a claim with next', 'post-tool',
+                             dict(I['post_tool_claim'], tool_input={'resource': LAUNCH_TASK, 'next': True}))):
+        hook(mode, inp, env)
+        if result() is not None:
+            seen.append(name)
+    check('claude: no result file from an error answer, an MCP error result, another server\'s claim tool, '
+          'a failed call, a subagent claim, another session, another task, run or agent, or next',
+          not seen, ', '.join(seen))
+    hook('post-tool', I['post_tool_claim_refused'], env)
+    refused = result()
+    hook('post-tool', I['post_tool_claim'], env)
+    held = result()
+    hook('post-tool', I['post_tool_claim_refused'], env)
+    still = result()
+    check('claude: a refused claim writes refused; a held claim then writes held; a later refusal never replaces held',
+          refused == '{"claim":"refused"}' and held == '{"claim":"held"}' and still == '{"claim":"held"}',
+          f'{refused} {held} {still}')
+    check('claude: the result file is mode 0600 and no temporary file is left',
+          stat.S_IMODE(os.stat(res).st_mode) == 0o600 and os.listdir(os.path.dirname(res)) == [L + '.json'])
+    L2 = 'abcdefabcdef0002'
+    env2 = dict(env, CTRLB_LAUNCH=L2, CTRLB_TASK_MODE='takeover')
+    hook('session-start', I['session_start'], env2)
+    hook('post-tool', I['post_tool_claim_takeover'], env2)
+    check('claude: a held takeover (plugin tool name) writes held',
+          open(os.path.join(watch, 'result', L2 + '.json')).read() == '{"claim":"held"}')
+    L3 = 'abcdefabcdef0003'
+    env3 = dict(env, CTRLB_LAUNCH=L3)
+    hook('post-tool', I['post_tool_claim'], env3)
+    check('claude: a session that never started as the worker (no marker) writes no result',
+          not os.path.exists(os.path.join(watch, 'result', L3 + '.json')) and not os.path.exists(os.path.join(watch, 'used', L3)))
+    plain = base_env(seeker.url, os.path.join(top, 'home-plain'), CTRLB_RUN='run-w', CTRLB_AGENT='w1',
+                     CTRLB_WATCH_DIR=os.path.join(top, 'watch-plain'))
+    hook('session-start', I['session_start'], plain)
+    hook('post-tool', I['post_tool_claim'], plain)
+    check('claude: without CTRLB_LAUNCH nothing is written to the watch folder', not os.path.exists(os.path.join(top, 'watch-plain')))
+
+
+def test_launch_result_codex(seeker):
+    """Codex: the result file is read from the worker's rollout (a claim call matched with its answer) at session end
+    and at the end of a turn."""
+    sys.path.insert(0, os.path.join(ROOT, 'lib'))
+    import rows_codex
+    top, I, C, chome, cmain = launch_files()
+    seeker.state.update(RELAY_STATE)
+    watch = os.path.join(top, 'watch')
+    with open(os.path.join(FIX, 'codex-claims.jsonl')) as fh:
+        lines = {json.loads(ln)['payload']['item']['id']: ln for ln in fh if ln.strip()}
+    calls = rows_codex.claim_calls(os.path.join(FIX, 'codex-claims.jsonl'))
+    by_id = [a for a, _ in calls]
+    answers = [ans for _, ans in calls]
+    check('rows_codex.claim_calls: each claim call with its answer; no answer for a transport error, an error answer '
+          'or text that is not JSON', len(calls) == 9 and answers[0].get('held') is True and answers[1].get('held') is False
+          and answers[2] is None and answers[3] is None and answers[4] is None and by_id[5]['resource'] == 'task 04 pruning',
+          json.dumps(answers)[:400])
+    check('rows_codex.claim_calls: thread keeps only that thread\'s calls',
+          len(rows_codex.claim_calls(os.path.join(FIX, 'codex-claims.jsonl'), CSID)) == 8)
+
+    def rollout(name, ids):
+        path = os.path.join(top, f'rollout-{name}.jsonl')
+        shutil.copyfile(cmain, path)
+        with open(path, 'a') as fh:
+            fh.write('\n' + ''.join(lines[i] for i in ids))
+        return path
+
+    def env_for(launch):
+        return base_env(seeker.url, os.path.join(top, 'home-' + launch), CODEX_HOME=chome, CTRLB_RUN='garden-run',
+                        CTRLB_AGENT='garden.codex-0a1b2c3d', CTRLB_TASK=CODEX_TASK, CTRLB_TASK_MODE='claim',
+                        CTRLB_LAUNCH=launch, CTRLB_WATCH_DIR=watch)
+
+    def result(launch):
+        try:
+            return open(os.path.join(watch, 'result', launch + '.json')).read()
+        except OSError:
+            return None
+    L = 'c0dec0dec0de0001'
+    env = env_for(L)
+    chook('session-start', C['session_start'], env)
+    noise = rollout('noise', ['claim-transport', 'claim-error', 'claim-unparsable', 'claim-other-task', 'claim-other-run',
+                              'claim-next', 'claim-other-thread'])
+    chook('session-end', dict(C['session_end'], transcript_path=noise), env)
+    check('codex: no result from a transport error, an error answer, text that is not JSON, another task, another run, '
+          'a claim with next or another thread', result(L) is None, str(result(L)))
+    held = rollout('held', ['claim-transport', 'claim-held'])
+    chook('session-end', dict(C['session_end'], transcript_path=held, agent_id=CSUB, agent_type='worker'), env)
+    chook('session-end', dict(C['session_end'], transcript_path=held, session_id='0190f0a0-1111-7000-8000-0000000000c2'), env)
+    check("codex: a subagent's session end and another session's write no result", result(L) is None, str(result(L)))
+    refused = rollout('refused', ['claim-refused'])
+    chook('session-end', dict(C['session_end'], transcript_path=refused), env)
+    r1 = result(L)
+    chook('upload', dict(C['stop'], transcript_path=rollout('refused-held', ['claim-refused', 'claim-held'])), env)
+    r2 = result(L)
+    chook('session-end', dict(C['session_end'], transcript_path=refused), env)
+    r3 = result(L)
+    check('codex: session end writes refused; a turn end with a later held claim writes held; refused never replaces held',
+          r1 == '{"claim":"refused"}' and r2 == '{"claim":"held"}' and r3 == '{"claim":"held"}', f'{r1} {r2} {r3}')
+    check('codex: no temporary file is left', os.listdir(os.path.join(watch, 'result')) == [L + '.json'])
+    L2 = 'c0dec0dec0de0002'
+    env2 = env_for(L2)
+    chook('session-start', C['session_start_subagent'], env2)
+    chook('session-end', dict(C['session_end'], session_id=CSUB, transcript_path=C['session_start_subagent']['transcript_path']), env2)
+    chook('subagent-start', C['subagent_start'], env2)
+    check('codex: a subagent thread never takes the marker or writes a result',
+          not os.path.exists(os.path.join(watch, 'used', L2)) and result(L2) is None)
+    L3 = 'c0dec0dec0de0003'
+    env3 = env_for(L3)
+    chook('session-start', C['session_start'], env3)
+    chook('flush', dict(C['pre_compact'], transcript_path=held), env3)
+    check('codex: a compaction (PreCompact) of the worker writes the result too', result(L3) == '{"claim":"held"}', str(result(L3)))
+
+
+def test_launch_result_synced():
+    """The result file's rename is synced in its directory (and a directory made for it in its parent), so a power
+    failure cannot bring back a replaced refused result."""
+    import launch
+    top = os.path.join(WORK, 'launch-sync')
+    shutil.rmtree(top, ignore_errors=True)
+    os.makedirs(top)
+    watch = os.path.join(top, 'watch')
+    info = dict(launch='5ec5ec5ec5ec0001', task=LAUNCH_TASK, mode='claim', run='run-w')
+    events = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd):
+        st = os.fstat(fd)
+        events.append(('fsync-dir' if stat.S_ISDIR(st.st_mode) else 'fsync-file', st.st_ino))
+        return real_fsync(fd)
+
+    def replace(a, b):
+        events.append(('replace', os.path.basename(b)))
+        return real_replace(a, b)
+    with mock.patch.dict(os.environ, {'CTRLB_WATCH_DIR': watch}), mock.patch.object(launch.common, 'log'):
+        open(launch.marker_path(info), 'w').write('sid')
+        with mock.patch('os.fsync', fsync), mock.patch('os.replace', replace):
+            launch.write_result(info, 'refused')
+            refused = list(events)
+            events.clear()
+            launch.write_result(info, 'held')
+    res_ino = os.stat(os.path.join(watch, 'result')).st_ino
+    watch_ino = os.stat(watch).st_ino
+    name = info['launch'] + '.json'
+    for label, ev in (('refused', refused), ('held', events)):
+        at = ev.index(('replace', name)) if ('replace', name) in ev else -1
+        check(f'launch: the {label} result rename is followed by an fsync of the result directory',
+              at >= 0 and ('fsync-dir', res_ino) in ev[at + 1:], str(ev))
+    check('launch: the result directory made for the first result is synced in the watch directory',
+          ('fsync-dir', watch_ino) in refused, str(refused))
+    check('launch: the held result replaced refused', open(os.path.join(watch, 'result', name)).read() == '{"claim":"held"}')
+    spaced = os.path.join(top, 'watch ')      # the watcher reads CTRLB_WATCH_DIR as given: the trailing space is kept
+    info2 = dict(info, launch='5ec5ec5ec5ec0002')
+    with mock.patch.dict(os.environ, {'CTRLB_WATCH_DIR': spaced}), mock.patch.object(launch.common, 'log'):
+        open(launch.marker_path(info2), 'w').write('sid')
+        launch.write_result(info2, 'held')
+        got = launch.watch_dir()
+    name2 = info2['launch'] + '.json'
+    check('launch: CTRLB_WATCH_DIR is used as given, not trimmed: a directory name that ends in a space',
+          got == spaced and os.path.exists(os.path.join(spaced, 'used', info2['launch']))
+          and open(os.path.join(spaced, 'result', name2)).read() == '{"claim":"held"}'
+          and not os.path.exists(os.path.join(watch, 'result', name2))
+          and launch.watch_dir({}) == os.path.join(os.path.expanduser('~'), '.ctrlb', 'watch'), got)
+
 def main():
     seeker = Seeker()
     run_test(test_runner_failure_reporting)
@@ -5585,6 +6355,11 @@ def main():
     run_test(test_backfill_failure_status, seeker)
     run_test(test_redaction_linear_budget)
     run_test(test_witness_docs)
+    run_test(test_launch_no_change, seeker)
+    run_test(test_launch_rules, seeker)
+    run_test(test_launch_result_claude, seeker)
+    run_test(test_launch_result_codex, seeker)
+    run_test(test_launch_result_synced)
     run_test(test_pre_tool, seeker)
     run_test(test_model_call_guard, seeker)
     run_test(test_spawned_agents, seeker)
@@ -5641,4 +6416,6 @@ def main():
 
 
 if __name__ == '__main__':
+    if sys.argv[1:] == ['--write-no-launch-texts']:
+        sys.exit(write_no_launch_texts())
     sys.exit(main())
