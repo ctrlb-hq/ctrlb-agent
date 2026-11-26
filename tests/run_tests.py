@@ -5160,13 +5160,19 @@ def title_calls(seeker):
     return titles, others, mixed
 
 
+def clean(path):
+    """A test's own directory under tests/work, emptied first so the test does not depend on an earlier run."""
+    shutil.rmtree(path, ignore_errors=True)
+    return path
+
+
 def file_state(path):
     st = common.FileState(path, time.time() + 1)
     return json.loads(read(st.file)) if os.path.exists(st.file) else {}
 
 
 def test_session_titles(seeker):
-    home = os.path.join(WORK, 'home-titles')
+    home = clean(os.path.join(WORK, 'home-titles'))
     path = os.path.join(WORK, 'titles', SID + '.jsonl')
     os.makedirs(os.path.dirname(path), exist_ok=True)
     cfg = dict(TITLE_CFG, url=seeker.url)
@@ -5240,7 +5246,7 @@ def test_session_title_refusal(seeker):
             return 202, {'accepted': len(body)}
         return answer
 
-    home = os.path.join(WORK, 'home-titles-refused')
+    home = clean(os.path.join(WORK, 'home-titles-refused'))
     path = os.path.join(WORK, 'titles-refused', SID + '.jsonl')
     write(path)
     try:
@@ -5285,7 +5291,7 @@ def test_session_title_refusal(seeker):
     finally:
         seeker.state.pop('records_answer', None)
 
-    home = os.path.join(WORK, 'home-titles-5xx')
+    home = clean(os.path.join(WORK, 'home-titles-5xx'))
     path = os.path.join(WORK, 'titles-5xx', SID + '.jsonl')
     write(path)
     try:
@@ -5313,8 +5319,8 @@ def test_session_title_refusal(seeker):
 
 
 def test_backfill_titles(seeker):
-    home = os.path.join(WORK, 'home-backfill-titles')
-    projects = os.path.join(WORK, 'backfill-titles-projects')
+    home = clean(os.path.join(WORK, 'home-backfill-titles'))
+    projects = clean(os.path.join(WORK, 'backfill-titles-projects'))
     path = os.path.join(projects, '-work-garden', SID + '.jsonl')
     sub = os.path.join(projects, '-work-garden', SID, 'subagents', 'agent-abc123.jsonl')
     other = os.path.join(projects, '-work-other', 'other-session.jsonl')
@@ -5342,8 +5348,9 @@ def test_backfill_titles(seeker):
             rows_claude.upload_file(cfg, p, time.time() + 5, rows_fn=old_rows)
             st = common.FileState(p, time.time() + 1)
             data = json.loads(read(st.file))
-            for k in ('title', 'title_wait', 'title_seqs'):
-                data.pop(k, None)
+            for k in common.FileState.fresh():
+                if k.startswith('title'):
+                    data.pop(k, None)
             with open(st.file, 'w') as fh:
                 json.dump(data, fh)
         before = file_state(path)
@@ -5398,6 +5405,279 @@ def test_backfill_titles(seeker):
     check('after backfill --titles, the next upload sends no title for a repeat', not titles and len(others) == 1)
 
 
+def ai_line(title):
+    """An ai-title line in the shape Claude Code writes it: no timestamp, no cwd."""
+    return json.dumps({'type': 'ai-title', 'aiTitle': title, 'sessionId': SID}) + '\n'
+
+
+def at(i):
+    """A distinct time for line i of a generated transcript."""
+    return f'2026-11-03T{10 + i // 3600:02d}:{(i // 60) % 60:02d}:{i % 60:02d}Z'
+
+
+def accepted_titles(seeker):
+    return [(r['seq'], r['body']) for r in seeker.rows if r['block_type'] == 'title']
+
+
+def test_title_sources(seeker):
+    cfg = dict(TITLE_CFG, url=seeker.url)
+    cases = {
+        'ai alone': ([line('user', 'start', at(0)), ai_line('Auto name'), ai_line('Auto name'), line('user', 'go on', at(1))],
+                     [(1, 'Auto name', rows_claude.micros(at(0)) + 1)]),
+        'ai then custom': ([line('user', 'start', at(0)), ai_line('Auto name'), line('user', 'go on', at(1)),
+                            title_line('My name'), ai_line('Auto name'), line('user', 'more', at(2))],
+                           [(1, 'Auto name', rows_claude.micros(at(0)) + 1), (3, 'My name', rows_claude.micros(at(1)) + 1)]),
+    }
+    for case, (lines, want) in cases.items():
+        path = os.path.join(WORK, 'title-sources', case.replace(' ', '-'), SID + '.jsonl')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as fh:
+            fh.writelines(lines)
+        seeker.reset()
+        with mock.patch.object(common, 'HOME', clean(os.path.join(WORK, 'home-sources-' + case.replace(' ', '-')))):
+            rows_claude.upload_file(cfg, path, time.time() + 5)
+        got = [(r['seq'], r['body'], r['_timestamp']) for b in title_calls(seeker)[0] for r in b]
+        check('titles: ' + case + ': each new title is a row at its own seq, block_idx 0; repeats and an ai-title after a '
+              'custom one write nothing', got == want and all(r['block_idx'] == 0 for b in title_calls(seeker)[0] for r in b),
+              json.dumps(got))
+    # A custom title wins over a later ai-title, also in a later upload.
+    path = os.path.join(WORK, 'title-sources', 'custom-then-ai', SID + '.jsonl')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as fh:
+        fh.writelines([line('user', 'start', at(0)), title_line('My name'), line('user', 'go on', at(1))])
+    home = clean(os.path.join(WORK, 'home-sources-custom-then-ai'))
+    with mock.patch.object(common, 'HOME', home):
+        seeker.reset()
+        rows_claude.upload_file(cfg, path, time.time() + 5)
+        first = accepted_titles(seeker)
+        with open(path, 'a') as fh:
+            fh.writelines([ai_line('Auto name'), line('user', 'more', at(2))])
+        seeker.reset()
+        rows_claude.upload_file(cfg, path, time.time() + 5)
+        st = file_state(path)
+    check('titles: custom then ai-title: the ai-title is ignored, across uploads',
+          first == [(1, 'My name')] and not accepted_titles(seeker) and len(seeker.rows) == 1
+          and st['title_custom'] is True and st['title'] == 'My name', json.dumps(first))
+    # backfill.py --titles sends ai-title rows too.
+    path = os.path.join(WORK, 'title-sources', 'ai alone'.replace(' ', '-'), SID + '.jsonl')
+    home = clean(os.path.join(WORK, 'home-sources-backfill'))
+    with mock.patch.object(common, 'HOME', home):
+        rows_claude.upload_file(cfg, path, time.time() + 5,
+                                rows_fn=lambda *a: [r for r in rows_claude.rows_from(*a) if r['block_type'] != 'title'])
+        st = common.FileState(path, time.time() + 1)
+        data = {k: v for k, v in json.loads(read(st.file)).items() if not k.startswith('title')}
+        with open(st.file, 'w') as fh:
+            json.dump(data, fh)
+        seeker.reset()
+        n = rows_claude.upload_titles(cfg, path, time.time() + 5)
+    check('titles: backfill.py --titles sends ai-title rows too', n == 1 and accepted_titles(seeker) == [(1, 'Auto name')])
+
+
+def test_title_retries(seeker):
+    cfg = dict(TITLE_CFG, url=seeker.url)
+    base = os.path.join(WORK, 'title-retries')
+    os.makedirs(base, exist_ok=True)
+
+    def fail_call(n, status=500, body=None):
+        """A records answer that fails the n-th call (counted from 1) and accepts the others."""
+        calls = []
+
+        def answer(rows):
+            calls.append(rows)
+            if len(calls) == n:
+                return status, body or {'error': 'boom'}
+            return 202, {'accepted': len(rows)}
+        return answer
+
+    # S1: the title call is accepted, the transcript call after it fails; the retry does not send the title again.
+    path = os.path.join(base, 'accepted-then-fail.jsonl')
+    with open(path, 'w') as fh:
+        fh.writelines([title_line('Alpha'), line('user', 'hello', at(0))])
+    try:
+        with mock.patch.object(common, 'HOME', clean(os.path.join(WORK, 'home-retry-s1'))):
+            seeker.reset()
+            seeker.state['records_answer'] = fail_call(2)
+            try:
+                rows_claude.upload_file(cfg, path, time.time() + 5)
+            except common.SeekerError:
+                pass
+            st = file_state(path)
+            seeker.state.pop('records_answer')
+            rows_claude.upload_file(cfg, path, time.time() + 5)
+            check('titles: an accepted title is recorded at once and not sent again after a later failure',
+                  st.get('title_seqs') == [0] and st.get('line', 0) == 0 and accepted_titles(seeker) == [(0, 'Alpha')]
+                  and len([r for r in seeker.rows if r['block_type'] != 'title']) == 1, json.dumps(accepted_titles(seeker)))
+    finally:
+        seeker.state.pop('records_answer', None)
+
+    # S1: the title call is accepted, then the budget is gone before the transcript call.
+    path = os.path.join(base, 'accepted-then-budget.jsonl')
+    with open(path, 'w') as fh:
+        fh.writelines([title_line('Alpha'), line('user', 'hello', at(0))])
+    with mock.patch.object(common, 'HOME', clean(os.path.join(WORK, 'home-retry-budget'))):
+        clock, sent = [0.0], []
+
+        def slow_titles(cfg_, rows, timeout):
+            sent.append(rows)
+            if rows[0]['block_type'] == 'title':
+                clock[0] += 100
+            return {'accepted': len(rows)}
+
+        with mock.patch.object(rows_claude.time, 'monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(common, 'ingest_records', side_effect=slow_titles):
+            rows_claude.upload_file(cfg, path, time.time() + 5)
+        st = file_state(path)
+        seeker.reset()
+        rows_claude.upload_file(cfg, path, time.time() + 5)
+        check('titles: an accepted title is not sent again when the budget ran out before the transcript call',
+              len(sent) == 1 and st.get('title_seqs') == [0] and st.get('line', 0) == 0 and not accepted_titles(seeker)
+              and len(seeker.rows) == 1, json.dumps(st)[:200])
+
+    # S3: more than one call, a held title on line 0, a change after the first call, the 2nd call failing.
+    path = os.path.join(base, 'many.jsonl')
+    with open(path, 'w') as fh:
+        fh.write(title_line('Alpha'))
+        fh.writelines(line('user', f'row {i}', at(i)) for i in range(1, 601))
+        fh.write(title_line('Beta'))
+        fh.writelines(line('user', f'row {i}', at(i)) for i in range(602, 1202))
+    try:
+        with mock.patch.object(common, 'HOME', clean(os.path.join(WORK, 'home-retry-many'))):
+            seeker.reset()
+            seeker.state['records_answer'] = fail_call(2)
+            try:
+                rows_claude.upload_file(cfg, path, time.time() + 30)
+            except common.SeekerError:
+                pass
+            first_call = seeker.calls[0]['body']
+            seeker.state.pop('records_answer')
+            rows_claude.upload_file(cfg, path, time.time() + 30)
+            text = [r['seq'] for r in seeker.rows if r['block_type'] != 'title']
+            st = file_state(path)
+            check('titles: the first records call is the title call, and across a failed call and its retry every title '
+                  'and every transcript row is accepted exactly once',
+                  [r['body'] for r in first_call] == ['Alpha'] and accepted_titles(seeker) == [(0, 'Alpha'), (601, 'Beta')]
+                  and len(text) == 1200 and len(set(text)) == 1200 and st['line'] == 1202 and st['title_seqs'] == [0, 601],
+                  json.dumps([accepted_titles(seeker), len(text), len(set(text))]))
+    finally:
+        seeker.state.pop('records_answer', None)
+
+    # S3: a large line with a time releases a held title and spans calls; the title call fails and is retried.
+    path = os.path.join(base, 'large.jsonl')
+    blocks = [{'type': 'text', 'text': 'z' * 65_000} for _ in range(70)]
+    with open(path, 'w') as fh:
+        fh.write(title_line('Big'))
+        fh.write(json.dumps(dict(type='assistant', timestamp=at(1), message={'role': 'assistant', 'content': blocks})) + '\n')
+        fh.write(line('user', 'tail after large line', at(2)))
+    try:
+        with mock.patch.object(common, 'HOME', clean(os.path.join(WORK, 'home-retry-large'))):
+            seeker.reset()
+            seeker.state['records_answer'] = fail_call(2)
+            try:
+                rows_claude.upload_file(cfg, path, time.time() + 60)
+            except common.SeekerError:
+                pass
+            mid = file_state(path)
+            seeker.state.pop('records_answer')
+            rows_claude.upload_file(cfg, path, time.time() + 60)
+            keys = [(r['seq'], r['block_idx']) for r in seeker.rows if r['block_type'] != 'title']
+            check('titles: a titled line that spans calls keeps its title once and its rows once across a retry',
+                  0 < mid['row'] < 70 and mid['line'] == 1 and accepted_titles(seeker) == [(0, 'Big')]
+                  and len(keys) == 71 and len(set(keys)) == 71,
+                  json.dumps([mid['row'], accepted_titles(seeker), len(keys), len(set(keys))]))
+    finally:
+        seeker.state.pop('records_answer', None)
+
+    # A refusal skips this upload's later title calls too: titles on both sides of a checkpoint, one title call.
+    path = os.path.join(base, 'refused-both-sides.jsonl')
+    with open(path, 'w') as fh:
+        fh.write(title_line('Alpha'))
+        fh.writelines(line('user', f'row {i}', at(i)) for i in range(1, 551))
+        fh.write(title_line('Beta'))
+        fh.writelines(line('user', f'row {i}', at(i)) for i in range(552, 602))
+    home = clean(os.path.join(WORK, 'home-retry-refused'))
+    try:
+        with mock.patch.object(common, 'HOME', home):
+            seeker.reset()
+            seeker.state['records_answer'] = lambda rows: ((400, TITLE_REFUSAL) if rows[0]['block_type'] == 'title'
+                                                          else (202, {'accepted': len(rows)}))
+            rows_claude.upload_file(cfg, path, time.time() + 30)
+            titles = [c for c in seeker.calls if c['body'] and c['body'][0]['block_type'] == 'title']
+            check('titles: after a refusal, the same upload makes no other title call and logs once',
+                  len(titles) == 1 and _log(home).count('refused block_type "title"') == 1 and len(seeker.rows) == 600
+                  and file_state(path)['line'] == 602, str(len(titles)))
+    finally:
+        seeker.state.pop('records_answer', None)
+
+    # A held title waits past a cost record with no time for the first line with a real time.
+    path = os.path.join(base, 'cost-first.jsonl')
+    with open(path, 'w') as fh:
+        fh.writelines([title_line('Costly'), json.dumps({'type': 'cost-state', 'totalCostUSD': 0.1}) + '\n',
+                       line('user', 'hello', at(3))])
+    with mock.patch.object(common, 'HOME', clean(os.path.join(WORK, 'home-retry-cost'))):
+        seeker.reset()
+        rows_claude.upload_file(cfg, path, time.time() + 5)
+    got = [(r['seq'], r['_timestamp']) for r in seeker.rows if r['block_type'] == 'title']
+    check('titles: a held title is not released by a line with no time of its own',
+          got == [(0, rows_claude.micros(at(3)))], json.dumps(got))
+
+    # A lone surrogate in a title cannot stop the upload.
+    path = os.path.join(base, 'surrogate.jsonl')
+    with open(path, 'w') as fh:
+        fh.write('{"type": "custom-title", "customTitle": "Fix \\ud83d", "sessionId": "%s"}\n' % SID)
+        fh.write(line('user', 'hello', at(0)))
+    with mock.patch.object(common, 'HOME', clean(os.path.join(WORK, 'home-retry-surrogate'))):
+        seeker.reset()
+        rows_claude.upload_file(cfg, path, time.time() + 5)
+        check('titles: a lone surrogate in a title becomes ? and the upload goes on',
+              accepted_titles(seeker) == [(0, 'Fix ?')] and file_state(path)['line'] == 2, json.dumps(accepted_titles(seeker)))
+
+
+def test_title_backfill_concurrency(seeker):
+    """A hook upload while a backfill holds the file: it gives up with 'state file busy', and nothing is lost."""
+    import threading
+    cfg = dict(TITLE_CFG, url=seeker.url)
+    path = os.path.join(WORK, 'title-concurrency', SID + '.jsonl')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as fh:
+        fh.writelines([title_line('Alpha'), line('user', 'hello', at(0))])
+    home = clean(os.path.join(WORK, 'home-title-concurrency'))
+    with mock.patch.object(common, 'HOME', home):
+        rows_claude.upload_file(cfg, path, time.time() + 5,
+                                rows_fn=lambda *a: [r for r in rows_claude.rows_from(*a) if r['block_type'] != 'title'])
+        st = common.FileState(path, time.time() + 1)
+        data = {k: v for k, v in json.loads(read(st.file)).items() if not k.startswith('title')}
+        with open(st.file, 'w') as fh:
+            json.dump(data, fh)
+        with open(path, 'a') as fh:
+            fh.write(line('user', 'during the backfill', at(1)))
+        entered, release, sent, out = threading.Event(), threading.Event(), [], {}
+
+        def held(cfg_, rows, timeout):
+            entered.set()
+            release.wait(10)
+            sent.append(rows)
+            return {'accepted': len(rows)}
+
+        with mock.patch.object(common, 'ingest_records', side_effect=held):
+            worker = threading.Thread(target=lambda: out.update(n=rows_claude.upload_titles(cfg, path, time.time() + 10)))
+            worker.start()
+            entered.wait(10)
+            try:
+                rows_claude.upload_file(cfg, path, time.time() + 0.3)
+                busy = None
+            except TimeoutError as e:
+                busy = str(e)
+            release.set()
+            worker.join(10)
+        seeker.reset()
+        rows_claude.upload_file(cfg, path, time.time() + 5)
+        st = file_state(path)
+    check('titles: a hook upload during a backfill gives up with state file busy; afterwards the title went once and '
+          'the new line is uploaded', busy == 'state file busy' and out.get('n') == 1 and len(sent) == 1
+          and [r['body'] for r in sent[0]] == ['Alpha'] and [r['body'] for r in seeker.rows] == ['during the backfill']
+          and st['line'] == 3 and st['title_seqs'] == [0], json.dumps([busy, out, len(sent), st.get('line')]))
+
+
 CHELD = '01a0bbbb-0000-7000-8000-000000000003'      # a thread whose first lines have no time, written by the tests
 
 
@@ -5418,7 +5698,7 @@ def last_time(path):
 
 def test_codex_thread_names():
     import rows_codex
-    chome = os.path.join(WORK, 'codex-home-names')
+    chome = clean(os.path.join(WORK, 'codex-home-names'))
     shutil.rmtree(chome, ignore_errors=True)
     os.makedirs(chome)
     check('codex titles: no session_index.jsonl means no names', rows_codex.thread_titles(chome) == {})
@@ -5462,7 +5742,7 @@ def test_codex_title_history(seeker):
         with open(main, 'a') as fh:
             fh.write(citem(dict(type='message', role='user', content=[dict(type='input_text', text=text)]), ts))
 
-    with mock.patch.dict(os.environ, CODEX_HOME=chome), mock.patch.object(common, 'HOME', os.path.join(WORK, 'home-history')):
+    with mock.patch.dict(os.environ, CODEX_HOME=chome), mock.patch.object(common, 'HOME', clean(os.path.join(WORK, 'home-history'))):
         rows_codex.upload_file(cfg, main, time.time() + 10)
         with open(index, 'w') as fh:            # out of file order, with a repeat in the middle; times far ahead
             fh.write(index_line(CSID, 'Second', '2026-12-02T08:00:00Z'))
@@ -5480,8 +5760,8 @@ def test_codex_title_history(seeker):
               == [('First', 1000, 20, t + 1), ('Second', 1001, 20, t + 2), ('Third', 1002, 20, t + 3)]
               and len(titles) == 1 and not mixed, json.dumps([(r['body'], r['block_idx'], r['seq'], r['_timestamp']) for r in got]))
         check('codex titles: the state records the newest name written and its updated_at',
-              st['title'] == st['title_ok'] == 'Third' and st['title_at'] == st['title_ok_at'] == rows_codex._when('2026-12-04T08:00:00Z')
-              and st['title_rows'] == 3, json.dumps({k: st.get(k) for k in ('title', 'title_at', 'title_rows')}))
+              st['title'] == 'Third' and st['title_at'] == rows_codex._when('2026-12-04T08:00:00Z')
+              and st['title_rows'] == 3 and st['title_refused'] == [], json.dumps({k: st.get(k) for k in ('title', 'title_at', 'title_rows')}))
         more('Nothing renamed.', '2026-09-06T12:06:00.000Z')
         seeker.reset()
         rows_codex.upload_file(cfg, main, time.time() + 10)
@@ -5499,18 +5779,23 @@ def test_codex_title_history(seeker):
         check('codex titles: later renames continue the block_idx, the newest the highest',
               [(r['body'], r['block_idx'], r['seq']) for r in got] == [('Fourth', 1003, 22), ('Fifth', 1004, 22)])
 
-    # A state written before title_at was kept: names at or before its title count as written.
-    for case, title in (('named', 'Second'), ('unknown', 'Not in the index')):
+    # A state with a title but no title_at: names up to the newest one equal to its title count as written; when no
+    # name equals it, all but the newest. A state whose title_at is before a name equal to its title skips that name.
+    when = rows_codex._when
+    for case, title, at, first, then in (('named', 'Second', None, [], [('Third', 1001)]),
+                                         ('unknown', 'Not in the index', None, [('Second', 1001)], [('Third', 1002)]),
+                                         ('skip', 'Second', when('2026-12-01T08:00:00Z'), [], [('Third', 1001)])):
         chome, main, _ = setup_codex(os.path.join(WORK, 'codex-home-migrate-' + case))
         index = os.path.join(chome, 'session_index.jsonl')
-        home = os.path.join(WORK, 'home-migrate-' + case)
+        home = clean(os.path.join(WORK, 'home-migrate-' + case))
         with mock.patch.dict(os.environ, CODEX_HOME=chome), mock.patch.object(common, 'HOME', home):
             rows_codex.upload_file(cfg, main, time.time() + 10)
             st = common.FileState(main, time.time() + 1)
             data = json.loads(read(st.file))
-            for k in ('title_at', 'title_ok_at'):
-                data.pop(k, None)
-            data.update(title=title, title_ok=title, title_rows=1)
+            data.pop('title_at', None)
+            if at:
+                data['title_at'] = at
+            data.update(title=title, title_rows=1)
             with open(st.file, 'w') as fh:
                 json.dump(data, fh)
             with open(index, 'w') as fh:
@@ -5521,23 +5806,28 @@ def test_codex_title_history(seeker):
             rows_codex.upload_file(cfg, main, time.time() + 10)
             got, *_ = codex_titles(seeker)
             st = file_state(main)
-            check('codex titles: an older state (' + case + ') sends no name at or before the one it wrote',
-                  not got and rows_codex.upload_titles(cfg, main, time.time() + 10, send=False) == 0
-                  and st['title_at'] == rows_codex._when('2026-12-02T08:00:00Z'), json.dumps(st)[:300])
+            check('codex titles: a state (' + case + ') sends no name at or before the one it wrote, only newer ones',
+                  [(r['body'], r['block_idx']) for r in got] == first
+                  and rows_codex.upload_titles(cfg, main, time.time() + 10, send=False) == 0
+                  and st['title_at'] == when('2026-12-02T08:00:00Z') and st['title'] == 'Second', json.dumps(st)[:300])
             with open(index, 'a') as fh:
                 fh.write(index_line(CSID, 'Third', '2026-12-03T08:00:00Z'))
             more('Renamed again.', '2026-09-06T12:06:00.000Z')
             seeker.reset()
             rows_codex.upload_file(cfg, main, time.time() + 10)
             got, *_ = codex_titles(seeker)
-            check('codex titles: after an older state (' + case + '), only newer names, after its block_idx',
-                  [(r['body'], r['block_idx']) for r in got] == [('Third', 1001)])
+            check('codex titles: after that state (' + case + '), only newer names, after its block_idx',
+                  [(r['body'], r['block_idx']) for r in got] == then, json.dumps([(r['body'], r['block_idx']) for r in got]))
+    h = [(1, 'A'), (2, 'B'), (2, 'C'), (3, 'D')]
+    check('codex titles: names written, by title and title_at, with ties at title_at',
+          [rows_codex._written(h, *a) for a in (('', None), ('B', None), ('Z', None), ('B', 2), ('C', 2), ('X', 2),
+                                                 ('D', 3))] == [0, 2, 3, 2, 3, 3, 4])
 
 
 def test_codex_titles(seeker):
     import rows_codex
     chome, main, sub = setup_codex(os.path.join(WORK, 'codex-home-titles'))
-    home = os.path.join(WORK, 'home-codex-titles')
+    home = clean(os.path.join(WORK, 'home-codex-titles'))
     index = os.path.join(chome, 'session_index.jsonl')
     cfg = dict(TITLE_CFG, url=seeker.url)
     future = '2026-12-25T08:00:00Z'
@@ -5597,8 +5887,8 @@ def test_codex_titles(seeker):
         check('codex titles: a rename with new lines sends the next block_idx at the new last line',
               len(got) == 1 and got[0]['seq'] == 21 and got[0]['block_idx'] == 1002 and got[0]['body'] == 'Roses too'
               and got[0]['_timestamp'] == rows_claude.micros('2026-09-06T12:05:30.000Z') + 1
-              and st['title'] == st['title_ok'] == 'Roses too' and st['title_rows'] == 3 and st['line'] == 22,
-              json.dumps({k: st.get(k) for k in ('title', 'title_ok', 'title_rows', 'line')}))
+              and st['title'] == 'Roses too' and st['title_rows'] == 3 and st['line'] == 22,
+              json.dumps({k: st.get(k) for k in ('title', 'title_rows', 'line')}))
 
     # No index: no title. A thread with no time yet: the name waits.
     chome2, main2, _ = setup_codex(os.path.join(WORK, 'codex-home-titles-2'))
@@ -5607,7 +5897,7 @@ def test_codex_titles(seeker):
         fh.write(json.dumps(dict(type='session_meta', payload=dict(id=CHELD, session_id=CHELD, cwd='/work/garden'))) + '\n')
         fh.write(json.dumps(dict(type='response_item', payload=dict(type='message', role='user', content=[
             dict(type='input_text', text='No time yet.')]))) + '\n')
-    with mock.patch.dict(os.environ, CODEX_HOME=chome2), mock.patch.object(common, 'HOME', os.path.join(WORK, 'home-codex-titles-2')):
+    with mock.patch.dict(os.environ, CODEX_HOME=chome2), mock.patch.object(common, 'HOME', clean(os.path.join(WORK, 'home-codex-titles-2'))):
         seeker.reset()
         rows_codex.upload_file(cfg, main2, time.time() + 10)
         got, *_ = codex_titles(seeker)
@@ -5634,10 +5924,10 @@ def test_codex_title_refusal(seeker):
     import rows_codex
     cfg = dict(TITLE_CFG, url=seeker.url)
 
-    def old_server(status):
+    def old_server(status, error=None):
         def answer(body):
             if any(r.get('block_type') == 'title' for r in body):
-                return status, TITLE_REFUSAL if status == 400 else {'error': 'boom'}
+                return status, error or (TITLE_REFUSAL if status == 400 else {'error': 'boom'})
             return 202, {'accepted': len(body)}
         return answer
 
@@ -5645,56 +5935,78 @@ def test_codex_title_refusal(seeker):
         with open(path, 'a') as fh:
             fh.write(citem(dict(type='message', role='user', content=[dict(type='input_text', text=text)]), ts))
 
-    for status in (400, 500):
-        chome, main, _ = setup_codex(os.path.join(WORK, f'codex-home-title-{status}'))
-        home = os.path.join(WORK, f'home-codex-title-{status}')
-        with open(os.path.join(chome, 'session_index.jsonl'), 'w') as fh:
+    def keys(got):
+        return [(r['body'], r['seq'], r['block_idx'], r['_timestamp']) for r in got]
+
+    t0 = rows_claude.micros('2026-09-06T12:04:19.895Z')      # the fixture rollout's last line
+    for case in ('400', '500', '400-other'):
+        chome, main, _ = setup_codex(os.path.join(WORK, f'codex-home-title-{case}'))
+        home = clean(os.path.join(WORK, f'home-codex-title-{case}'))
+        index = os.path.join(chome, 'session_index.jsonl')
+        with open(index, 'w') as fh:
             fh.write(index_line(CSID, 'Plan the beds', '2026-09-06T12:10:00Z'))
             fh.write(index_line(CSID, 'Water the beds', '2026-09-06T12:11:00Z'))
         try:
             with mock.patch.dict(os.environ, CODEX_HOME=chome), mock.patch.object(common, 'HOME', home):
                 seeker.reset()
-                seeker.state['records_answer'] = old_server(status)
-                try:
-                    rows_codex.upload_file(cfg, main, time.time() + 10)
-                    raised = None
-                except common.SeekerError as e:
-                    raised = e
+                seeker.state['records_answer'] = old_server(*{'400': (400,), '500': (500,),
+                                                              '400-other': (400, {'error': 'records[0]: seq is required'})}[case])
+                c = rows_codex.upload_file(cfg, main, time.time() + 10)
                 st = file_state(main)
                 got, titles, others, _ = codex_titles(seeker)
-                if status == 400:
-                    check('codex titles: a 400 naming block_type skips the batch, marks it written and logs once; '
-                          'the transcript is uploaded', raised is None and len(titles) == 1 and len(titles[0]) == 2 and others
-                          and st['line'] == 20 and st['title'] == 'Water the beds' and st['title_ok'] == ''
-                          and st['title_rows'] == 2 and _log(home).count('refused block_type "title"') == 1,
-                          json.dumps({k: st.get(k) for k in ('line', 'title', 'title_ok', 'title_rows')}))
+                if case == '400':
+                    check('codex titles: a 400 naming block_type skips the batch, keeps its keys, marks it written and logs '
+                          'once; the transcript is uploaded', c['lines'] == 20 and len(titles) == 1 and len(titles[0]) == 2
+                          and others and st['line'] == 20 and st['title'] == 'Water the beds' and st['title_rows'] == 2
+                          and st['title_refused'] == [[19, 1000, t0 + 1, 'Plan the beds'], [19, 1001, t0 + 2, 'Water the beds']]
+                          and _log(home).count('refused block_type "title"') == 1,
+                          json.dumps({k: st.get(k) for k in ('line', 'title', 'title_rows', 'title_refused')}))
                     more(main, 'More beds', '2026-09-06T12:06:00.000Z')
                     seeker.reset()
                     rows_codex.upload_file(cfg, main, time.time() + 10)
                     got, titles, others, _ = codex_titles(seeker)
                     check('codex titles: a refused name is not sent again by later uploads',
                           not titles and len(others) == 1 and _log(home).count('refused block_type "title"') == 1)
+                    seeker.reset()
+                    try:
+                        rows_codex.upload_titles(cfg, main, time.time() + 10)
+                        raised = None
+                    except common.RecordsRefused as e:
+                        raised = e
+                    check('codex titles: a backfill against a CtrlB that still refuses raises and keeps the rows',
+                          raised is not None and file_state(main)['title_refused'] == st['title_refused'])
                     seeker.state.pop('records_answer')
+                    # After the upgrade, a newer name is accepted first; the backfill still sends the refused ones.
+                    with open(index, 'a') as fh:
+                        fh.write(index_line(CSID, 'Roses too', '2026-09-06T12:12:00Z'))
+                    more(main, 'Roses', '2026-09-06T12:07:00.000Z')
+                    seeker.reset()
+                    rows_codex.upload_file(cfg, main, time.time() + 10)
+                    got, *_ = codex_titles(seeker)
+                    t1 = rows_claude.micros('2026-09-06T12:07:00.000Z')
+                    check('codex titles: after the upgrade a newer name goes after the refused keys',
+                          keys(got) == [('Roses too', 21, 1002, t1 + 1)], json.dumps(keys(got)))
+                    n = rows_codex.upload_titles(cfg, main, time.time() + 10, send=False)
                     seeker.reset()
                     sent = rows_codex.upload_titles(cfg, main, time.time() + 10)
                     got, *_ = codex_titles(seeker)
-                    check('codex titles: the backfill sends refused names once CtrlB takes them, after their block_idx',
-                          sent == 2 and [(r['body'], r['block_idx'], r['seq']) for r in got]
-                          == [('Plan the beds', 1002, 20), ('Water the beds', 1003, 20)]
-                          and file_state(main)['title_ok'] == 'Water the beds'
-                          and rows_codex.upload_titles(cfg, main, time.time() + 10) == 0)
+                    check('codex titles: the backfill sends the refused names at their own keys and times, below the newer one',
+                          n == 2 and sent == 2 and keys(got) == [('Plan the beds', 19, 1000, t0 + 1), ('Water the beds', 19, 1001, t0 + 2)]
+                          and file_state(main)['title_refused'] == [] and file_state(main)['title'] == 'Roses too'
+                          and rows_codex.upload_titles(cfg, main, time.time() + 10) == 0, json.dumps(keys(got)))
                 else:
-                    check('codex titles: a 5xx on the title call is raised and leaves the names unwritten',
-                          isinstance(raised, common.SeekerError) and not isinstance(raised, common.RecordsRefused)
-                          and st['line'] == 20 and st['title'] == '' and st['title_rows'] == 0, json.dumps(st)[:200])
+                    check('codex titles: a title call that fails otherwise (' + case + ') is logged, not raised, and leaves '
+                          'the names unwritten; the transcript is uploaded',
+                          c['lines'] == 20 and st['line'] == 20 and st['title'] == '' and st['title_rows'] == 0
+                          and st['title_refused'] == [] and 'thread names deferred' in _log(home), json.dumps(st)[:200])
                     seeker.state.pop('records_answer')
                     more(main, 'More beds', '2026-09-06T12:06:00.000Z')
                     seeker.reset()
                     rows_codex.upload_file(cfg, main, time.time() + 10)
                     got, *_ = codex_titles(seeker)
-                    check('codex titles: the next upload sends them', [(r['body'], r['block_idx'], r['seq']) for r in got]
+                    check('codex titles: the next upload sends them (' + case + ')', [(r['body'], r['block_idx'], r['seq']) for r in got]
                           == [('Plan the beds', 1000, 20), ('Water the beds', 1001, 20)]
-                          and file_state(main)['title_ok'] == 'Water the beds')
+                          and file_state(main)['title'] == 'Water the beds')
         finally:
             seeker.state.pop('records_answer', None)
 
@@ -5702,7 +6014,7 @@ def test_codex_title_refusal(seeker):
 def test_codex_backfill_titles(seeker):
     import rows_codex
     chome, main, sub = setup_codex(os.path.join(WORK, 'codex-home-backfill-titles'))
-    home = os.path.join(WORK, 'home-codex-backfill-titles')
+    home = clean(os.path.join(WORK, 'home-codex-backfill-titles'))
     index = os.path.join(chome, 'session_index.jsonl')
     with open(index, 'w') as fh:
         fh.write(index_line(CSID, 'Sketch the beds', '2026-09-06T12:08:00Z'))
@@ -5716,18 +6028,29 @@ def test_codex_backfill_titles(seeker):
             rows_claude.upload_file(cfg, p, time.time() + 10, ids=rows_codex.ids_for_file(cfg, p), rows_fn=rows_codex.rows_from)
             st = common.FileState(p, time.time() + 1)
             data = json.loads(read(st.file))
-            for k in ('title', 'title_wait', 'title_seqs', 'title_at', 'title_ok', 'title_ok_at', 'title_rows'):
-                data.pop(k, None)
+            for k in common.FileState.fresh():
+                if k.startswith('title'):
+                    data.pop(k, None)
             with open(st.file, 'w') as fh:
                 json.dump(data, fh)
         before = file_state(main)
     env = base_env(seeker.url, home, CODEX_HOME=chome)
 
-    def backfill(*args):
+    def backfill(*args, answer=None):
         seeker.reset()
-        return subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'backfill.py'), '--codex', '--titles'] + list(args),
-                              env=env, capture_output=True, text=True, timeout=30)
+        if answer:
+            seeker.state['records_answer'] = answer
+        try:
+            return subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'backfill.py'), '--codex', '--titles']
+                                  + list(args), env=env, capture_output=True, text=True, timeout=30)
+        finally:
+            seeker.state.pop('records_answer', None)
 
+    p = backfill('--yes', answer=lambda rows: (400, TITLE_REFUSAL))
+    with mock.patch.object(common, 'HOME', home):
+        refused = file_state(main)
+    check('backfill --titles --codex against a CtrlB that refuses titles says so, fails and records nothing',
+          p.returncode == 1 and 'older than session titles' in p.stdout and refused == before, p.stdout + p.stderr)
     p = backfill('--count')
     check('backfill --titles --codex --count reports the main threads\' names CtrlB lacks, and sends nothing',
           p.returncode == 0 and '1 uploaded transcript files with 2 session titles not sent yet' in p.stdout and not seeker.calls,
@@ -5745,8 +6068,8 @@ def test_codex_backfill_titles(seeker):
           == [('Sketch the beds', 19, 1000, last_time(main) + 1), ('Plan the beds', 19, 1001, last_time(main) + 2)]
           and '2 session titles sent, 0/1 files failed' in p.stdout, p.stdout + p.stderr)
     check('backfill --titles --codex leaves the offset alone and records the name',
-          all(after[k] == before[k] for k in ('offset', 'line', 'row', 'prev_ts')) and after['title'] == after['title_ok'] == 'Plan the beds'
-          and after['title_rows'] == 2, json.dumps({k: after.get(k) for k in ('offset', 'line', 'title', 'title_ok', 'title_rows')}))
+          all(after[k] == before[k] for k in ('offset', 'line', 'row', 'prev_ts')) and after['title'] == 'Plan the beds'
+          and after['title_rows'] == 2, json.dumps({k: after.get(k) for k in ('offset', 'line', 'title', 'title_rows')}))
     p = backfill('--yes')
     check('backfill --titles --codex twice sends nothing new', p.returncode == 0 and not seeker.calls
           and '0 uploaded transcript files with 0 session titles' in p.stdout, p.stdout)
@@ -6966,6 +7289,9 @@ def main():
     run_test(test_session_titles, seeker)
     run_test(test_session_title_refusal, seeker)
     run_test(test_backfill_titles, seeker)
+    run_test(test_title_sources, seeker)
+    run_test(test_title_retries, seeker)
+    run_test(test_title_backfill_concurrency, seeker)
     run_test(test_codex_thread_names)
     run_test(test_codex_titles, seeker)
     run_test(test_codex_title_history, seeker)

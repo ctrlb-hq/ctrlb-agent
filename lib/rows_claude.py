@@ -13,18 +13,21 @@ Beyond the content blocks:
                   cost record (a transcript "cost-state" record, or a stream-json "result" record), so the sum of
                   cost_usd over a session's rows is its cost. Float; 0.0 elsewhere
 
-Session title: Claude Code writes {"type": "custom-title", "customTitle": ...} lines, with no timestamp and repeated
-many times. The first title of a file, and each change, is one row with role "system", block_type "title" and the
-title as body; a repeat writes nothing. Its seq is the title line's own and its time the previous line's + 1 µs; a
-title before any line with a time waits, keeping its seq, for the first one and takes its time. Title rows go to CtrlB
-in a call of their own, so an older CtrlB that refuses block_type "title" refuses only them."""
+Session title: Claude Code writes the title the user sets as {"type": "custom-title", "customTitle": ...} lines and
+the one it generates as {"type": "ai-title", "aiTitle": ...} lines, with no timestamp and repeated many times. A
+custom title wins: once a file has had one, later ai-title lines are ignored. The first title of a file, and each
+change, is one row with role "system", block_type "title", block_idx 0 and the title as body; a repeat writes nothing.
+Its seq is the title line's own and its time that of the last message or cost record read + 1 µs (other lines with a
+timestamp do not count); a title before any such line with a time waits, keeping its seq, for the first one and
+takes its time. Title rows go to CtrlB in a call of their own, so an older CtrlB that refuses block_type "title"
+refuses only them."""
 import copy, datetime, glob, itertools, json, os, time
 import common
 from paths import edit_paths as normalise_edit_paths
 from redact import redact
 
 SUMMARY_PREFIX = 'This session is being continued from a previous conversation'
-TITLE_TYPE = 'custom-title'
+TITLE_TYPES = {'custom-title': 'customTitle', 'ai-title': 'aiTitle'}     # line type -> the key holding the title
 SKIP_TYPES = {'mode', 'permission-mode', 'bridge-session', 'agent-name', 'queue-operation',
               'file-history-snapshot', 'file-history-delta', 'last-prompt', 'atis-latch', 'tools-used', 'attachment'}
 EDIT_TOOLS = ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
@@ -142,14 +145,20 @@ def _title_row(rec, seq, title, ts, st, ids, cfg, hostname):
 
 
 def _title(rec, seq, st, ids, cfg, hostname):
-    """A custom-title line: a row when the title is new for the file or changed, nothing for a repeat. Before any
-    line with a time, the title waits in st['title_wait'] (see _titles_due)."""
-    title = rec.get('customTitle')
+    """A custom-title or ai-title line: a row when the title is new for the file or changed, nothing for a repeat or
+    for an ai-title after a custom title. Before any line with a time, the title waits in st['title_wait'] (see
+    _titles_due)."""
+    t = rec.get('type')
+    title = rec.get(TITLE_TYPES[t])
     title = title.strip() if isinstance(title, str) else ''
-    if not title or title == st.get('title'):
+    if not title or (t == 'ai-title' and st.get('title_custom')):
+        return []
+    if t == 'custom-title':
+        st['title_custom'] = True
+    if title == st.get('title'):
         return []
     st['title'] = title
-    if st.get('title_wait') or st['prev_ts'] < TIME_MIN:
+    if st['prev_ts'] < TIME_MIN:              # titles wait only while no time is known, so they stay in order
         st['title_wait'] = (st.get('title_wait') or []) + [[seq, title]]
         return []
     ts = st['prev_ts'] + 1
@@ -169,7 +178,7 @@ def _titles_due(rec, st, ids, cfg, hostname):
 
 def rows_from(rec, seq, st, ids, cfg, hostname):
     t = rec.get('type', '')
-    if t == TITLE_TYPE:
+    if t in TITLE_TYPES:
         return _title(rec, seq, st, ids, cfg, hostname)
     if t in ('cost-state', 'result'):
         return _cost_row(rec, seq, st, ids, cfg, hostname)
@@ -232,6 +241,9 @@ def _finish(r, counts):
         r[k], k_n = redact(r[k])
         if not isinstance(r[k], str):
             r[k] = json.dumps(r[k], ensure_ascii=False)
+        # A lone surrogate (from a \ud83d escape in a line) cannot be encoded: it becomes '?', so it cannot stop
+        # the upload.
+        r[k] = r[k].encode('utf-8', 'replace').decode('utf-8')
         n += k_n
     counts['redacted'] += n
     raw = r['body'].encode()
@@ -244,6 +256,16 @@ def _finish(r, counts):
 
 def _merged(seqs, more):
     return list(dict.fromkeys(list(seqs or []) + list(more)))
+
+
+def _size(r):
+    """A row's bytes in a records call, with its separator."""
+    return len(json.dumps(r).encode()) + 2
+
+
+def log_title_refusal(path, rerun):
+    common.log(f'upload {os.path.basename(path)}: CtrlB refused block_type "title" (HTTP 400), so it is older than '
+               f'session titles; title rows skipped. Run {rerun} after upgrading CtrlB to send them.')
 
 
 def _fits(sized):
@@ -261,9 +283,12 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
     the Claude Code parser; rows_codex passes its own (rows_fn(rec, seq, state, ids, cfg, hostname) -> [row]).
 
     Title rows (block_type "title") wait until their line is complete and go in calls of their own, sent before the
-    transcript rows of every checkpoint. When CtrlB refuses them with a 400 naming block_type (a CtrlB older than
-    title rows), they are skipped with one line in the hook log; the file state already holds their title, so later
-    uploads do not send them again, and the transcript rows go on. Any other failure stops the upload as before."""
+    transcript rows of every checkpoint. The seqs CtrlB accepts are saved at once (title_seqs), and a title row whose
+    seq is there is not sent again, so a retry after a later failure does not duplicate it. When CtrlB refuses title
+    rows with a 400 naming block_type (a CtrlB older than title rows), they and the rest of this upload's title rows
+    are skipped with one line in the hook log and the transcript rows go on; their title is in the parse state, which
+    the next checkpoint saves, so later uploads do not send them again (backfill.py --titles does). Any other failure
+    stops the upload without moving the offset."""
     counts = dict(rows=0, lines=0, redacted=0)
     until = time.monotonic() + max(0, deadline - time.time())
     if not path or not os.path.isfile(path) or time.monotonic() >= until:
@@ -278,7 +303,7 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
         first_line = pending['line']
         batch, nbytes = [], 2             # JSON array brackets; each row includes its separator
         titles, accepted = [], []         # (title row, size) of completed lines; seqs of the title rows CtrlB accepted
-        refused = []                      # not empty once CtrlB refused title rows in this upload: skip the rest
+        refused = False                   # CtrlB refused title rows in this upload: skip the rest
 
         def checkpoint(state):
             fs.data = copy.deepcopy(state)
@@ -296,6 +321,7 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
             return True
 
         def send_titles():
+            nonlocal refused
             while titles and not refused:
                 n = _fits(titles)
                 rows = [r for r, _ in titles[:n]]
@@ -305,11 +331,14 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
                 except common.RecordsRefused as e:
                     if not e.names('block_type'):
                         raise
-                    refused.append(len(titles))
-                    common.log(f'upload {os.path.basename(path)}: CtrlB refused block_type "title" (HTTP 400), so '
-                               'it is older than session titles; title rows skipped, backfill.py --titles sends them later')
+                    refused = True
+                    log_title_refusal(path, 'backfill.py --titles')
                     break
                 accepted.extend(r['seq'] for r in rows)
+                # Saved now, with the offset of the last checkpoint: should a later call fail, the retry parses these
+                # lines again and must not send these rows twice.
+                fs.data['title_seqs'] = _merged(fs.data.get('title_seqs'), accepted)
+                fs.save()
                 del titles[:n]
             titles.clear()
             return True
@@ -338,19 +367,19 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
                 line_rows = [_finish(r, counts) for r in rows_fn(rec, pending['line'], candidate, ids, cfg, hostname)] if isinstance(rec, dict) else []
                 sizes = []
                 for r in line_rows:
-                    size = len(json.dumps(r).encode()) + 2
+                    size = _size(r)
                     if size + 2 > BATCH_BYTES:
                         # Body truncation normally suffices; a shell command or metadata can also be huge.
                         for k, v in r.items():
                             if isinstance(v, str):
                                 r[k] = v.encode()[:BODY_CAP].decode(errors='ignore')
                         r['truncated'] = True
-                        size = len(json.dumps(r).encode()) + 2
+                        size = _size(r)
                         while size + 2 > BATCH_BYTES:
                             k = max((k for k, v in r.items() if isinstance(v, str)),
                                     key=lambda k: len(json.dumps(r[k])))
                             r[k] = r[k][:len(r[k]) // 2]
-                            size = len(json.dumps(r).encode()) + 2
+                            size = _size(r)
                     sizes.append(size)
                 line_titles = [(r, size) for r, size in zip(line_rows, sizes) if r['block_type'] == 'title']
                 if line_titles:
@@ -378,7 +407,8 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
                 pending = candidate
                 # A line's title rows wait for the line's end: a checkpoint inside the line keeps the state from
                 # before it, so a retry parses them again, and they must not have been sent.
-                titles.extend(line_titles)
+                done = set(fs.data.get('title_seqs') or [])
+                titles.extend((r, size) for r, size in line_titles if r['seq'] not in done)
             if not send_titles() or (batch and not send(batch)):
                 return counts
             checkpoint(pending)
@@ -386,14 +416,16 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
 
 
 def _title_rows(cfg, path, upto):
-    """The title rows upload_file writes for the first upto lines of path, parsing from the first line, and the parse
-    state after them; ([], None) when none of those lines holds a title."""
+    """The title rows a parse from the first line gives for the first upto lines of path (what upload_file writes
+    for a file it uploaded from its first line), and the parse state after them; ([], None) when none of those lines
+    holds a title."""
+    marks = tuple(t.encode() for t in TITLE_TYPES)
     with open(path, 'rb') as fh:
-        if not any(TITLE_TYPE.encode() in raw for raw in itertools.islice(fh, upto)):
+        if not any(m in raw for raw in itertools.islice(fh, upto) for m in marks):
             return [], None
         fh.seek(0)
         ids, hostname = ids_for_file(cfg, path), common.host()
-        st = dict(prev_ts=0, names={}, mids=[], cost=0.0, title='', title_wait=[])
+        st = common.FileState.fresh()
         rows = []
         for seq, raw in enumerate(itertools.islice(fh, upto)):
             try:
@@ -409,12 +441,13 @@ def _title_rows(cfg, path, upto):
 
 def upload_titles(cfg, path, deadline, send=True):
     """backfill.py --titles: the title rows of the lines already uploaded (before the file's offset) that CtrlB has
-    not accepted (title_seqs in the file state), exactly as upload_file writes them, from a parse that starts at the
-    first line. Files uploaded before title rows existed, and titles an older CtrlB refused, have them. With send,
-    they go to CtrlB in calls of their own and their seqs are added to title_seqs; the offset and the rest of the
-    upload state stay as they are, except that a state that tracks no title yet takes the title its lines end with,
-    so the next upload sends only a change. Returns the number of title rows found (send false) or sent. Raises
-    common.RecordsRefused when CtrlB refuses them, and what ingest_records raises on other failures."""
+    not accepted (title_seqs in the file state), as a parse from the first line gives them. Files uploaded before
+    title rows existed, and titles an older CtrlB refused, have them. With send, they go to CtrlB in calls of their
+    own and their seqs are added to title_seqs; the offset and the rest of the upload state stay as they are, except
+    that a state that tracks no title yet takes the title its lines end with, so the next upload sends only a change,
+    and one that saw no custom title learns of one. Returns the number of title rows found (send false) or sent.
+    Raises common.RecordsRefused when CtrlB refuses them, TimeoutError when the deadline passes (or another upload
+    keeps the state file busy), and what ingest_records raises on other failures."""
     if not path or not os.path.isfile(path):
         return 0
     fs = common.FileState(path, deadline)
@@ -428,7 +461,7 @@ def upload_titles(cfg, path, deadline, send=True):
         rows, st = _title_rows(cfg, path, upto)
         done = set(fs.data.get('title_seqs') or [])
         counts = dict(redacted=0)
-        sized = [(r, len(json.dumps(r).encode()) + 2) for r in (_finish(r, counts) for r in rows if r['seq'] not in done)]
+        sized = [(r, _size(r)) for r in (_finish(r, counts) for r in rows if r['seq'] not in done)]
         if not send:
             return len(sized)
         sent = 0
@@ -442,9 +475,11 @@ def upload_titles(cfg, path, deadline, send=True):
             fs.data['title_seqs'] = _merged(fs.data.get('title_seqs'), [r['seq'] for r in chunk])
             fs.save()
             sent += n
-        if st and st['title'] and not fs.data.get('title') and not fs.data.get('title_wait'):
+        if st and st['title'] and not fs.data.get('title'):
             fs.data.update(title=st['title'], title_wait=st['title_wait'])
-            fs.save()
+        if st and st['title_custom'] and not fs.data.get('title_custom'):
+            fs.data['title_custom'] = True
+        fs.save()
         return sent
 
 

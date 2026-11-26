@@ -324,7 +324,7 @@ class SeekerError(RuntimeError):
 
 class RecordsRefused(SeekerError):
     """CtrlB answered a records call with 400: it validated the rows and refused them, so sending the same rows again
-    gets the same answer. A SeekerError, so callers that catch SeekerError see no change."""
+    gets the same answer. A SeekerError subclass, so a caller that catches SeekerError catches it too."""
 
     def names(self, field):
         """Whether the refusal names field, e.g. block_type when an older CtrlB does not know a block type."""
@@ -586,15 +586,10 @@ class RunState(TokenState):
 
 
 class FileState:
-    """Upload progress for one transcript file: byte offset, line count, last timestamp, tool names by id, message
-    ids already counted for tokens, the last cumulative cost seen, and the session title: title (the last title
-    written, or waiting, for the file), title_wait ([seq, title] pairs waiting for the first line with a time),
-    title_seqs (the seqs of the title rows CtrlB accepted; Claude Code), and for Codex title_at (the updated_at of the
-    name written last, µs), title_ok and title_ok_at (the same for the last name CtrlB accepted) and title_rows (the
-    title rows written). Used as a context manager it holds the state file
-    exclusively (fcntl), so two hooks never upload one transcript at once; it waits until the deadline (epoch
-    seconds)."""
-    TITLE_SEQS_MAX = 500
+    """Upload progress for one transcript file (see fresh() for its keys). Used as a context manager it holds the
+    state file exclusively (fcntl), so two hooks never upload one transcript at once; it waits until the deadline
+    (epoch seconds)."""
+    TITLE_KEEP = 500
 
     def __init__(self, path, deadline):
         d = private_dir(os.path.join(HOME, 'state'))
@@ -602,9 +597,23 @@ class FileState:
         self.file = os.path.join(d, key + '.json')
         self.mutex_path = os.path.join(d, key + '.mutex')
         self.deadline = time.monotonic() + max(0, deadline - time.time())
-        self.data = dict(path=os.path.abspath(path), offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0,
-                         title='', title_wait=[], title_seqs=[], title_at=None, title_ok='', title_ok_at=None,
-                         title_rows=0)
+        self.data = dict(path=os.path.abspath(path), **self.fresh())
+
+    @staticmethod
+    def fresh():
+        """The state of a file nothing has been read from:
+          offset, line, row   bytes and lines uploaded, and the row cursor inside a line that spans calls
+          prev_ts             the time of the last line read (µs)
+          names, mids, cost   tool names by id, message ids already counted for tokens, the last cumulative cost
+          title               the last title written (or, Claude Code, waiting) for the file; a refused one counts
+          title_wait          Claude Code: [seq, title] pairs waiting for the first line with a time
+          title_custom        Claude Code: a custom-title was seen, so later ai-title lines are ignored
+          title_seqs          Claude Code: the seqs of the title rows CtrlB accepted
+          title_at            Codex: the updated_at (µs) of the name written last
+          title_rows          Codex: the title rows written, so the next gets block_idx 1000 + title_rows
+          title_refused       Codex: [seq, block_idx, time, name] of title rows an older CtrlB refused"""
+        return dict(offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0, title='', title_wait=[],
+                    title_custom=False, title_seqs=[], title_at=None, title_rows=0, title_refused=[])
 
     def __enter__(self):
         self.fh = private_open(self.mutex_path)
@@ -625,15 +634,15 @@ class FileState:
         return self
 
     def reset(self):
-        self.data.update(offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0, title='', title_wait=[],
-                         title_seqs=[], title_at=None, title_ok='', title_ok_at=None, title_rows=0)
+        self.data.update(self.fresh())
 
     def save(self):
         names = self.data['names']
         if len(names) > 5000:
             self.data['names'] = dict(list(names.items())[-2000:])
         self.data['mids'] = self.data.get('mids', [])[-200:]
-        self.data['title_seqs'] = self.data.get('title_seqs', [])[-self.TITLE_SEQS_MAX:]
+        for k in ('title_seqs', 'title_refused'):
+            self.data[k] = (self.data.get(k) or [])[-self.TITLE_KEEP:]
         tmp = self.file + '.tmp'
         with private_open(tmp) as fh:
             json.dump(self.data, fh)

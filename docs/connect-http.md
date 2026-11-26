@@ -34,7 +34,7 @@ curl -sS -X POST "<your CtrlB URL>/ai/sessions/agent_sessions/records" \
 
 Answer: `202 {"accepted": 1}`.
 
-- One row per content block: `block_type` is `text`, `thinking`, `tool_use`, `tool_result` or `result`. The plugin also writes `title` rows (`role` `system`, the session's title as `body`); a CtrlB older than session titles refuses them with `400`. `session_id` and `seq` are required. The columns are the ones above plus `user_name`, `body_len` and `truncated`; an unknown column is refused with `400`.
+- One row per content block: `block_type` is `text`, `thinking`, `tool_use`, `tool_result`, `result` or `title`. A `title` row (`role` `system`) holds a session title as `body`; write one each time the title is set or changed. The title shown for a session is its title row with the highest `seq`, then the highest `block_idx`. A CtrlB older than session titles refuses `title` with `400`. `session_id` and `seq` are required. The columns are the ones above plus `user_name`, `body_len` and `truncated`; an unknown column is refused with `400`.
 - `harness` names the client. The plugin writes `claude` and the Codex hooks write `codex`; another client may name its own.
 - At most 500 rows (more is `400`) and 4 MiB (more is `413`) per call.
 - `paths` is a JSON array, as text, of the files an edit touched. Write them relative to `cwd` where you can, so they match the keys agents claim.

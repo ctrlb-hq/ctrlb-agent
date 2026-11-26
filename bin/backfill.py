@@ -2,10 +2,12 @@
 $CODEX_HOME/sessions (default ~/.codex/sessions), to CtrlB.
 Usage: backfill.py [--codex] [--titles] [--project TEXT] [--count] [--yes]
   --codex         Codex rollouts instead of Claude Code transcripts
-  --titles        only the session titles of transcripts already uploaded: the title rows of their uploaded lines
-                  that CtrlB has not accepted yet (uploaded before title rows existed, or refused by an older CtrlB);
-                  with --codex, the names of each main thread from $CODEX_HOME/session_index.jsonl that CtrlB has
-                  not accepted yet, oldest first. The upload offsets stay as they are
+  --titles        only the session titles of transcripts already uploaded: the title rows (custom-title and
+                  ai-title lines) of their uploaded lines that CtrlB has not accepted yet (uploaded before title rows
+                  existed, or refused by an older CtrlB);
+                  with --codex, each main thread's names from $CODEX_HOME/session_index.jsonl given since the last one
+                  sent, oldest first, and the ones an older CtrlB refused, at their own keys. The upload offsets
+                  stay as they are
   --project TEXT  only project folders whose name contains TEXT (e.g. the repo name); with --codex, only sessions
                   whose working directory contains TEXT
   --count         print what would be uploaded and stop
@@ -35,30 +37,31 @@ def codex_files(project):
 
 def titles(cfg, files, a):
     upload_titles = rows_codex.upload_titles if a.codex else rows_claude.upload_titles
-    found, failed = [], 0
+    found, unread = [], 0
     for f in files:
         try:
             n = upload_titles(cfg, f, time.time() + 600, send=False)
         except Exception as e:
-            failed += 1
-            print(f'  failed {f}: {str(e)[:200]}')
+            unread += 1
+            print(f'  could not read {f}: {str(e)[:200]}')
             continue
         if n:
             found.append((f, n))
-    print(f'{len(found)} uploaded transcript files with {sum(n for _, n in found)} session titles not sent yet')
+    print(f'{len(found)} uploaded transcript files with {sum(n for _, n in found)} session titles not sent yet'
+          + (f'; {unread} files could not be read' if unread else ''))
     if a.count or not found:
-        return 1 if failed else 0
+        return 1 if unread else 0
     if not a.yes and input('Send them? [y/N] ').strip().lower() != 'y':
         print('nothing sent')
         return 0
-    sent = 0
+    sent, failed = 0, 0
     for f, _ in found:
         try:
             sent += upload_titles(cfg, f, time.time() + 600)
         except common.RecordsRefused as e:
             if e.names('block_type'):
                 print(f'CtrlB refused the title rows ({str(e)[:200]}): it is older than session titles. '
-                      'Upgrade it, then run this again.')
+                      f'{sent} session titles were sent before that. Upgrade it, then run this again.')
                 return 1
             failed += 1
             print(f'  failed {f}: {str(e)[:200]}')
@@ -67,7 +70,7 @@ def titles(cfg, files, a):
             print(f'  failed {f}: {str(e)[:200]}')
     common.log(f'backfill titles: {sent} sent')
     print(f'{sent} session titles sent, {failed}/{len(found)} files failed')
-    return 1 if failed else 0
+    return 1 if failed or unread else 0
 
 
 def main():
