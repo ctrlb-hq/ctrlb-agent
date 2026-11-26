@@ -11,18 +11,28 @@ Beyond the content blocks:
   output_tokens   message); input_tokens includes cache reads and cache writes. Floats; 0.0 elsewhere
   cost_usd        on block_type "result" rows: the increase of the session's cumulative cost since the previous
                   cost record (a transcript "cost-state" record, or a stream-json "result" record), so the sum of
-                  cost_usd over a session's rows is its cost. Float; 0.0 elsewhere"""
-import copy, datetime, glob, json, os, time
+                  cost_usd over a session's rows is its cost. Float; 0.0 elsewhere
+
+Session title: Claude Code writes {"type": "custom-title", "customTitle": ...} lines, with no timestamp and repeated
+many times. The first title of a file, and each change, is one row with role "system", block_type "title" and the
+title as body; a repeat writes nothing. Its seq is the title line's own and its time the previous line's + 1 µs; a
+title before any line with a time waits, keeping its seq, for the first one and takes its time. Title rows go to CtrlB
+in a call of their own, so an older CtrlB that refuses block_type "title" refuses only them."""
+import copy, datetime, glob, itertools, json, os, time
 import common
 from paths import edit_paths as normalise_edit_paths
 from redact import redact
 
 SUMMARY_PREFIX = 'This session is being continued from a previous conversation'
-SKIP_TYPES = {'mode', 'permission-mode', 'bridge-session', 'custom-title', 'agent-name', 'queue-operation',
+TITLE_TYPE = 'custom-title'
+SKIP_TYPES = {'mode', 'permission-mode', 'bridge-session', 'agent-name', 'queue-operation',
               'file-history-snapshot', 'file-history-delta', 'last-prompt', 'atis-latch', 'tools-used', 'attachment'}
 EDIT_TOOLS = ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
 BODY_CAP = 64 * 1024
 BATCH_ROWS, BATCH_BYTES = 500, 3_500_000   # CtrlB takes at most 500 rows or 4 MB per records call
+# 2020-01-01 in µs, where CtrlB's session reads start. A prev_ts below it was never read from a line (a line with no
+# time at the start of a file counts on from 0), so a title waits for a real time instead of taking it.
+TIME_MIN = 1_577_836_800_000_000
 
 
 def micros(ts):
@@ -118,11 +128,49 @@ def _cost_row(rec, seq, st, ids, cfg, hostname):
         r['is_error'] = bool(rec.get('is_error'))
     else:
         r['body'] = {k: v for k, v in rec.items() if k not in ('type', 'sessionId')}
-    return [r]
+    return _titles_due(rec, st, ids, cfg, hostname) + [r]
+
+
+def _title_row(rec, seq, title, ts, st, ids, cfg, hostname):
+    parent = ids['parent'] or (rec.get('sessionId') if ids['agent_id'] else '') or ''
+    r = _base(cfg, ids, hostname, rec, ts, seq, parent, 'system', False)
+    r['cwd'] = r['cwd'] or st.get('cwd', '')            # title records carry no cwd or branch: use the last seen
+    r['git_branch'] = r['git_branch'] or st.get('branch', '')
+    r['block_type'] = 'title'
+    r['body'] = title
+    return r
+
+
+def _title(rec, seq, st, ids, cfg, hostname):
+    """A custom-title line: a row when the title is new for the file or changed, nothing for a repeat. Before any
+    line with a time, the title waits in st['title_wait'] (see _titles_due)."""
+    title = rec.get('customTitle')
+    title = title.strip() if isinstance(title, str) else ''
+    if not title or title == st.get('title'):
+        return []
+    st['title'] = title
+    if st.get('title_wait') or st['prev_ts'] < TIME_MIN:
+        st['title_wait'] = (st.get('title_wait') or []) + [[seq, title]]
+        return []
+    ts = st['prev_ts'] + 1
+    st['prev_ts'] = ts
+    return [_title_row(rec, seq, title, ts, st, ids, cfg, hostname)]
+
+
+def _titles_due(rec, st, ids, cfg, hostname):
+    """The waiting titles, once st['prev_ts'] holds a time read from a line: each keeps its own seq and takes that
+    line's time and cwd."""
+    wait = st.get('title_wait')
+    if not wait or st['prev_ts'] < TIME_MIN:
+        return []
+    st['title_wait'] = []
+    return [_title_row(rec, seq, title, st['prev_ts'], st, ids, cfg, hostname) for seq, title in wait]
 
 
 def rows_from(rec, seq, st, ids, cfg, hostname):
     t = rec.get('type', '')
+    if t == TITLE_TYPE:
+        return _title(rec, seq, st, ids, cfg, hostname)
     if t in ('cost-state', 'result'):
         return _cost_row(rec, seq, st, ids, cfg, hostname)
     if t in SKIP_TYPES or t.startswith('api-request') or t not in ('user', 'assistant', 'system'):
@@ -137,7 +185,7 @@ def rows_from(rec, seq, st, ids, cfg, hostname):
         st['branch'] = rec['gitBranch']
     m, summ = rec['message'], _is_summary(rec)
     parent = ids['parent'] or (rec.get('sessionId') if ids['agent_id'] else '') or ''
-    out = []
+    due, out = _titles_due(rec, st, ids, cfg, hostname), []
     for bi, b in enumerate(_blocks(rec)):
         bt = b.get('type', '')
         r = _base(cfg, ids, hostname, rec, ts, seq, parent, m.get('role') or t, summ)
@@ -175,7 +223,7 @@ def rows_from(rec, seq, st, ids, cfg, hostname):
             out[0]['output_tokens'] = _num(u.get('output_tokens'))
             if mid:
                 mids.append(mid)
-    return out
+    return due + out
 
 
 def _finish(r, counts):
@@ -194,10 +242,28 @@ def _finish(r, counts):
     return r
 
 
+def _merged(seqs, more):
+    return list(dict.fromkeys(list(seqs or []) + list(more)))
+
+
+def _fits(sized):
+    """How many of the leading (row, size) pairs fit in one records call; at least one."""
+    n, total = 0, 2
+    while n < len(sized) and n < BATCH_ROWS and total + sized[n][1] <= BATCH_BYTES:
+        total += sized[n][1]
+        n += 1
+    return max(n, 1)
+
+
 def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
     """Send the complete lines of path added since the last upload. Returns {rows, lines, redacted}. The offset only
     moves forward after CtrlB accepts the rows, so a failed upload is retried next time. ids and rows_fn default to
-    the Claude Code parser; rows_codex passes its own (rows_fn(rec, seq, state, ids, cfg, hostname) -> [row])."""
+    the Claude Code parser; rows_codex passes its own (rows_fn(rec, seq, state, ids, cfg, hostname) -> [row]).
+
+    Title rows (block_type "title") wait until their line is complete and go in calls of their own, sent before the
+    transcript rows of every checkpoint. When CtrlB refuses them with a 400 naming block_type (a CtrlB older than
+    title rows), they are skipped with one line in the hook log; the file state already holds their title, so later
+    uploads do not send them again, and the transcript rows go on. Any other failure stops the upload as before."""
     counts = dict(rows=0, lines=0, redacted=0)
     until = time.monotonic() + max(0, deadline - time.time())
     if not path or not os.path.isfile(path) or time.monotonic() >= until:
@@ -211,9 +277,13 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
         pending = copy.deepcopy(fs.data)
         first_line = pending['line']
         batch, nbytes = [], 2             # JSON array brackets; each row includes its separator
+        titles, accepted = [], []         # (title row, size) of completed lines; seqs of the title rows CtrlB accepted
+        refused = []                      # not empty once CtrlB refused title rows in this upload: skip the rest
 
         def checkpoint(state):
             fs.data = copy.deepcopy(state)
+            if accepted:
+                fs.data['title_seqs'] = _merged(fs.data.get('title_seqs'), accepted)
             fs.save()
             counts['lines'] = state['line'] - first_line
 
@@ -223,6 +293,25 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
                 return False
             common.ingest_records(cfg, rows, timeout=remaining)
             counts['rows'] += len(rows)
+            return True
+
+        def send_titles():
+            while titles and not refused:
+                n = _fits(titles)
+                rows = [r for r, _ in titles[:n]]
+                try:
+                    if not send(rows):
+                        return False
+                except common.RecordsRefused as e:
+                    if not e.names('block_type'):
+                        raise
+                    refused.append(len(titles))
+                    common.log(f'upload {os.path.basename(path)}: CtrlB refused block_type "title" (HTTP 400), so '
+                               'it is older than session titles; title rows skipped, backfill.py --titles sends them later')
+                    break
+                accepted.extend(r['seq'] for r in rows)
+                del titles[:n]
+            titles.clear()
             return True
 
         with open(path, 'rb') as fh:
@@ -263,17 +352,21 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
                             r[k] = r[k][:len(r[k]) // 2]
                             size = len(json.dumps(r).encode()) + 2
                     sizes.append(size)
+                line_titles = [(r, size) for r, size in zip(line_rows, sizes) if r['block_type'] == 'title']
+                if line_titles:
+                    kept = [(r, size) for r, size in zip(line_rows, sizes) if r['block_type'] != 'title']
+                    line_rows, sizes = [r for r, _ in kept], [size for _, size in kept]
                 start = pending.get('row', 0)
                 line_rows, sizes = line_rows[start:], sizes[start:]
                 if batch and (len(batch) + len(line_rows) > BATCH_ROWS or nbytes + sum(sizes) > BATCH_BYTES):
-                    if not send(batch):
+                    if not send_titles() or not send(batch):
                         return counts
                     checkpoint(pending)   # candidate has not entered this acknowledged batch
                     batch, nbytes = [], 2
                 candidate.update(offset=fh.tell(), line=pending['line'] + 1, row=0)
                 for i, (r, size) in enumerate(zip(line_rows, sizes)):
                     if batch and (len(batch) == BATCH_ROWS or nbytes + size > BATCH_BYTES):
-                        if not send(batch):
+                        if not send_titles() or not send(batch):
                             return counts
                         # A line can span batches. Keep its pre-parse state and a row cursor until every row
                         # has been accepted, so retries neither lose usage state nor resend accepted blocks.
@@ -283,11 +376,76 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
                     batch.append(r)
                     nbytes += size
                 pending = candidate
-            if batch:
-                if not send(batch):
-                    return counts
+                # A line's title rows wait for the line's end: a checkpoint inside the line keeps the state from
+                # before it, so a retry parses them again, and they must not have been sent.
+                titles.extend(line_titles)
+            if not send_titles() or (batch and not send(batch)):
+                return counts
             checkpoint(pending)
     return counts
+
+
+def _title_rows(cfg, path, upto):
+    """The title rows upload_file writes for the first upto lines of path, parsing from the first line, and the parse
+    state after them; ([], None) when none of those lines holds a title."""
+    with open(path, 'rb') as fh:
+        if not any(TITLE_TYPE.encode() in raw for raw in itertools.islice(fh, upto)):
+            return [], None
+        fh.seek(0)
+        ids, hostname = ids_for_file(cfg, path), common.host()
+        st = dict(prev_ts=0, names={}, mids=[], cost=0.0, title='', title_wait=[])
+        rows = []
+        for seq, raw in enumerate(itertools.islice(fh, upto)):
+            try:
+                rec = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(rec, dict):
+                rows += [r for r in rows_from(rec, seq, st, ids, cfg, hostname) if r['block_type'] == 'title']
+                if len(st['mids']) > 400:        # token counts are not needed here; keep the lookups short
+                    del st['mids'][:-200]
+    return rows, st
+
+
+def upload_titles(cfg, path, deadline, send=True):
+    """backfill.py --titles: the title rows of the lines already uploaded (before the file's offset) that CtrlB has
+    not accepted (title_seqs in the file state), exactly as upload_file writes them, from a parse that starts at the
+    first line. Files uploaded before title rows existed, and titles an older CtrlB refused, have them. With send,
+    they go to CtrlB in calls of their own and their seqs are added to title_seqs; the offset and the rest of the
+    upload state stay as they are, except that a state that tracks no title yet takes the title its lines end with,
+    so the next upload sends only a change. Returns the number of title rows found (send false) or sent. Raises
+    common.RecordsRefused when CtrlB refuses them, and what ingest_records raises on other failures."""
+    if not path or not os.path.isfile(path):
+        return 0
+    fs = common.FileState(path, deadline)
+    if not os.path.exists(fs.file):          # never uploaded: its next upload writes its titles
+        return 0
+    until = time.monotonic() + max(0, deadline - time.time())
+    with fs:
+        upto = fs.data['line']
+        if not upto or os.path.getsize(path) < fs.data['offset']:
+            return 0
+        rows, st = _title_rows(cfg, path, upto)
+        done = set(fs.data.get('title_seqs') or [])
+        counts = dict(redacted=0)
+        sized = [(r, len(json.dumps(r).encode()) + 2) for r in (_finish(r, counts) for r in rows if r['seq'] not in done)]
+        if not send:
+            return len(sized)
+        sent = 0
+        while sent < len(sized):
+            n = _fits(sized[sent:])
+            remaining = until - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('title backfill ran out of time')
+            chunk = [r for r, _ in sized[sent:sent + n]]
+            common.ingest_records(cfg, chunk, timeout=remaining)
+            fs.data['title_seqs'] = _merged(fs.data.get('title_seqs'), [r['seq'] for r in chunk])
+            fs.save()
+            sent += n
+        if st and st['title'] and not fs.data.get('title') and not fs.data.get('title_wait'):
+            fs.data.update(title=st['title'], title_wait=st['title_wait'])
+            fs.save()
+        return sent
 
 
 def session_files(transcript_path):

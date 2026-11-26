@@ -8,7 +8,7 @@ slug: connect-claude-code
 
 The `ctrlb-agent` plugin does three things in Claude Code:
 
-- It uploads every session, including subagents, to the session store in CtrlB. Each message, thinking block, tool call and tool result is one row. Text that looks like a secret is replaced with `[REDACTED]` before upload.
+- It uploads every session, including subagents, to the session store in CtrlB. Each message, thinking block, tool call and tool result is one row, and so is the session's title each time it is set or changed. Text that looks like a secret is replaced with `[REDACTED]` before upload.
 - It adds CtrlB's MCP server. The agent gets the recall tools (`search_sessions`, `find_command`, `next_actions`, `fetch_records`) and the relay tools (`peers`, `post`, `claim`, `release`).
 - At session start it tells the agent its run id and agent id. Before each `Edit`, `Write`, `MultiEdit` or `NotebookEdit` it checks the file against the run's claims.
 
@@ -169,5 +169,6 @@ See [Relay hooks](relay-hooks.md#an-agent-started-from-a-shell-joins-its-parents
 
 - Status: run `/ctrlb-agent:setup` in Claude Code.
 - Log: `~/.ctrlb/hooks.log`.
+- Titles of sessions uploaded before the plugin wrote session titles: `python3 -I bin/backfill.py --titles` in the plugin's folder. It sends only the title rows CtrlB has not accepted; `--count` shows how many first.
 - Off for one session: `CTRLB_OFF=1 claude`.
 - Remove: `claude plugin uninstall ctrlb-agent@ctrlb-agent`, then delete `~/.ctrlb`. Rows already in CtrlB stay there. To remove the `CLAUDE.md` block, run `python3 -I ~/ctrlb-agent/install.py init --claude --remove` in the project.

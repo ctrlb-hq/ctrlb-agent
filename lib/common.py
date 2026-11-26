@@ -319,6 +319,16 @@ class SeekerError(RuntimeError):
     def __init__(self, status, text):
         super().__init__(f'HTTP {status}: {text}')
         self.status = status
+        self.text = text
+
+
+class RecordsRefused(SeekerError):
+    """CtrlB answered a records call with 400: it validated the rows and refused them, so sending the same rows again
+    gets the same answer. A SeekerError, so callers that catch SeekerError see no change."""
+
+    def names(self, field):
+        """Whether the refusal names field, e.g. block_type when an older CtrlB does not know a block type."""
+        return field in self.text
 
 
 def request(cfg, method, path, body=None, query=None, timeout=10, expected_status=None):
@@ -357,9 +367,15 @@ def _seg(s):
 
 
 def ingest_records(cfg, rows, timeout=20):
-    """POST /ai/sessions/{dataset}/records: at most 500 rows or 4 MB per call; answers 202 {accepted: n}."""
-    answer = request(cfg, 'POST', f"/ai/sessions/{_seg(cfg['dataset'])}/records", rows, timeout=timeout,
-                     expected_status=202)
+    """POST /ai/sessions/{dataset}/records: at most 500 rows or 4 MB per call; answers 202 {accepted: n}. A 400 answer
+    raises RecordsRefused; any other failure raises SeekerError, OSError or TimeoutError as request does."""
+    try:
+        answer = request(cfg, 'POST', f"/ai/sessions/{_seg(cfg['dataset'])}/records", rows, timeout=timeout,
+                         expected_status=202)
+    except SeekerError as e:
+        if e.status == 400:
+            raise RecordsRefused(e.status, e.text) from None
+        raise
     if not isinstance(answer, dict) or type(answer.get('accepted')) is not int or answer['accepted'] != len(rows):
         raise SeekerError(202, 'upload acknowledgment must accept every row; progress kept for retry')
     return answer
@@ -571,9 +587,12 @@ class RunState(TokenState):
 
 class FileState:
     """Upload progress for one transcript file: byte offset, line count, last timestamp, tool names by id, message
-    ids already counted for tokens, and the last cumulative cost seen. Used as a context manager it holds the
-    state file exclusively (fcntl), so two hooks never upload one transcript at once; it waits until the deadline
-    (epoch seconds)."""
+    ids already counted for tokens, the last cumulative cost seen, and the session title: title (the last title
+    written, or waiting, for the file), title_wait ([seq, title] pairs waiting for the first line with a time) and
+    title_seqs (the seqs of the title rows CtrlB accepted). Used as a context manager it holds the state file
+    exclusively (fcntl), so two hooks never upload one transcript at once; it waits until the deadline (epoch
+    seconds)."""
+    TITLE_SEQS_MAX = 500
 
     def __init__(self, path, deadline):
         d = private_dir(os.path.join(HOME, 'state'))
@@ -581,7 +600,8 @@ class FileState:
         self.file = os.path.join(d, key + '.json')
         self.mutex_path = os.path.join(d, key + '.mutex')
         self.deadline = time.monotonic() + max(0, deadline - time.time())
-        self.data = dict(path=os.path.abspath(path), offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0)
+        self.data = dict(path=os.path.abspath(path), offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0,
+                         title='', title_wait=[], title_seqs=[])
 
     def __enter__(self):
         self.fh = private_open(self.mutex_path)
@@ -602,13 +622,15 @@ class FileState:
         return self
 
     def reset(self):
-        self.data.update(offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0)
+        self.data.update(offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0, title='', title_wait=[],
+                         title_seqs=[])
 
     def save(self):
         names = self.data['names']
         if len(names) > 5000:
             self.data['names'] = dict(list(names.items())[-2000:])
         self.data['mids'] = self.data.get('mids', [])[-200:]
+        self.data['title_seqs'] = self.data.get('title_seqs', [])[-self.TITLE_SEQS_MAX:]
         tmp = self.file + '.tmp'
         with private_open(tmp) as fh:
             json.dump(self.data, fh)
