@@ -4,8 +4,8 @@ Usage: backfill.py [--codex] [--titles] [--project TEXT] [--count] [--yes]
   --codex         Codex rollouts instead of Claude Code transcripts
   --titles        only the session titles of transcripts already uploaded: the title rows of their uploaded lines
                   that CtrlB has not accepted yet (uploaded before title rows existed, or refused by an older CtrlB);
-                  with --codex, each main thread's current name from $CODEX_HOME/session_index.jsonl when CtrlB has
-                  not accepted it yet. The upload offsets stay as they are
+                  with --codex, the names of each main thread from $CODEX_HOME/session_index.jsonl that CtrlB has
+                  not accepted yet, oldest first. The upload offsets stay as they are
   --project TEXT  only project folders whose name contains TEXT (e.g. the repo name); with --codex, only sessions
                   whose working directory contains TEXT
   --count         print what would be uploaded and stop

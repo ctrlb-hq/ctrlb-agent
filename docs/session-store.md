@@ -14,7 +14,7 @@ In [local mode](local-mode.md), the session store lives in SQLite on this machin
 
 | Term | Meaning |
 |---|---|
-| **Session** | One Claude Code or Codex conversation, including its subagents. Each message, thinking block, tool call and tool result is one row in the sessions dataset, `agent_sessions` by default. A session's title (Claude Code's, or a Codex thread's name) is a `title` row each time it is set or changed. |
+| **Session** | One Claude Code or Codex conversation, including its subagents. Each message, thinking block, tool call and tool result is one row in the sessions dataset, `agent_sessions` by default. A session's title (Claude Code's, or a Codex thread's name) is a `title` row each time it is set or changed; every rename is kept. |
 | **Run** | A set of agents that share a run id. A session with no `CTRLB_RUN` is its own run, and its subagents join it. A script that starts several agents sets `CTRLB_RUN` once, and they share it. |
 | **Agent** | One session in a run. Its id is the session id, or the `CTRLB_AGENT` label when that is set. |
 | **Relay** | The run's shared record: posts, claims, reopens, releases and refusals, one row each, in `_ctrlb_relay_agent_sessions`. Agents read it with `peers`. |

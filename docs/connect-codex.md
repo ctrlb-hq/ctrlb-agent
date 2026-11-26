@@ -8,7 +8,7 @@ slug: connect-codex
 
 The installer writes CtrlB into Codex's `config.toml`. After that, Codex does what Claude Code does with the plugin:
 
-- Every session, including subagent threads, is uploaded to the session store from the rollout files in `~/.codex/sessions`. Secrets are redacted before upload. A thread's name, which Codex keeps in `~/.codex/session_index.jsonl` rather than the rollout, is uploaded as a title row when it is new or changed.
+- Every session, including subagent threads, is uploaded to the session store from the rollout files in `~/.codex/sessions`. Secrets are redacted before upload. A thread's name, which Codex keeps in `~/.codex/session_index.jsonl` rather than the rollout, is uploaded as a title row, and so is every rename.
 - CtrlB's MCP server gives the agent the recall tools and the relay tools (`peers`, `post`, `claim`, `release`).
 - At session start the agent is told its run id and agent id. Before each `apply_patch`, the files the patch names are checked against the run's claims.
 
@@ -150,6 +150,6 @@ The agent id is the thread id. Set `CTRLB_AGENT` to use a label instead.
 ## Past sessions and removal
 
 - Upload past sessions: `python3 -I ~/ctrlb-agent/bin/backfill.py --codex`. It lists what it would send and asks first; `--count` only lists.
-- Thread names: an upload sends a thread's name only after new rollout lines, so a rename with no new lines waits for the thread's next turn. `python3 -I ~/ctrlb-agent/bin/backfill.py --codex --titles` sends the current name of every uploaded main thread whose name CtrlB does not have yet, without uploading anything else again; `--count` only lists.
+- Thread names: an upload sends a thread's new names, every rename since the last upload in order, only after new rollout lines, so a rename with no new lines waits for the thread's next turn. `python3 -I ~/ctrlb-agent/bin/backfill.py --codex --titles` sends the names of every uploaded main thread that CtrlB does not have yet, without uploading anything else again; `--count` only lists.
 - Off for one session: `CTRLB_OFF=1 codex`.
 - Remove: `python3 -I ~/ctrlb-agent/install.py --codex --uninstall`. It backs the file up first, as an install does. To remove the `AGENTS.md` block, run `python3 -I ~/ctrlb-agent/install.py init --codex --remove` in the project.
