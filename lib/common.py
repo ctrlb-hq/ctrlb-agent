@@ -588,8 +588,9 @@ class RunState(TokenState):
 class FileState:
     """Upload progress for one transcript file: byte offset, line count, last timestamp, tool names by id, message
     ids already counted for tokens, the last cumulative cost seen, and the session title: title (the last title
-    written, or waiting, for the file), title_wait ([seq, title] pairs waiting for the first line with a time) and
-    title_seqs (the seqs of the title rows CtrlB accepted). Used as a context manager it holds the state file
+    written, or waiting, for the file), title_wait ([seq, title] pairs waiting for the first line with a time),
+    title_seqs (the seqs of the title rows CtrlB accepted; Claude Code), title_ok (the last title CtrlB accepted) and
+    title_rows (the title rows written; Codex). Used as a context manager it holds the state file
     exclusively (fcntl), so two hooks never upload one transcript at once; it waits until the deadline (epoch
     seconds)."""
     TITLE_SEQS_MAX = 500
@@ -601,7 +602,7 @@ class FileState:
         self.mutex_path = os.path.join(d, key + '.mutex')
         self.deadline = time.monotonic() + max(0, deadline - time.time())
         self.data = dict(path=os.path.abspath(path), offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0,
-                         title='', title_wait=[], title_seqs=[])
+                         title='', title_wait=[], title_seqs=[], title_ok='', title_rows=0)
 
     def __enter__(self):
         self.fh = private_open(self.mutex_path)
@@ -623,7 +624,7 @@ class FileState:
 
     def reset(self):
         self.data.update(offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0, title='', title_wait=[],
-                         title_seqs=[])
+                         title_seqs=[], title_ok='', title_rows=0)
 
     def save(self):
         names = self.data['names']

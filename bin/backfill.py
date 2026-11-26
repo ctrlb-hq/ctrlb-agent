@@ -1,10 +1,11 @@
 """Upload past Claude Code sessions (and their subagents) from ~/.claude/projects, or past Codex sessions from
 $CODEX_HOME/sessions (default ~/.codex/sessions), to CtrlB.
-Usage: backfill.py [--codex | --titles] [--project TEXT] [--count] [--yes]
+Usage: backfill.py [--codex] [--titles] [--project TEXT] [--count] [--yes]
   --codex         Codex rollouts instead of Claude Code transcripts
-  --titles        only the session titles of Claude Code transcripts already uploaded: the title rows of their
-                  uploaded lines that CtrlB has not accepted yet (uploaded before title rows existed, or refused by
-                  an older CtrlB). The upload offsets stay as they are
+  --titles        only the session titles of transcripts already uploaded: the title rows of their uploaded lines
+                  that CtrlB has not accepted yet (uploaded before title rows existed, or refused by an older CtrlB);
+                  with --codex, each main thread's current name from $CODEX_HOME/session_index.jsonl when CtrlB has
+                  not accepted it yet. The upload offsets stay as they are
   --project TEXT  only project folders whose name contains TEXT (e.g. the repo name); with --codex, only sessions
                   whose working directory contains TEXT
   --count         print what would be uploaded and stop
@@ -33,10 +34,11 @@ def codex_files(project):
 
 
 def titles(cfg, files, a):
+    upload_titles = rows_codex.upload_titles if a.codex else rows_claude.upload_titles
     found, failed = [], 0
     for f in files:
         try:
-            n = rows_claude.upload_titles(cfg, f, time.time() + 600, send=False)
+            n = upload_titles(cfg, f, time.time() + 600, send=False)
         except Exception as e:
             failed += 1
             print(f'  failed {f}: {str(e)[:200]}')
@@ -52,7 +54,7 @@ def titles(cfg, files, a):
     sent = 0
     for f, _ in found:
         try:
-            sent += rows_claude.upload_titles(cfg, f, time.time() + 600)
+            sent += upload_titles(cfg, f, time.time() + 600)
         except common.RecordsRefused as e:
             if e.names('block_type'):
                 print(f'CtrlB refused the title rows ({str(e)[:200]}): it is older than session titles. '
@@ -76,8 +78,6 @@ def main():
     ap.add_argument('--count', action='store_true')
     ap.add_argument('--yes', action='store_true')
     a = ap.parse_args()
-    if a.codex and a.titles:
-        ap.error('--titles is for Claude Code transcripts; Codex has no session titles')
     cfg = common.config()
     if cfg['off']:
         sys.exit('ctrlb-agent is not configured: run bin/configure.py first')

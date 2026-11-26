@@ -19,8 +19,17 @@ A rollout is ~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<time>-<thread id>.jsonl
 
 session_meta gives the ids, cwd and git branch; turn_context updates cwd. A rollout whose session_meta names a
 parent_thread_id is a subagent: parent_session is that id, agent_id its own thread id, and it joins its parent's
-run. Upload is incremental by byte offset with FileState, through rows_claude.upload_file."""
-import functools, glob, hashlib, json, os, re, shlex
+run. Upload is incremental by byte offset with FileState, through rows_claude.upload_file.
+
+Thread name: Codex never writes it into the rollout. It appends {id, thread_name, updated_at} to
+$CODEX_HOME/session_index.jsonl each time a thread is named (by the user or the Codex app). After an upload that sent
+lines of a main thread (never a subagent), a current name that differs from the last title written for the file is one
+row: role "system", block_type "title", the stripped name as body, seq the last uploaded line's, block_idx
+TITLE_IDX + the title rows already written for the file (so names after one line keep distinct, increasing keys) and
+the time of the last uploaded line + 1 µs, never updated_at (a rename days later must not make an old session look
+active). Without a line with a time yet it waits for a later upload. It goes in a call of its own, refused as
+rows_claude.upload_file describes."""
+import functools, glob, hashlib, json, os, re, shlex, time
 import common, rows_claude
 from paths import edit_paths as normalise_edit_paths
 from rows_claude import micros
@@ -32,6 +41,10 @@ PATCH_RE = re.compile(r'\*\*\* (?:Update File|Add File|Delete File|Move to): (.+
 CMD_RE = re.compile(r'''["']?\bcmd["']?\s*:\s*("(?:[^"\\]|\\.)*")''')
 SHELL_TOOLS = ('shell', 'shell_command', 'exec_command', 'local_shell', 'container.exec', 'unified_exec')
 TEXT_ITEMS = ('input_text', 'output_text', 'text')
+INDEX = 'session_index.jsonl'
+TITLE_IDX = 1000
+WHEN_RE = re.compile(r'(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)?')
+_names = {}       # index path -> ((mtime_ns, size), {thread id: name})
 
 
 def patch_paths(text):
@@ -444,11 +457,109 @@ def rows_from(rec, seq, st, ids, cfg, hostname):
     return out
 
 
+def _when(s):
+    """An updated_at value as µs since the epoch (any number of fraction digits); 0 when it is not such a time."""
+    m = WHEN_RE.fullmatch(s.strip()) if isinstance(s, str) else None
+    if not m:
+        return 0
+    return micros(f"{m.group(1)}.{(m.group(2) or '')[:6].ljust(6, '0')}{m.group(3) or 'Z'}")
+
+
+def thread_names(home=None):
+    """{thread id: name} from <CODEX_HOME>/session_index.jsonl: for each id the line with the newest updated_at, the
+    later line on a tie (a line without a readable updated_at counts as oldest). Names are stripped; '' when the newest
+    is empty. Lines that are not {id, thread_name} objects are skipped; no file is {}. Read again only when the file's
+    mtime or size changes."""
+    path = os.path.join(home or codex_home(), INDEX)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+    key = (st.st_mtime_ns, st.st_size)
+    if path in _names and _names[path][0] == key:
+        return _names[path][1]
+    best = {}
+    try:
+        with open(path, 'rb') as fh:
+            for raw in fh:
+                try:
+                    r = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(r, dict) or not isinstance(r.get('id'), str) or not isinstance(r.get('thread_name'), str):
+                    continue
+                when = _when(r.get('updated_at'))
+                if r['id'] and (r['id'] not in best or when >= best[r['id']][0]):
+                    best[r['id']] = (when, r['thread_name'].strip())
+    except OSError:
+        return {}
+    _names[path] = (key, {k: name for k, (_, name) in best.items()})
+    return _names[path][1]
+
+
+def _write_title(cfg, path, deadline, ids, backfill, send=True):
+    """Write the thread's current name as a title row when it differs from the file state's title (an upload; a
+    refused name counts as written) or title_ok (backfill: the last name CtrlB accepted). Only a main thread whose
+    rollout was uploaded before and has a line with a time. Returns 1 when a row was sent (or, without send, would
+    be), else 0. A refusal naming block_type is logged and marked written in an upload, raised in a backfill; other
+    failures are raised and leave the state as it was."""
+    name = '' if ids['parent'] else thread_names().get(ids['sid']) or ''
+    if not name:
+        return 0
+    fs = common.FileState(path, deadline)
+    if not os.path.exists(fs.file):
+        return 0
+    with fs:
+        d = fs.data
+        if (not d['line'] or os.path.getsize(path) < d['offset'] or d['prev_ts'] < rows_claude.TIME_MIN
+                or name == d.get('title_ok' if backfill else 'title')):
+            return 0
+        if not send:
+            return 1
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            if backfill:
+                raise TimeoutError('title backfill ran out of time')
+            return 0
+        n = int(d.get('title_rows') or 0)
+        r = _row(cfg, ids, d, common.host(), d['prev_ts'] + 1, d['line'] - 1, 'system')
+        r.update(block_idx=TITLE_IDX + n, block_type='title', body=name)
+        rows_claude._finish(r, dict(redacted=0))
+        try:
+            common.ingest_records(cfg, [r], timeout=remaining)
+        except common.RecordsRefused as e:
+            if backfill or not e.names('block_type'):
+                raise
+            common.log(f'upload {os.path.basename(path)}: CtrlB refused block_type "title" (HTTP 400), so it is older '
+                       'than session titles; title row skipped, backfill.py --titles --codex sends it later')
+            d.update(title=name, title_rows=n + 1)
+            fs.save()
+            return 0
+        d.update(title=name, title_ok=name, title_rows=n + 1)
+        fs.save()
+        return 1
+
+
 def upload_file(cfg, path, deadline):
-    """Send the complete lines of a rollout added since the last upload. Returns {rows, lines, redacted}."""
+    """Send the complete lines of a rollout added since the last upload, then, when lines were sent, the thread's
+    name if it changed (see the module text). Returns {rows, lines, redacted}."""
     if not path or not os.path.isfile(path):
         return dict(rows=0, lines=0, redacted=0)
-    return rows_claude.upload_file(cfg, path, deadline, ids=ids_for_file(cfg, path), rows_fn=rows_from)
+    ids = ids_for_file(cfg, path)
+    c = rows_claude.upload_file(cfg, path, deadline, ids=ids, rows_fn=rows_from)
+    if c['lines'] and not ids['parent']:
+        c['rows'] += _write_title(cfg, path, deadline, ids, backfill=False)
+    return c
+
+
+def upload_titles(cfg, path, deadline, send=True):
+    """backfill.py --titles --codex: the thread's current name for a rollout already uploaded, when CtrlB has not
+    accepted it yet (named, renamed or refused since the last upload, or uploaded before title rows), at the same seq,
+    block_idx and time an upload would give it. The offset stays as it is. Returns 1 when a row was sent (or, without
+    send, would be), else 0. Raises common.RecordsRefused when CtrlB refuses it."""
+    if not path or not os.path.isfile(path) or read_meta(path).get('parent_thread_id'):
+        return 0
+    return _write_title(cfg, path, deadline, ids_for_file(cfg, path), backfill=True, send=send)
 
 
 def codex_home():
