@@ -32,3 +32,18 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python3 -I tests/run_tests.py
+  standards:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - if: github.event_name == 'pull_request'
+        run: python3 scripts/check_comments.py "${{ github.event.pull_request.base.sha }}"
+      - run: python3 scripts/check_public.py
+        env:
+          PUBLIC_DENY_TERMS: ${{ secrets.PUBLIC_DENY_TERMS }}

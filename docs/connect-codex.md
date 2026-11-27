@@ -105,7 +105,7 @@ For example, the `PreToolUse` table:
 matcher = "apply_patch"
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "python3 -I \"/home/you/ctrlb-agent/codex/hook.py\" pre-tool"
+command = "python3 -I \"/home/dev/ctrlb-agent/codex/hook.py\" pre-tool"
 timeout = 5
 ```
 
