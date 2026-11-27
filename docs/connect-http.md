@@ -34,9 +34,10 @@ curl -sS -X POST "<your CtrlB URL>/ai/sessions/agent_sessions/records" \
 
 Answer: `202 {"accepted": 1}`.
 
-- One row per content block: `block_type` is `text`, `thinking`, `tool_use`, `tool_result` or `result`. `session_id` and `seq` are required. The columns are the ones above plus `user_name`, `body_len` and `truncated`; an unknown column is refused with `400`.
+- One row per content block: `block_type` is `text`, `thinking`, `tool_use`, `tool_result`, `result` or `title`. A `title` row (`role` `system`) holds a session title as `body`; write one each time the title is set or changed. The title shown for a session is its title row with the highest `seq`, then the highest `block_idx`. A CtrlB older than session titles refuses `title` with `400`. `session_id` and `seq` are required. The columns are the ones above plus `user_name`, `body_len` and `truncated`; an unknown column is refused with `400`.
 - `harness` names the client. The plugin writes `claude` and the Codex hooks write `codex`; another client may name its own.
 - At most 500 rows (more is `400`) and 4 MiB (more is `413`) per call.
+- `cost_usd` is what the session spent since its previous cost row, so a session's cost is the sum over its rows. The plugin's rows from Claude Code `cost-state` records (`block_type` `result`) also carry the amounts in their `body` under `ctrlb_cost` (see the plugin README); its stream-json `result` rows do not.
 - `paths` is a JSON array, as text, of the files an edit touched. Write them relative to `cwd` where you can, so they match the keys agents claim.
 - Write numbers as floats with a decimal point (`0.0`) and flags as booleans from the first row. The dataset fixes a column's type from the first value it sees.
 - Leave `user_name` out: CtrlB fills it from the key. A row naming another user is refused with `403`.

@@ -19,8 +19,19 @@ A rollout is ~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<time>-<thread id>.jsonl
 
 session_meta gives the ids, cwd and git branch; turn_context updates cwd. A rollout whose session_meta names a
 parent_thread_id is a subagent: parent_session is that id, agent_id its own thread id, and it joins its parent's
-run. Upload is incremental by byte offset with FileState, through rows_claude.upload_file."""
-import functools, glob, hashlib, json, os, re, shlex
+run. Upload is incremental by byte offset with FileState, through rows_claude.upload_file.
+
+Thread names: Codex never writes them into the rollout. It appends {id, thread_name, updated_at} to
+$CODEX_HOME/session_index.jsonl each time a thread is named or renamed (by the user or the Codex app). After an upload
+that sent lines of a main thread (never a subagent), every name the thread got since the last one written for the file
+is a row, oldest first: role "system", block_type "title", the stripped name as body, seq the last uploaded line's,
+block_idx TITLE_IDX + the title rows already written for the file (so names after one line keep distinct, increasing
+keys, and the newest has the highest) and the time of the last uploaded line + 1 µs + its place in the batch, never
+updated_at (a rename days later must not make an old session look active). Without a line with a time yet they wait
+for a later upload. They go in a call of their own. Rows an older CtrlB refuses (RecordsRefused.refuses_titles) are
+kept in the file state at their keys, which stay below every later name's, and backfill.py --codex --titles sends
+them as they were."""
+import functools, glob, hashlib, json, os, re, shlex, time
 import common, rows_claude
 from paths import edit_paths as normalise_edit_paths
 from rows_claude import micros
@@ -32,6 +43,11 @@ PATCH_RE = re.compile(r'\*\*\* (?:Update File|Add File|Delete File|Move to): (.+
 CMD_RE = re.compile(r'''["']?\bcmd["']?\s*:\s*("(?:[^"\\]|\\.)*")''')
 SHELL_TOOLS = ('shell', 'shell_command', 'exec_command', 'local_shell', 'container.exec', 'unified_exec')
 TEXT_ITEMS = ('input_text', 'output_text', 'text')
+INDEX = 'session_index.jsonl'
+TITLE_IDX = 1000
+KEPT = ('cwd', 'git_branch', 'run_id', 'agent')       # a refused title row's columns, kept to send it as it was
+WHEN_RE = re.compile(r'(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)?')
+_titles = {}      # index path -> ((mtime_ns, size), {thread id: [(updated_at µs, name)]})
 
 
 def patch_paths(text):
@@ -444,11 +460,206 @@ def rows_from(rec, seq, st, ids, cfg, hostname):
     return out
 
 
+def _when(s):
+    """An updated_at value as µs since the epoch (any number of fraction digits); 0 when it is not such a time."""
+    m = WHEN_RE.fullmatch(s.strip()) if isinstance(s, str) else None
+    if not m:
+        return 0
+    return micros(f"{m.group(1)}.{(m.group(2) or '')[:6].ljust(6, '0')}{m.group(3) or 'Z'}")
+
+
+def thread_titles(home=None):
+    """{thread id: [(updated_at µs, name), ...]} from <CODEX_HOME>/session_index.jsonl: every name each thread has had,
+    in file order, which is updated_at order when the times go forward. A line whose updated_at cannot be read, or is
+    earlier than one before it for the thread, gets the newest time seen so far, so it stays after them. Names are
+    stripped; an empty name is left out, and so is a name equal to the one just before it. Lines that are not
+    {id, thread_name} objects are skipped; no file is {}. Read again only when the file's mtime or size changes."""
+    path = os.path.join(home or codex_home(), INDEX)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+    key = (st.st_mtime_ns, st.st_size)
+    if path in _titles and _titles[path][0] == key:
+        return _titles[path][1]
+    seen = {}
+    try:
+        with open(path, 'rb') as fh:
+            for raw in fh:
+                try:
+                    r = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(r, dict) or not isinstance(r.get('id'), str) \
+                        or not isinstance(r.get('thread_name'), str):
+                    continue
+                name = r['thread_name'].strip()
+                if r['id'] and name:
+                    entries = seen.setdefault(r['id'], [])
+                    # The file only grows, so a line is never older than the ones before it: one whose updated_at
+                    # cannot be read, or is earlier than a time already seen for the thread, takes that time and so
+                    # keeps its place in file order (a later name is never dropped as old).
+                    entries.append((max(_when(r.get('updated_at')), entries[-1][0] if entries else 0), name))
+    except OSError:
+        return {}
+    out = {}
+    for tid, entries in seen.items():
+        out[tid] = [e for i, e in enumerate(entries) if i == 0 or e[1] != entries[i - 1][1]]
+    _titles[path] = (key, out)
+    return out
+
+
+def _written(history, title, at, rows=0):
+    """How many of a thread's names (history, oldest first) a file's state counts as written, from title (the name
+    written last), at (its updated_at, µs) and rows (the title rows written for the file, title_rows):
+      no at, no title   none: nothing was written yet
+      no at, a title    (a state with a title but no title_at) up to the newest name equal to title; when no name is,
+                        all but the newest, so the current name is still sent and never an older one after a newer one
+      at                up to the name at time at that equals title; when several do (a name given again at the same
+                        time, or after a line whose time went back), the first one that is at least the rows-th name,
+                        so a rename between them is still sent; when none at that time does, up to and including every
+                        name at that time"""
+    if at is None:
+        if not title:
+            return 0
+        named = [i for i, (_, name) in enumerate(history) if name == title]
+        return named[-1] + 1 if named else len(history) - 1
+    ties = [i for i, (when, _) in enumerate(history) if when == at]
+    named = [i for i in ties if history[i][1] == title]
+    if named:
+        return next((i for i in named if i + 1 >= rows), named[-1]) + 1
+    return sum(1 for when, _ in history if when <= at)
+
+
+def _write_title(cfg, path, deadline, ids, backfill, send=True):
+    """Write the names the thread got after the last one written for the file (title and title_at in the file
+    state), oldest first, one title row each (see the module text); a first name equal to title is skipped. A
+    backfill first sends the rows an older CtrlB refused (title_refused) at their own keys. Only a main thread whose
+    rollout was uploaded before and has a line with a time. Returns the number of rows sent (or, without send, to
+    send). In an upload, an older CtrlB's refusal (refuses_titles) keeps the rows in title_refused and counts their
+    names as written (one hook log line), and a spent budget leaves the names for later (one log line); other failures
+    are raised. A
+    backfill raises them all: common.RecordsRefused, TimeoutError (no time left, or the state file busy) and what
+    ingest_records raises. Names a failure leaves unsent stay unwritten."""
+    if ids['parent']:
+        return 0
+    history = thread_titles().get(ids['sid']) or []
+    if not history and not backfill:
+        return 0
+    fs = common.FileState(path, deadline)
+    if not os.path.exists(fs.file):
+        return 0
+    with fs:
+        d = fs.data
+        waiting = [list(w) for w in d.get('title_refused') or []] if backfill else []
+        if not d['line'] or os.path.getsize(path) < d['offset'] or d['prev_ts'] < rows_claude.TIME_MIN:
+            return 0
+        last = d.get('title') or ''
+        done = _written(history, last, d.get('title_at'), int(d.get('title_rows') or 0))
+        pending = history[done:]
+        skip = 1 if pending and pending[0][1] == last else 0
+        if not send:
+            return len(waiting) + len(pending) - skip
+        migrated = d.get('title_at') is None and done > 0
+        if migrated:                             # a state with a title but no title_at: keep where it stands
+            d['title_at'] = history[done - 1][0]
+        if not pending and not waiting:
+            if migrated:
+                fs.save()
+            return 0
+        n, host = int(d.get('title_rows') or 0), common.host()
+        dirty = migrated                          # save only a change: a refused backfill leaves the file as it was
+
+        def sized(seq, idx, ts, name, kept=None):
+            r = _row(cfg, ids, d, host, ts, seq, 'system')
+            r.update(block_idx=idx, block_type='title', body=name)
+            if isinstance(kept, dict):            # a refused row: the cwd, branch, run and agent it had then
+                r.update({k: str(v) for k, v in kept.items() if k in KEPT and isinstance(v, str)})
+            rows_claude._finish(r, dict(redacted=0))
+            return r, rows_claude._size(r)
+
+        def mark(m):
+            """The first m pending names are written."""
+            nonlocal dirty
+            dirty = True
+            d['title_at'], d['title'] = pending[m - 1]
+            d['title_rows'] = n + m - skip
+
+        def ingest(rows):
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                if backfill:
+                    raise TimeoutError('title backfill ran out of time')
+                common.log(f'upload {os.path.basename(path)}: no time left for its thread names; the next upload '
+                           'with new lines sends them')
+                return False
+            common.ingest_records(cfg, [r for r, _ in rows], timeout=remaining)
+            return True
+
+        sent = 0
+        try:
+            while waiting:                        # backfill: the rows an older CtrlB refused, at their own keys
+                rows = [sized(*w) for w in waiting]
+                k = rows_claude._fits(rows)
+                ingest(rows[:k])
+                waiting = waiting[k:]
+                d['title_refused'], dirty = waiting, True
+                sent += k
+            if skip:
+                mark(1)
+            names = [name for _, name in pending[skip:]]
+            rows = [sized(d['line'] - 1, TITLE_IDX + n + i, d['prev_ts'] + 1 + i, name) for i, name in enumerate(names)]
+            done_rows = 0
+            while done_rows < len(rows):
+                k = rows_claude._fits(rows[done_rows:])
+                try:
+                    if not ingest(rows[done_rows:done_rows + k]):
+                        break
+                except common.RecordsRefused as e:
+                    if backfill or not e.refuses_titles():
+                        raise
+                    rows_claude.log_title_refusal(path, 'backfill.py --codex --titles')
+                    d['title_refused'] = (d.get('title_refused') or []) + [
+                        [r['seq'], r['block_idx'], r['_timestamp'], names[j], {k: r[k] for k in KEPT}]
+                        for j, (r, _) in enumerate(rows) if j >= done_rows]
+                    mark(len(pending))
+                    break
+                done_rows += k
+                sent += k
+                mark(skip + done_rows)
+        finally:
+            if dirty:
+                fs.save()
+        return sent
+
+
 def upload_file(cfg, path, deadline):
-    """Send the complete lines of a rollout added since the last upload. Returns {rows, lines, redacted}."""
+    """Send the complete lines of a rollout added since the last upload, then, when lines were sent and the rollout
+    is a main thread's, the thread's new names (see the module text). A failure of the names step is logged, not
+    raised: the lines are in, and the next upload with new lines (or backfill.py --codex --titles) sends the names.
+    Returns {rows, lines, redacted}."""
     if not path or not os.path.isfile(path):
         return dict(rows=0, lines=0, redacted=0)
-    return rows_claude.upload_file(cfg, path, deadline, ids=ids_for_file(cfg, path), rows_fn=rows_from)
+    ids = ids_for_file(cfg, path)
+    c = rows_claude.upload_file(cfg, path, deadline, ids=ids, rows_fn=rows_from)
+    if c['lines'] and not ids['parent']:
+        try:
+            c['rows'] += _write_title(cfg, path, deadline, ids, backfill=False)
+        except Exception as e:
+            common.log(f'upload {os.path.basename(path)}: thread names deferred: {type(e).__name__}: {str(e)[:200]}')
+    return c
+
+
+def upload_titles(cfg, path, deadline, send=True):
+    """backfill.py --codex --titles: for a rollout already uploaded, the title rows CtrlB does not have: first those an
+    older CtrlB refused, at their own keys, then the names given since the last one written (renamed with no new lines
+    since, or all of them for a rollout uploaded before title rows), at the keys and times an upload would give them.
+    The offset stays as it is. Returns the number of rows sent (or, without send, to send). Raises
+    common.RecordsRefused when CtrlB refuses them, TimeoutError when the deadline passes (or another upload keeps the
+    state file busy), and what ingest_records raises on other failures."""
+    if not path or not os.path.isfile(path) or read_meta(path).get('parent_thread_id'):
+        return 0
+    return _write_title(cfg, path, deadline, ids_for_file(cfg, path), backfill=True, send=send)
 
 
 def codex_home():
