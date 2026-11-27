@@ -5678,6 +5678,219 @@ def test_title_backfill_concurrency(seeker):
           and st['line'] == 3 and st['title_seqs'] == [0], json.dumps([busy, out, len(sent), st.get('line')]))
 
 
+LEDGER_START = 1795418565258        # the startTime 60d3cc98 and 0b207b4d share in the verification data
+
+
+def cost_line(total, start, models=None):
+    """A cost-state line in the shape Claude Code writes it (no timestamp, no cwd)."""
+    rec = {'type': 'cost-state', 'sessionId': SID, 'totalCostUSD': total, 'totalDuration': 1, 'modelUsage': models or {}}
+    if start is not None:
+        rec['startTime'] = start
+    return json.dumps(rec) + '\n'
+
+
+def model_use(cost, inp=0, out=0, read=0, write=0):
+    return {'inputTokens': inp, 'outputTokens': out, 'thinkingTokens': 0, 'cacheReadInputTokens': read,
+            'cacheCreationInputTokens': write, 'webSearchRequests': 0, 'costUSD': cost}
+
+
+def cost_rows(seeker, sid=None):
+    return [r for r in seeker.rows if r['block_type'] == 'result' and (sid is None or r['session_id'] == sid)]
+
+
+def cost_files(base, start=LEDGER_START, a='aaaa1111-0000-4000-8000-00000000000a', b='bbbb2222-0000-4000-8000-00000000000b'):
+    """Two sessions of one ledger: a ends at $469.4923; b, started later in the same app process, records $509.3964
+    three times (its own spend is $39.9041)."""
+    os.makedirs(base, exist_ok=True)
+    pa, pb = os.path.join(base, a + '.jsonl'), os.path.join(base, b + '.jsonl')
+    with open(pa, 'w') as fh:
+        fh.writelines([line('user', 'start', '2026-11-23T07:30:00Z'), cost_line(2.3354, start, {'claude-opus-5-5': model_use(2.3354, 10, 20, 30, 40)}),
+                       line('user', 'more', '2026-11-23T09:00:00Z'),
+                       cost_line(469.4923, start, {'claude-opus-5-5': model_use(469.4923, 100, 200, 300, 400)})])
+    with open(pb, 'w') as fh:
+        fh.write(line('user', 'next session', '2026-11-24T10:00:00Z'))
+        fh.writelines(cost_line(509.3964, start, {'claude-opus-5-5': model_use(500.0, 150, 260, 380, 500),
+                                                  'claude-haiku-5-5': model_use(9.3964, 5, 6, 7, 8)}) for _ in range(3))
+    return pa, pb
+
+
+def test_cost_ledgers(seeker):
+    import threading
+    cfg = dict(TITLE_CFG, url=seeker.url)
+    host = common.host()
+    base = clean(os.path.join(WORK, 'cost-ledgers'))
+
+    # Two sessions of one ledger, uploaded in time order: the second pays only its own spend.
+    pa, pb = cost_files(os.path.join(base, 'shared'))
+    home = clean(os.path.join(WORK, 'home-cost-shared'))
+    with mock.patch.object(common, 'HOME', home):
+        seeker.reset()
+        rows_claude.upload_file(cfg, pa, time.time() + 10)
+        rows_claude.upload_file(cfg, pb, time.time() + 10)
+        a_rows = [r['cost_usd'] for r in cost_rows(seeker) if r['session_id'].startswith('aaaa')]
+        b = [r for r in cost_rows(seeker) if r['session_id'].startswith('bbbb')]
+        check('cost: a session started in the same app process pays only its own spend',
+              a_rows == [2.3354, 467.1569] and [r['cost_usd'] for r in b] == [39.9041, 0.0, 0.0], json.dumps([a_rows, [r['cost_usd'] for r in b]]))
+        cc = json.loads(b[0]['body'])['ctrlb_cost'] if b else {}
+        check('cost: the body keeps the record and adds ctrlb_cost with the ledger, usd and per-model increases',
+              cc == {'ledger': f'{host}:{LEDGER_START}', 'usd': 39.9041, 'models': {
+                  'claude-opus-5-5': {'costUSD': 30.5077, 'inputTokens': 50, 'outputTokens': 60, 'cacheReadInputTokens': 80, 'cacheCreationInputTokens': 100},
+                  'claude-haiku-5-5': {'costUSD': 9.3964, 'inputTokens': 5, 'outputTokens': 6, 'cacheReadInputTokens': 7, 'cacheCreationInputTokens': 8}}}
+              and json.loads(b[0]['body'])['totalCostUSD'] == 509.3964 and b[0]['input_tokens'] == 0.0 and b[0]['output_tokens'] == 0.0,
+              json.dumps(cc))
+        # The first session resumed later in a new process, from its own saved total (below the ledger's last).
+        with open(pa, 'a') as fh:
+            fh.writelines([line('user', 'resumed', '2026-11-25T08:00:00Z'), cost_line(480.0, LEDGER_START)])
+        seeker.reset()
+        rows_claude.upload_file(cfg, pa, time.time() + 10)
+        check('cost: a session resumed from its own saved total pays from there, not the whole total',
+              [r['cost_usd'] for r in cost_rows(seeker)] == [10.5077])
+        # A later session of the ledger whose total is below the ledger's last and its own: a restart, counted whole.
+        pc = os.path.join(base, 'shared', 'cccc3333-0000-4000-8000-00000000000c.jsonl')
+        with open(pc, 'w') as fh:
+            fh.writelines([line('user', 'after a restart', '2026-11-26T08:00:00Z'), cost_line(4.0, LEDGER_START)])
+        seeker.reset()
+        rows_claude.upload_file(cfg, pc, time.time() + 10)
+        check("cost: a total below the ledger's last, in time order, is a restart and counts whole",
+              [r['cost_usd'] for r in cost_rows(seeker)] == [4.0])
+        # A new startTime is a new ledger, also inside one file.
+        pd = os.path.join(base, 'shared', 'dddd4444-0000-4000-8000-00000000000d.jsonl')
+        with open(pd, 'w') as fh:
+            fh.writelines([line('user', 'one', '2026-11-26T09:00:00Z'), cost_line(3.0, 1795500000001),
+                           line('user', 'two', '2026-11-26T09:30:00Z'), cost_line(4.0, 1795500000002)])
+        seeker.reset()
+        rows_claude.upload_file(cfg, pd, time.time() + 10)
+        check('cost: a new startTime is a new ledger and counts whole, also after another ledger in the same file',
+              [r['cost_usd'] for r in cost_rows(seeker)] == [3.0, 4.0])
+        # The title backfill parses cost lines without touching the ledgers.
+        ledger_file = os.path.join(home, 'state', 'cost-ledgers.json')
+        before = read(ledger_file)
+        rows_claude.upload_titles(cfg, pa, time.time() + 10)
+        check('cost: backfill.py --titles leaves the cost ledgers alone', read(ledger_file) == before)
+
+    # Out of order: the later session uploads first. Nothing is counted twice or below zero.
+    home = clean(os.path.join(WORK, 'home-cost-order'))
+    pa, pb = cost_files(os.path.join(base, 'order'))
+    with mock.patch.object(common, 'HOME', home):
+        seeker.reset()
+        rows_claude.upload_file(cfg, pb, time.time() + 10)
+        rows_claude.upload_file(cfg, pa, time.time() + 10)
+        got = [r['cost_usd'] for r in cost_rows(seeker)]
+    check('cost: records that arrive after a later one of their ledger count only what is new: no double count, '
+          'nothing negative', got == [509.3964, 0.0, 0.0, 0.0, 0.0] and abs(sum(got) - 509.3964) < 1e-9, json.dumps(got))
+
+    # A planned backfill: the ledgers are filled in time order first, so the files can upload in any order.
+    projects = clean(os.path.join(WORK, 'cost-backfill-projects'))
+    pa, pb = cost_files(os.path.join(projects, '-work-cost'), a='bbbb1111-0000-4000-8000-00000000000a',
+                        b='aaaa2222-0000-4000-8000-00000000000b')      # the later session sorts first
+    home = clean(os.path.join(WORK, 'home-cost-backfill'))
+    seeker.reset()
+    p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'backfill.py'), '--yes'], capture_output=True, text=True,
+                       env=base_env(seeker.url, home, CLAUDE_PROJECTS_DIR=projects), timeout=60)
+    by = {}
+    for r in cost_rows(seeker):
+        by.setdefault(r['session_id'][:4], []).append(r['cost_usd'])
+    check('cost: backfill.py puts the cost records in the ledgers in time order first, so the later session that '
+          'uploads first still pays only its own spend', p.returncode == 0 and by == {'aaaa': [39.9041, 0.0, 0.0], 'bbbb': [2.3354, 467.1569]}
+          and '5 cost records in 1 cost ledgers' in p.stdout, p.stdout[-300:] + json.dumps(by))
+    seeker.reset()
+    p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'backfill.py'), '--cost-ledger'], capture_output=True,
+                       text=True, env=base_env(seeker.url, home, CLAUDE_PROJECTS_DIR=projects), timeout=60)
+    check('cost: backfill.py --cost-ledger sends nothing and changes nothing already recorded',
+          p.returncode == 0 and not seeker.calls and '5 cost records are in 1 cost ledgers' in p.stdout, p.stdout[-300:])
+
+    # A retried upload gets the same amounts.
+    home = clean(os.path.join(WORK, 'home-cost-retry'))
+    pa, pb = cost_files(os.path.join(base, 'retry'))
+    try:
+        with mock.patch.object(common, 'HOME', home):
+            rows_claude.upload_file(cfg, pa, time.time() + 10)
+            seeker.reset()
+            seeker.state['records_answer'] = lambda rows: (500, {'error': 'boom'})
+            try:
+                rows_claude.upload_file(cfg, pb, time.time() + 10)
+            except common.SeekerError:
+                pass
+            seeker.state.pop('records_answer')
+            rows_claude.upload_file(cfg, pb, time.time() + 10)
+            got = [r['cost_usd'] for r in cost_rows(seeker)]
+        check('cost: a retried upload gets the amounts the first try computed', got == [39.9041, 0.0, 0.0], json.dumps(got))
+    finally:
+        seeker.state.pop('records_answer', None)
+
+    # Two hooks upload two sessions of one ledger at once: no update is lost, nothing is counted twice.
+    home = clean(os.path.join(WORK, 'home-cost-threads'))
+    paths = []
+    for name, first in (('eeee5555-0000-4000-8000-00000000000e', 1), ('ffff6666-0000-4000-8000-00000000000f', 2)):
+        path = os.path.join(base, 'threads', name + '.jsonl')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as fh:
+            for total in range(first, 41, 2):
+                fh.write(line('user', f'turn {total}', at(total)))
+                fh.write(cost_line(float(total), 1795600000000, {'claude-opus-5-5': model_use(float(total), total, total, total, total)}))
+        paths.append(path)
+    errors, change = [], common.CostLedgers.change
+
+    def slow(self, fn):                  # a longer hold, so the two uploads really meet at the ledger file
+        return change(self, lambda books: (time.sleep(0.003), fn(books))[1])
+
+    with mock.patch.object(common, 'HOME', home), mock.patch.object(common.CostLedgers, 'change', slow):
+        seeker.reset()
+
+        def go(path):
+            try:
+                rows_claude.upload_file(cfg, path, time.time() + 30)
+            except Exception as e:
+                errors.append(e)
+
+        workers = [threading.Thread(target=go, args=(path,)) for path in paths]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(60)
+        got = [r['cost_usd'] for r in cost_rows(seeker)]
+        books = json.loads(read(os.path.join(home, 'state', 'cost-ledgers.json')))
+        entry = books.get(f'{host}:1795600000000', {})
+    check('cost: concurrent hooks on one ledger lose no update and count the ledger once',
+          not errors and len(got) == 40 and min(got) >= 0 and abs(sum(got) - 40.0) < 1e-9 and entry.get('total') == 40.0
+          and len(entry.get('applied', {})) == 40, json.dumps([errors and str(errors[0]), len(got), sum(got), entry.get('total')]))
+
+    # An unreadable ledger file: counted from the file's own previous record, a log line, and a new file next time.
+    home = clean(os.path.join(WORK, 'home-cost-corrupt'))
+    pa, pb = cost_files(os.path.join(base, 'corrupt'))
+    with mock.patch.object(common, 'HOME', home):
+        rows_claude.upload_file(cfg, pa, time.time() + 10)
+        ledger_file = os.path.join(home, 'state', 'cost-ledgers.json')
+        with open(ledger_file, 'w') as fh:
+            fh.write('{"not": json')
+        seeker.reset()
+        c = rows_claude.upload_file(cfg, pb, time.time() + 10)
+        got = [r['cost_usd'] for r in cost_rows(seeker)]
+        moved = os.path.exists(ledger_file + '.unreadable')
+        pc = os.path.join(base, 'corrupt', 'cccc3333-0000-4000-8000-00000000000c.jsonl')
+        with open(pc, 'w') as fh:
+            fh.writelines([line('user', 'new process', '2026-11-27T08:00:00Z'), cost_line(1.5, 1795700000000)])
+        seeker.reset()
+        rows_claude.upload_file(cfg, pc, time.time() + 10)
+        fresh = json.loads(read(ledger_file))
+    check("cost: an unreadable ledger file falls back to the file's own records, logs, and is replaced; uploads go on",
+          c['lines'] == 4 and got == [509.3964, 0.0, 0.0] and moved and 'cost ledger cannot be read' in _log(home)
+          and f'{host}:1795700000000' in fresh and [r['cost_usd'] for r in cost_rows(seeker)] == [1.5], json.dumps(got))
+
+    # A cost-state without a startTime keeps the per-file rule.
+    home = clean(os.path.join(WORK, 'home-cost-nostart'))
+    path = os.path.join(base, 'nostart', SID + '.jsonl')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as fh:
+        fh.writelines([line('user', 'x', at(1)), cost_line(1.0, None), line('user', 'y', at(2)), cost_line(1.25, None)])
+    with mock.patch.object(common, 'HOME', home):
+        seeker.reset()
+        rows_claude.upload_file(cfg, path, time.time() + 10)
+    got = cost_rows(seeker)
+    check('cost: a cost-state without a startTime is counted from its own file (ledger "")',
+          [r['cost_usd'] for r in got] == [1.0, 0.25] and json.loads(got[1]['body'])['ctrlb_cost']['ledger'] == '')
+
+
 CHELD = '01a0bbbb-0000-7000-8000-000000000003'      # a thread whose first lines have no time, written by the tests
 
 
@@ -7292,6 +7505,7 @@ def main():
     run_test(test_title_sources, seeker)
     run_test(test_title_retries, seeker)
     run_test(test_title_backfill_concurrency, seeker)
+    run_test(test_cost_ledgers, seeker)
     run_test(test_codex_thread_names)
     run_test(test_codex_titles, seeker)
     run_test(test_codex_title_history, seeker)

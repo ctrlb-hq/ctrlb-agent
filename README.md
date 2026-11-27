@@ -106,6 +106,19 @@ Rows go to `POST /ai/sessions/{dataset}/records`, at most 500 per call. The data
 
 Each row carries the session, run and agent ids, the role and block type, the tool name, the shell command, the paths an edit tool touched, the text (cut at 64 KB), error and summary flags, cwd, git branch, token counts and cost. `harness` is `claude` or `codex`.
 
+### Cost
+
+A Claude Code session's cost is the sum of `cost_usd` over its rows, which is on the `result` rows made from the transcript's `cost-state` records. Claude Code keeps one running total per app process, its cost ledger, named by the record's `startTime`. When the desktop app starts or forks another session in that process, the total goes on from what the process already spent, so a new session's first record also holds the earlier sessions' cost. The plugin keeps each ledger's last total on this machine, across transcripts (`~/.ctrlb/state/cost-ledgers.json`), and charges each record only the increase over it. A session then pays only its own spend:
+
+- A ledger not seen before counts its first record whole (less the transcript's own earlier record of it, if any). A new `startTime` is a new ledger, also inside one transcript.
+- A total below the ledger's last, in time order, is a restart and counts whole, unless it continues the transcript's own earlier record (a session resumed in a new process from its own saved total), which counts from there.
+- A record that arrives after a later record of its ledger (two sessions uploaded out of order) counts only what is above the ledger's last total, never less than zero, and the ledger never moves back. Nothing is counted twice, but that spend can land on the later session. `backfill.py` avoids this by putting every transcript's cost records in the ledgers in time order before it uploads.
+- A retried upload gets the same amounts. Records without a `startTime` (stream-json `result` records) are counted from the transcript's own previous record. So are all records while the ledger file cannot be read; that file is then set aside, with a line in `~/.ctrlb/hooks.log`, and a new one is started.
+
+Each cost row's `body` keeps the record and adds the amounts: `"ctrlb_cost": {"ledger": "<host>:<startTime>", "usd": <cost_usd>, "models": {"<model>": {"costUSD", "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"}}}`. Each model value is the increase over the same base, so a session's per-model figures are the sums over its cost rows. `ledger` is `""` without a `startTime`. The `input_tokens` and `output_tokens` columns stay 0 on cost rows. A session's tokens are on its assistant rows, so add one or the other, never both.
+
+Sessions uploaded before this version keep the cost they were uploaded with, which may include their app process's earlier sessions: rows are never replaced. After upgrading, run `python3 -I bin/backfill.py --cost-ledger` once. It puts the cost records of the transcripts on this machine into the ledgers in time order, and sends nothing. A session started later in an app process that was already running then is then charged only its own spend. Codex rollouts carry no cost.
+
 ### Session titles
 
 A session's title is a row with `role` `system`, `block_type` `title` and the title as text. Every title a session gets is kept, so its renames stay in the record. The title shown for a session is its title row with the highest `seq`, then the highest `block_idx`.

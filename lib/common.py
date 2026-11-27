@@ -585,6 +585,69 @@ class RunState(TokenState):
         return self._locked(lambda d: (fn(d), True))
 
 
+class CostLedgers:
+    """Claude Code's cost ledgers seen on this machine, shared by every transcript's uploads: a JSON object in
+    <CTRLB_HOME>/state/cost-ledgers.json, {ledger: {total, ts, models, applied}} (see rows_claude). Held exclusively
+    (fcntl) while it is read and changed, as FileState is, so concurrent hooks never lose an update. source names the
+    transcript a handle works for. A file that cannot be read or written as such an object is moved aside (to
+    cost-ledgers.json.unreadable) with a log line, and change answers None: the caller falls back to the file's own
+    previous cost record, as before ledgers existed, and the next change starts a new file."""
+    MAX_LEDGERS = 1000
+
+    def __init__(self, path, deadline):
+        d = private_dir(os.path.join(HOME, 'state'))
+        self.file = os.path.join(d, 'cost-ledgers.json')
+        self.mutex_path = os.path.join(d, 'cost-ledgers.mutex')
+        self.source = hashlib.sha1(os.path.abspath(path).encode()).hexdigest()[:16]
+        self.deadline = time.monotonic() + max(0, deadline - time.time())
+
+    def change(self, fn):
+        """fn(ledgers) changes the object in place and returns a value, which change returns; None when the file is
+        unreadable (fn is not called). Raises TimeoutError('cost ledger busy') when another upload holds it past the
+        deadline."""
+        with private_open(self.mutex_path, 'a') as mx:
+            while True:
+                try:
+                    fcntl.flock(mx, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= self.deadline:
+                        raise TimeoutError('cost ledger busy')
+                    time.sleep(0.02)
+            try:
+                try:
+                    with open(self.file) as fh:
+                        data = json.load(fh)
+                except FileNotFoundError:
+                    data = {}
+                except (OSError, ValueError):
+                    data = None
+                if not isinstance(data, dict):
+                    return self._unreadable('cannot be read')
+                out = fn(data)
+                if len(data) > self.MAX_LEDGERS:
+                    for k in sorted(data, key=lambda k: (data[k] or {}).get('ts') or 0)[:len(data) - self.MAX_LEDGERS]:
+                        del data[k]
+                try:
+                    tmp = self.file + '.tmp'
+                    with private_open(tmp) as fh:
+                        json.dump(data, fh)
+                    os.replace(tmp, self.file)
+                except (OSError, TypeError, ValueError):
+                    return self._unreadable('cannot be written')
+                return out
+            finally:
+                fcntl.flock(mx, fcntl.LOCK_UN)
+
+    def _unreadable(self, why):
+        log(f'cost ledger {why}: moved aside; this cost record is counted from its own file\'s previous one')
+        try:
+            os.replace(self.file, self.file + '.unreadable')
+        except OSError:
+            pass
+        return None
+
+
 class FileState:
     """Upload progress for one transcript file (see fresh() for its keys). Used as a context manager it holds the
     state file exclusively (fcntl), so two hooks never upload one transcript at once; it waits until the deadline
@@ -605,6 +668,8 @@ class FileState:
           offset, line, row   bytes and lines uploaded, and the row cursor inside a line that spans calls
           prev_ts             the time of the last line read (µs)
           names, mids, cost   tool names by id, message ids already counted for tokens, the last cumulative cost
+          cost_start          Claude Code: the startTime (cost ledger) of the file's last cost record
+          cost_models         Claude Code: that record's per-model totals (rows_claude.COST_KINDS)
           title               the last title written (or, Claude Code, waiting) for the file; a refused one counts
           title_wait          Claude Code: [seq, title] pairs waiting for the first line with a time
           title_custom        Claude Code: a custom-title was seen, so later ai-title lines are ignored
@@ -612,8 +677,9 @@ class FileState:
           title_at            Codex: the updated_at (µs) of the name written last
           title_rows          Codex: the title rows written, so the next gets block_idx 1000 + title_rows
           title_refused       Codex: [seq, block_idx, time, name] of title rows an older CtrlB refused"""
-        return dict(offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0, title='', title_wait=[],
-                    title_custom=False, title_seqs=[], title_at=None, title_rows=0, title_refused=[])
+        return dict(offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0, cost_start=None, cost_models={},
+                    title='', title_wait=[], title_custom=False, title_seqs=[], title_at=None, title_rows=0,
+                    title_refused=[])
 
     def __enter__(self):
         self.fh = private_open(self.mutex_path)

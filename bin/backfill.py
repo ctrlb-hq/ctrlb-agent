@@ -1,6 +1,6 @@
 """Upload past Claude Code sessions (and their subagents) from ~/.claude/projects, or past Codex sessions from
 $CODEX_HOME/sessions (default ~/.codex/sessions), to CtrlB.
-Usage: backfill.py [--codex] [--titles] [--project TEXT] [--count] [--yes]
+Usage: backfill.py [--codex] [--titles | --cost-ledger] [--project TEXT] [--count] [--yes]
   --codex         Codex rollouts instead of Claude Code transcripts
   --titles        only the session titles of transcripts already uploaded: the title rows (custom-title and
                   ai-title lines) of their uploaded lines that CtrlB has not accepted yet (uploaded before title rows
@@ -8,6 +8,10 @@ Usage: backfill.py [--codex] [--titles] [--project TEXT] [--count] [--yes]
                   with --codex, each main thread's names from $CODEX_HOME/session_index.jsonl given since the last one
                   sent, oldest first, and the ones an older CtrlB refused, at their own keys. The upload offsets
                   stay as they are
+  --cost-ledger   only put the cost records of the Claude Code transcripts into this machine's cost ledgers, in time
+                  order (sends nothing), so each session is charged only its own spend, also a session started later
+                  in an app process that ran before this version. Run it once after upgrading. A Claude Code
+                  upload does the same first
   --project TEXT  only project folders whose name contains TEXT (e.g. the repo name); with --codex, only sessions
                   whose working directory contains TEXT
   --count         print what would be uploaded and stop
@@ -77,14 +81,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--codex', action='store_true')
     ap.add_argument('--titles', action='store_true')
+    ap.add_argument('--cost-ledger', action='store_true')
     ap.add_argument('--project', default='')
     ap.add_argument('--count', action='store_true')
     ap.add_argument('--yes', action='store_true')
     a = ap.parse_args()
+    if a.cost_ledger and (a.codex or a.titles):
+        ap.error('--cost-ledger is for Claude Code transcripts and goes alone')
     cfg = common.config()
     if cfg['off']:
         sys.exit('ctrlb-agent is not configured: run bin/configure.py first')
     files, what = codex_files(a.project) if a.codex else claude_files(a.project)
+    if a.cost_ledger:
+        print(what)
+        records, ledgers = rows_claude.seed_ledgers(cfg, files, time.time() + 600)
+        print(f'{records} cost records are in {ledgers} cost ledgers on this machine; nothing was sent')
+        return 0
     if a.titles:
         print(what)
         print(f"destination: {cfg['url']}  dataset {cfg['dataset']}  user {cfg['user'] or '(from the key)'}")
@@ -98,6 +110,10 @@ def main():
     if not a.yes and input('Upload them? Secrets matching the redaction patterns are replaced first. [y/N] ').strip().lower() != 'y':
         print('nothing sent')
         return
+    if not a.codex:
+        # Cost records first, in time order across the files, so the files below can upload in any order.
+        records, ledgers = rows_claude.seed_ledgers(cfg, files, time.time() + 600)
+        print(f'  {records} cost records in {ledgers} cost ledgers, in time order')
     total = dict(rows=0, lines=0, redacted=0)
     t0 = time.time()
     failed = 0
