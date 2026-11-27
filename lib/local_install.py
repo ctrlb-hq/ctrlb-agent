@@ -1,4 +1,4 @@
-"""Download and verify the standalone CtrlB binary using the standard library."""
+HELP_TEXT = """Download and verify the standalone CtrlB binary using the standard library."""
 import argparse
 import hashlib
 import http.client
@@ -29,10 +29,10 @@ def target_name():
 
 
 def release_base(version):
-    """GitHub serves the newest release and a named release at different paths."""
+
     if version == 'latest':
         return RELEASES + '/latest/download'
-    # The version is one path segment of the release address: a tag such as v0.1.0.
+
     if not re.fullmatch(r'[A-Za-z0-9._+-]+', version) or version in ('.', '..'):
         raise InstallError('--version must be a release tag such as v0.1.0 '
                            '(letters, digits, dot, underscore, plus or hyphen)')
@@ -40,14 +40,10 @@ def release_base(version):
 
 
 def validate_url(url, redirect=False):
-    """Allow HTTPS, local file fixtures, and HTTP on the two loopback hosts.
 
-    A redirect target may carry a query, because a release host signs its file
-    addresses that way. It may not be a file.
-    """
     try:
         parsed = urllib.parse.urlsplit(url)
-        parsed.port  # Reject malformed ports before opening the URL.
+        parsed.port
         if parsed.username is not None or parsed.password is not None:
             raise ValueError
         if not redirect and (parsed.query or parsed.fragment):
@@ -98,7 +94,7 @@ def _checksum(base, filename):
 
 
 def install_binary(base, home, port=None):
-    """Verify the raw binary, replace it atomically, then initialize local config."""
+
     filename = target_name()
     base = base.rstrip('/')
     validate_url(base)
@@ -139,7 +135,7 @@ def install_binary(base, home, port=None):
     command = [destination, 'init']
     if port is not None:
         command += ['--port', str(port)]
-    # init may print a local key. Only the user's later export commands read it.
+
     try:
         result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, env=dict(os.environ, CTRLB_HOME=home), check=False)
@@ -164,7 +160,7 @@ def print_next_steps():
 
 
 def main(argv):
-    parser = argparse.ArgumentParser(prog='install.py --local', description=__doc__)
+    parser = argparse.ArgumentParser(prog='install.py --local', description=HELP_TEXT)
     parser.add_argument('--version', default='latest',
                         help='release to install, for example v0.1.0 (default: latest, the newest release)')
     parser.add_argument('--download-url',

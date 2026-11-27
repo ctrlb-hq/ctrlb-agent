@@ -1,14 +1,8 @@
-"""Run this yourself in a terminal, not through an agent:  python3 -I bin/configure.py
-Asks for CtrlB's URL, the sessions dataset, an optional run id, and your key (hidden input), reads the key's user
-from the key (its "email" claim, the one CtrlB reads), writes ~/.ctrlb/config.json (mode 0600, readable only by you)
-and checks that CtrlB answers. Environment variables CTRLB_* override the file. Flags (for scripts): --url,
---dataset, --run, --key-stdin (read the key from one line of stdin instead of a hidden prompt; the key is never taken
-from the command line). --user is accepted and ignored: the name on the rows is the key's user.
---local [--port N] runs ctrlb init without prompts and prints exports that read the key from config.json."""
+
 import argparse, datetime, getpass, json, os, shlex, shutil, subprocess, sys, tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
-import common  # noqa: E402
+import common
 
 
 def ask(label, default='', given=None):
@@ -27,7 +21,7 @@ def configure_local(port):
         args += ['--port', str(port)]
     try:
         common.private_dir(common.HOME)
-        # init may display the local key. Neither its output nor an error is echoed here.
+
         p = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=30)
     except (OSError, subprocess.TimeoutExpired):
@@ -45,10 +39,7 @@ def configure_local(port):
 
 
 def save(path, c):
-    """Write config.json atomically: a new 0600 temporary file in the same directory, then a replace, so an interrupted
-    run leaves the old file whole. The old file is copied to config.json.ctrlb-backup-<time> (0600) first when the
-    content changes. When config.json is a link, the file it points to is written (said on screen) and the link kept.
-    Returns (the file written, the backup path or '')."""
+
     target = path
     if os.path.islink(path):
         target = os.path.realpath(path)

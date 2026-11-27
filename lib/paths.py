@@ -1,41 +1,26 @@
-"""Resource keys of CtrlB Relay. lib/keys.json defines the resource kinds and examples;
-tests/fixtures/keys.json checks the same protocol cases. See tests/fixtures/README.md for proposing changes.
 
-key(resource, cwd) -> (key, kind). The resource is trimmed of surrounding whitespace. One that already carries a prefix
-of the kinds table (lib/keys.json: "path:", "name:", "slot:", "contract:", case-sensitive)
-is keyed as that kind again, so key(key(r)) is key(r): a path body is cleaned as a path, any other body as a name. A
-prefix with nothing after it is invalid and keyed ('', ''). One containing a
-'/' or ending in a file extension is a path: cleaned as Go's path.Clean does ("./" stripped, "//" and "/./" collapsed,
-".." resolved, a trailing '/' dropped; a leading "//" collapses to "/", unlike posixpath.normpath), and when cwd is given
-a leading "<cwd>/" is dropped. The case of a path is kept. Anything else is a name: lower-cased, runs of whitespace
-collapsed to one space.
-
-edit_paths(paths, cwd) is what the package sends for the files an edit tool touches, in the check call of the pre-tool
-hooks and in the paths column of session rows: each path cleaned and made relative to cwd as key() does, once per key,
-and written so that the CtrlB server recognises it as a path even when the file name has no extension ("Makefile" is sent
-as "./Makefile", so an edit of it is keyed path:Makefile from both harnesses)."""
 import json
 import os
 import re
 
 PATH, NAME, SLOT, CONTRACT = 'path:', 'name:', 'slot:', 'contract:'
 
-# The kinds table: what each key prefix is (leasable, finishable, reopenable, checked_by_hook, default_lease_s).
-# lib/keys.json defines the resource kinds used by the client and the CtrlB server.
+
+
 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'keys.json'), encoding='utf-8') as _fh:
     KINDS = json.load(_fh)['kinds']
 
-# Go's unicode.IsSpace: what strings.TrimSpace trims and strings.Fields splits on. Python's str.strip() also strips
-# U+001C to U+001F, which Go keeps.
+
+
 GO_SPACE = ('\t\n\v\f\r \x85\xa0            '
             '    　')
 _FIELDS = re.compile('[' + re.escape(GO_SPACE) + ']+')
-# File extensions use the same pattern as the CtrlB server. RE2's \S is ASCII-only ([^\t\n\f\r ]) and its $ is the end of the text.
+
 _EXT = re.compile(r'[^\t\n\f\r ]*\.[A-Za-z0-9_-]*[A-Za-z][A-Za-z0-9_-]*\Z')
 
 
 def clean(p):
-    """Go's path.Clean."""
+
     if p == '':
         return '.'
     rooted = p.startswith('/')
@@ -57,7 +42,7 @@ def clean(p):
 
 
 def _lower(s):
-    # Go's strings.ToLower maps rune by rune with no context: no final-sigma rule, U+0130 to 'i'.
+
     out = []
     for c in s:
         lc = c.lower()
@@ -66,12 +51,12 @@ def _lower(s):
 
 
 def is_path(r):
-    """Whether a trimmed resource is keyed as a path."""
+
     return '/' in r or _EXT.match(r) is not None
 
 
 def normalise_path(p, cwd=''):
-    """p cleaned, with a leading "<cwd>/" dropped when cwd is given. A p equal to cwd itself is kept whole."""
+
     if p == '':
         return ''
     p = clean(p)
@@ -90,22 +75,14 @@ def normalise_name(n):
     return ' '.join(x for x in _FIELDS.split(_lower(n)) if x)
 
 
-def kind_of(k):
-    """The kinds-table row of a key, by its prefix (a key with no known prefix is a name)."""
-    for row in KINDS:
-        if k.startswith(row['prefix']):
-            return row
-    return next(row for row in KINDS if row['kind'] == 'name')
 
 
-def lease_seconds_for(k, settings):
-    """The lease of a hold on key k under the workspace's leaseSeconds: the kind's own, or the setting."""
-    return kind_of(k)['default_lease_s'] or settings
+
+
 
 
 def key(resource, cwd=''):
-    """(key, kind) of a claimed resource, kind one of the table's ('path', 'name', 'slot', 'contract'); ('', '') when
-    the resource is a prefix with nothing after it."""
+
     r = (resource or '').strip(GO_SPACE)
     for row in KINDS:
         if r.startswith(row['prefix']):
@@ -118,8 +95,7 @@ def key(resource, cwd=''):
 
 
 def edit_path(p, cwd=''):
-    """The form of a file path an edit tool touches that the package sends: normalised as key() does, and keyed by
-    key(edit_path(p, cwd), cwd) as PATH + normalise_path(p, cwd). '' for an empty path."""
+
     n = normalise_path((p or '').strip(GO_SPACE), cwd)
     if not n:
         return ''
@@ -127,7 +103,7 @@ def edit_path(p, cwd=''):
 
 
 def edit_paths(ps, cwd=''):
-    """edit_path of each path, empty ones dropped, once per key, in order."""
+
     out, seen = [], set()
     for p in ps or []:
         if not isinstance(p, str):

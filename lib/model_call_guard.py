@@ -1,16 +1,4 @@
-"""guardModelCalls: refuse a shell command that starts a model CLI (codex exec, codex review, claude -p) without a time
-limit in front of it. Standard library only. Off unless CTRLB_GUARD_MODEL_CALLS or the config key guardModelCalls turns
-it on. docs/relay-hooks.md describes it.
 
-A model CLI started from a shell call with no time limit can block that call for hours. Joining the Relay run does not
-need the command: the started agent finds its parent when it starts (lib/spawn.py). This check is only the time limit:
-`timeout <duration>` (a duration above zero) in front of the model CLI.
-
-The check reads only the command text. It sees through env assignments, env, timeout, nohup, exec, command, time,
-setsid, nice, stdbuf, redirections, `bash -c` (sh, zsh, dash) and $( ) substitutions, including those in a heredoc body
-whose delimiter is not quoted. A model CLI started from a script, or through
-another program (xargs, npx, a Makefile), is not seen; spawnIdleMinutes (lib/spawn.py) covers those. A command the
-tokenizer cannot read is let through."""
 import json
 import os
 import re
@@ -25,13 +13,13 @@ ASSIGN_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$', re.S)
 DURATION_RE = re.compile(r'^(\d+(?:\.\d*)?|\.\d+)([smhd]?)$')
 REDIRECT_RE = re.compile(r'^\d*(?:<<?<?-?|>>?|<>|<&|>&|>\||&>>?)$')
 CODEX_SUBCOMMANDS = ('exec', 'e', 'review')
-# codex options before the subcommand that take a value (codex --help, 0.166)
+
 CODEX_VALUE_OPTS = ('-c', '--config', '--enable', '--disable', '--remote', '--remote-auth-token-env', '-i', '--image',
                     '-m', '--model', '--local-provider', '-p', '--profile', '-s', '--sandbox', '-C', '--cd', '--add-dir',
                     '-a', '--ask-for-approval')
-# claude's options (2.1.331: the options its --help lists, and a few it accepts but does not list). A newer claude
-# can have more: an option not listed here makes the check fail closed (_claude_prints).
-# Options that take a value: the next word is the value, even one that starts with '-'.
+
+
+
 CLAUDE_VALUE_OPTS = ('--add-dir', '--agent', '--agents', '--allowed-tools', '--allowedTools',
                      '--append-subagent-system-prompt', '--append-subagent-system-prompt-file',
                      '--append-system-prompt', '--append-system-prompt-file', '--autocompact', '--betas',
@@ -42,22 +30,22 @@ CLAUDE_VALUE_OPTS = ('--add-dir', '--agent', '--agents', '--allowed-tools', '--a
                      '--plan-mode-instructions', '--plugin-dir', '--plugin-url', '--remote-control-session-name-prefix',
                      '--resume-session-at', '--session-id', '--setting-sources', '--settings', '--system-prompt',
                      '--system-prompt-file', '--system-prompt-snapshot', '--tools', '-n')
-# Options whose value is optional ([value]): they never take a word that starts with '-'.
+
 CLAUDE_OPTIONAL_OPTS = ('--cloud', '--debug', '--from-pr', '--prompt-suggestions', '--remote-control', '--resume',
                         '--teleport', '--worktree', '-d', '-r', '-w')
-# Options that take no value (-p/--print and help/version are read on their own).
+
 CLAUDE_FLAGS = ('--allow-dangerously-skip-permissions', '--ax-screen-reader', '--background', '--bare', '--bg',
                 '--brief', '--chrome', '--continue', '--dangerously-skip-permissions', '--desktop',
                 '--disable-slash-commands', '--exclude-dynamic-system-prompt-sections', '--fork-session',
                 '--forward-subagent-text', '--ide', '--include-hook-events', '--include-partial-messages', '--init',
                 '--init-only', '--maintenance', '--no-chrome', '--no-session-persistence', '--replay-user-messages',
                 '--restricted', '--safe-mode', '--strict-mcp-config', '--tmux', '--verbose', '-c')
-CLAUDE_SHORT = 'cdhnprvw'       # claude's short options
-CLAUDE_SHORT_VALUE = 'ndrw'     # -n <name>, -d/-r/-w [value]: in -dp the rest of the word is the value of -d
-CLAUDE_SHORT_REQUIRED = 'n'     # with nothing after it in the word, -n takes the next word, even one that starts with -
+CLAUDE_SHORT = 'cdhnprvw'
+CLAUDE_SHORT_VALUE = 'ndrw'
+CLAUDE_SHORT_REQUIRED = 'n'
 CLAUDE_HELP = ('-h', '--help', '-v', '--version')
-CLAUDE_MAYBE = 'claude'         # the call when an unknown option leaves print mode unsure
-TIME_VALUE_OPTS = ('-f', '--format', '-o', '--output')      # GNU time options that take a value
+CLAUDE_MAYBE = 'claude'
+TIME_VALUE_OPTS = ('-f', '--format', '-o', '--output')
 TIMEOUT_VALUE_OPTS = ('-k', '--kill-after', '-s', '--signal')
 HELP = ('-h', '--help', '-V', '--version')
 MAX_DEPTH = 4
@@ -68,7 +56,7 @@ def enabled(cfg):
 
 
 def switch(var, file_value):
-    """The setting: the variable when it is set and not empty, else the file's value; true, 1, on and yes turn it on."""
+
     v = var if var not in (None, '') else file_value
     if isinstance(v, bool):
         return v
@@ -76,8 +64,7 @@ def switch(var, file_value):
 
 
 def off_before_load():
-    """Whether the setting is off, read straight from CTRLB_GUARD_MODEL_CALLS and <CTRLB_HOME>/config.json. The hook
-    runs before every Bash call, so with the guard off it stops here, before loading the rest of the plugin."""
+
     f = {}
     try:
         with open(os.path.join(os.environ.get('CTRLB_HOME') or os.path.expanduser('~/.ctrlb'), 'config.json')) as fh:
@@ -88,12 +75,11 @@ def off_before_load():
 
 
 def _heredoc_word(line, i):
-    """The heredoc delimiter word that starts at line[i]: (delimiter after quote removal, quoted, index past it), or
-    None. The word runs to a blank or an operator character; any quoting in it (\\, '...', "...") makes it quoted."""
+
     n, parts, quoted = len(line), [], False
     while i < n and line[i] not in ' \t;&|()<>':
         c = line[i]
-        if c == '$' and line[i + 1:i + 2] in ("'", '"'):      # $'EOF' and $"EOF": the $ goes with the quotes
+        if c == '$' and line[i + 1:i + 2] in ("'", '"'):
             i += 1
             continue
         if c == "'":
@@ -121,10 +107,7 @@ def _heredoc_word(line, i):
 
 
 def _heredoc_ops(line, stack):
-    """[(delimiter, expands, strip_tabs)] for each heredoc operator in line, in order, outside quotes and comments. A
-    body expands ($( ) and ` ` run) when its delimiter is not quoted. <<< (a here-string), and << in $(( )) or (( )),
-    are not heredocs. stack holds the quotes, substitutions and arithmetic still open from earlier lines (', ", $(, ( and ((): a quote
-    or a $( can span lines, as in codex exec "$(cat <<'PROMPT' ... )" <<'DIFF'. It is updated in place."""
+
     ops, i, n = [], 0, len(line)
     while i < n:
         top = stack[-1] if stack else None
@@ -133,7 +116,7 @@ def _heredoc_ops(line, stack):
             if c == "'":
                 stack.pop()
             i += 1
-        elif top == '((':      # arithmetic left open on an earlier line: << shifts until its ))
+        elif top == '((':
             k = line.find('))', i)
             if k == -1:
                 i = n
@@ -142,7 +125,7 @@ def _heredoc_ops(line, stack):
                 i = k + 2
         elif c == '\\':
             i += 2
-        elif line.startswith('$((', i) or (top != '"' and line.startswith('((', i)):      # arithmetic: << shifts
+        elif line.startswith('$((', i) or (top != '"' and line.startswith('((', i)):
             k = line.find('))', i + 2)
             if k == -1:
                 stack.append('((')
@@ -187,8 +170,7 @@ def _heredoc_ops(line, stack):
 
 
 def _substitutions(line):
-    """The $( ) and ` ` substitutions in an expanding heredoc body (quotes outside them are plain text). One may span
-    lines."""
+
     subs, i, n = [], 0, len(line)
     while i < n:
         if line[i] == '\\':
@@ -206,9 +188,7 @@ def _substitutions(line):
 
 
 def _drop_heredocs(text):
-    """The command without heredoc bodies: their lines are data, not commands. A body whose delimiter is not quoted
-    keeps its $( ) and ` ` substitutions, each as a line of its own after the operator's line, because the shell runs
-    them. A body ends at a line that is exactly its delimiter (<<- strips leading tabs first)."""
+
     out, pending, body = [], [], []
 
     def close(expands):
@@ -216,12 +196,12 @@ def _drop_heredocs(text):
             out.extend(_substitutions('\n'.join(body)))
         body.clear()
 
-    waiting, joined, stack = [], False, []      # operators on a logical line a backslash continues; open quotes
+    waiting, joined, stack = [], False, []
     for line in text.split('\n'):
         if pending:
             end, expands, dash = pending[0]
-            # In an expanding body a backslash-newline joins lines, so a line it continues is never the delimiter;
-            # in a quoted body it is plain text.
+
+
             if not joined and (line.lstrip('\t') if dash else line) == end:
                 close(expands)
                 pending.pop(0)
@@ -233,19 +213,18 @@ def _drop_heredocs(text):
         waiting += _heredoc_ops(line, stack)
         if not _continues(line):
             pending, waiting = waiting, []
-    if pending:      # a body with no end line runs to the end of the command
+    if pending:
         close(pending[0][1])
     return '\n'.join(out)
 
 
 def _continues(line):
-    """Whether line ends with a backslash that escapes the newline (an odd number of them)."""
+
     return (len(line) - len(line.rstrip('\\'))) % 2 == 1
 
 
 def _sub_end(text, i):
-    """The index just past the command substitution that starts at i: $( ... ) or ` ... `. Quotes and nested
-    parentheses inside it are followed. Raises ValueError when it is not closed."""
+
     n = len(text)
     if text[i] == '`':
         j = i + 1
@@ -279,7 +258,7 @@ def _sub_end(text, i):
                 raise ValueError('unclosed "')
             j += 1
             continue
-        if c == '#' and text[j - 1] in ' \t\n;&|(':      # a comment: an apostrophe in it is text
+        if c == '#' and text[j - 1] in ' \t\n;&|(':
             k = text.find('\n', j)
             j = n if k == -1 else k
             continue
@@ -298,10 +277,7 @@ def _sub_text(text, i, j):
 
 
 def _lex(text):
-    """The command as the shell splits it: [('word', text, subs), ('qword', text, subs) for a word with quoting in it,
-    or ('sep', text, [])]. Quotes are removed from a word;
-    text in quotes never separates commands. subs: the text of each $( ) and ` ` in the word that the shell runs (not
-    those in single quotes). A redirection operator is a word of its own. Raises ValueError for an unclosed quote."""
+
     out, n, i = [], len(text), 0
     word, subs, inword, quoted = [], [], False, False
 
@@ -321,7 +297,7 @@ def _lex(text):
             i = n if k == -1 else k
         elif c in '<>' or (c == '&' and text.startswith('&>', i)):
             fd = ''
-            if inword and not quoted and not subs and ''.join(word).isdigit():      # 2>file: 2 is the fd, not a word
+            if inword and not quoted and not subs and ''.join(word).isdigit():
                 fd = ''.join(word)
                 word, inword = [], False
             end()
@@ -333,7 +309,7 @@ def _lex(text):
         elif c in SEPARATORS:
             end()
             j = i + 1
-            while c not in '\n()' and j < n and text[j] in ';&|':      # && || ;; |& ; ( and ) stand alone
+            while c not in '\n()' and j < n and text[j] in ';&|':
                 j += 1
             out.append(('sep', text[i:j], []))
             i = j
@@ -388,9 +364,7 @@ def _is(item, kind, text):
 
 
 def _body(items, j):
-    """The function body that starts at items[j], a { ... } group or a ( ... ) subshell: (index of its first item,
-    index of its closing item), or None. A brace counts only where a command starts, unquoted, as the shell reads it:
-    `echo }` and `printf '{'` do not open or close the body."""
+
     n = len(items)
     if _is(items[j], 'word', '{'):
         depth, at_cmd = 0, True
@@ -420,15 +394,13 @@ def _body(items, j):
 
 
 def _parts(items):
-    """The command in the order the shell runs it: ('seg', [(text, subs)]) for each simple command, and
-    ('def', name, (body items, runs in the same shell)) for each function definition (name() { ...; }, name() ( ... ),
-    function name [()] { ...; })."""
+
     i, n, seg = 0, len(items), []
     while i < n:
         kind, text, subs = items[i]
         if kind == 'word' and REDIRECT_RE.match(text):
-            # A redirection and its target are not words of the command (>/dev/null codex exec runs codex). The
-            # target's substitutions still run: they stay in the segment under a None word.
+
+
             if i + 1 < n and items[i + 1][0] != 'sep':
                 i += 1
                 if items[i][2]:
@@ -436,7 +408,7 @@ def _parts(items):
             i += 1
             continue
         name, j = None, i
-        at_cmd = all(w in RESERVED for w, _ in seg)      # nothing but if, then, do ... before it
+        at_cmd = all(w in RESERVED for w, _ in seg)
         if at_cmd and kind == 'word' and text == 'function' and i + 1 < n and items[i + 1][0] != 'sep':
             name, j = items[i + 1][1], i + 2
             if j + 1 < n and _is(items[j], 'sep', '(') and _is(items[j + 1], 'sep', ')'):
@@ -448,7 +420,7 @@ def _parts(items):
             while j < n and _is(items[j], 'sep', '\n'):
                 j += 1
             span = _body(items, j) if j < n else None
-            if span:      # a ( ) body runs in a subshell: what it defines does not stay
+            if span:
                 yield ('def', name, (items[span[0]:span[1]], _is(items[j], 'word', '{')))
                 i = span[1] + 1
                 continue
@@ -464,9 +436,7 @@ def _parts(items):
 
 
 def _run(items, timeout, found, depth, funcs, share=False):
-    """Scan the parts in order; a definition replaces the function's body for the calls after it. share: a function
-    body run in the same shell, whose definitions stay for the rest of the command; otherwise (a new text: the command,
-    a substitution, bash -c) the definitions are a copy."""
+
     funcs = funcs if share and funcs is not None else dict(funcs or {})
     for part in _parts(items):
         if part[0] == 'def':
@@ -476,7 +446,7 @@ def _run(items, timeout, found, depth, funcs, share=False):
 
 
 def _model_call(words):
-    """'codex exec', 'codex review' or 'claude -p' when words (program first) start a model CLI, else ''."""
+
     if not words:
         return ''
     prog = os.path.basename(words[0])
@@ -488,14 +458,14 @@ def _model_call(words):
             if a == '--':
                 return ''
             if a in HELP:
-                return ''      # codex --help, codex --version
+                return ''
             if a.startswith('-'):
                 i += 2 if a in CODEX_VALUE_OPTS else 1
                 continue
             opts = args[i + 1:]
-            opts = opts[:opts.index('--')] if '--' in opts else opts     # after --, --help is the prompt
+            opts = opts[:opts.index('--')] if '--' in opts else opts
             if a not in CODEX_SUBCOMMANDS or any(h in opts for h in HELP):
-                return ''      # another subcommand, or its help
+                return ''
             return f'codex {"exec" if a == "e" else a}'
         return ''
     if prog == 'claude':
@@ -504,17 +474,9 @@ def _model_call(words):
 
 
 def _claude_prints(args):
-    """'print' when claude args turn on -p/--print with no help or version, 'maybe' when an unknown option leaves
-    that unsure, else ''. Read as claude reads them. The value of an
-    option is never a flag: in `claude --system-prompt -p hi` the -p is the system prompt. --opt=value is one word.
-    Short options in one word are read flag by flag: -cp is -c -p; the first one that takes a value takes the rest of
-    the word (-pndemo1: the name is demo1), or the next word when nothing is left (-pn --help: the name is --help).
 
-    It fails closed. An option missing from the tables above (a newer claude) may take the next word as its value, so
-    with one on the line a -p anywhere (alone or in short options) counts, and help or version right after it does
-    not cancel the check. A wrong refusal costs a timeout; a missed call can hold the shell for hours."""
     found = unknown = False
-    after_unknown = False          # this word may be the value of the unknown option before it
+    after_unknown = False
     known = CLAUDE_VALUE_OPTS + CLAUDE_OPTIONAL_OPTS + CLAUDE_FLAGS + CLAUDE_HELP + ('-p', '--print')
     i = 0
     while i < len(args):
@@ -526,9 +488,9 @@ def _claude_prints(args):
         if a in CLAUDE_HELP:
             if maybe_value:
                 continue
-            return False           # help or version: no model call
+            return False
         if a in CLAUDE_VALUE_OPTS:
-            i += 1                 # its value
+            i += 1
         elif a in ('-p', '--print'):
             found = True
         elif a.startswith('--'):
@@ -556,15 +518,13 @@ def _claude_prints(args):
 
 def _valid_duration(d):
     if d.startswith('$'):
-        return True            # a variable: the shell decides
+        return True
     m = DURATION_RE.match(d)
     return bool(m) and float(m.group(1)) > 0
 
 
 def _scan(seg, timeout, found, depth, funcs=None):
-    """Walk one simple command's prefixes (assignments, wrappers, reserved words) and record any model CLI it starts,
-    with the time limit in force for it: None, or the duration. A substitution in any of its words runs before the
-    command does, so it gets only the time limit in force outside the command."""
+
     funcs = funcs or {}
     for _, subs in seg:
         for inner in subs:
@@ -584,7 +544,7 @@ def _scan(seg, timeout, found, depth, funcs=None):
                 split = (words[i + 1] if i + 1 < len(words) else '') if w in ('-S', '--split-string') else \
                     w[len('--split-string='):] if w.startswith('--split-string=') else \
                     w[2:] if w.startswith('-S') and len(w) > 2 else None
-                if split is not None:      # env -S "codex exec" review: the string is split into the command
+                if split is not None:
                     rest = words[i + (2 if w in ('-S', '--split-string') else 1):]
                     _walk(split + ' ' + shlex.join(rest), timeout, found, depth + 1, funcs)
                     return
@@ -602,7 +562,7 @@ def _scan(seg, timeout, found, depth, funcs=None):
             k = i + 1
             while k < len(words) and words[k].startswith('-') and words[k] != '--':
                 if 'v' in words[k][1:] or 'V' in words[k][1:]:
-                    return      # command -v, -pv, -p -V codex: looks the name up, runs nothing
+                    return
                 k += 1
         if prog in PASS_THROUGH:
             i += 1
@@ -631,7 +591,7 @@ def _scan(seg, timeout, found, depth, funcs=None):
                     break
             return
         break
-    if i < len(words) and words[i] in funcs and depth < MAX_DEPTH:      # a call of a function defined in the command
+    if i < len(words) and words[i] in funcs and depth < MAX_DEPTH:
         body, same_shell = funcs[words[i]]
         _run(body, timeout, found, depth + 1, funcs, share=same_shell)
         return
@@ -647,7 +607,7 @@ def _walk(text, timeout, found, depth=0, funcs=None):
 
 
 def model_calls(command):
-    """[(call, timeout)] for each model CLI the command starts. Raises ValueError when the command cannot be read."""
+
     if isinstance(command, list):
         command = shlex.join(str(c) for c in command)
     found = []
@@ -656,8 +616,7 @@ def model_calls(command):
 
 
 def check(cfg, command):
-    """The refusal text when the guard is on and the command starts a model CLI without a time limit; None otherwise
-    (including when the command cannot be read)."""
+
     if not enabled(cfg):
         return None
     try:

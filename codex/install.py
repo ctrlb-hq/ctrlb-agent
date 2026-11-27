@@ -1,33 +1,15 @@
-"""Connect Codex to CtrlB. Writes one block into $CODEX_HOME/config.toml (default ~/.codex/config.toml):
 
-  [mcp_servers.ctrlb]   CtrlB's /mcp URL; the key is read from the CTRLB_KEY environment variable
-                        (bearer_token_env_var), never written into the file; X-CtrlB-Run and X-CtrlB-Agent are sent
-                        from CTRLB_RUN and CTRLB_AGENT when they are set (env_http_headers)
-  [[hooks.<Event>]]     SessionStart, SubagentStart, PreCompact, SessionEnd, Stop, SubagentStop and PreToolUse
-                        (matcher apply_patch; and matcher Bash when guardModelCalls is on), each calling codex/hook.py
-                        from this repo
-  [otel]                only with --otel: Codex's own OTLP log export, straight to the lake's OTLP endpoint
-
-Usage:
-  python3 -I codex/install.py [--mcp-url URL] [--codex-home DIR | --config FILE] [--dry-run]
-  python3 -I codex/install.py --otel --otel-endpoint URL [--otel-header NAME=VALUE ...] ...
-  python3 -I codex/install.py --uninstall [--dry-run]
-
-The MCP URL defaults to CTRLB_MCP_URL, or CTRLB_URL + /mcp, or the url in ~/.ctrlb/config.json (bin/configure.py).
-The block sits between two marker comments. A run replaces the block, so running it twice changes nothing; a run
-that would change nothing writes nothing. Before writing, the old file is copied to config.toml.ctrlb-backup-<time>.
---dry-run prints the diff and writes nothing. Codex skips new or changed hooks until you trust them with /hooks."""
 import argparse, datetime, difflib, json, os, re, shutil, subprocess, sys, tempfile
 sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'lib'))
-import common  # noqa: E402
-import redact  # noqa: E402
+import common
+import redact
 
 BEGIN = '# >>> ctrlb-agent: written by codex/install.py; run it again to change this block, --uninstall to remove it'
 END = '# <<< ctrlb-agent'
 HOOK = os.path.realpath(os.path.join(HERE, 'hook.py'))
-# (event, hook.py mode, timeout seconds, matcher, async)
+
 HOOKS = [('SessionStart', 'session-start', 10, None, False),
          ('SubagentStart', 'subagent-start', 10, None, False),
          ('PreCompact', 'flush', 10, None, False),
@@ -35,8 +17,8 @@ HOOKS = [('SessionStart', 'session-start', 10, None, False),
          ('Stop', 'upload', 120, None, True),
          ('SubagentStop', 'upload', 120, None, True),
          ('PreToolUse', 'pre-tool', 5, 'apply_patch', False)]
-# guardModelCalls: written only when the setting is on, so Codex runs no hook on every shell command for users who
-# have not turned the guard on. Turning it on later means running this installer again (and /hooks once).
+
+
 GUARD_HOOK = ('PreToolUse', 'pre-bash', 5, 'Bash', False)
 EVENT_KEYS = {'hooks.' + h[0] for h in HOOKS}
 HEADER_RE = re.compile(r'^\s*\[(\[?)\s*([^\[\]]+?)\s*\]\]?\s*(?:#.*)?$')
@@ -48,14 +30,12 @@ class InstallError(Exception):
 
 
 def q(s):
-    """A TOML basic string (JSON string escaping is valid TOML)."""
+
     return json.dumps(s, ensure_ascii=False)
 
 
 def sh_dq(s):
-    """s as one double-quoted shell word: $, `, \\ and " are escaped, so a checkout path such as
-    /work/a $(cmd)/ctrlb-agent is passed as written and nothing in it runs. A plain path gives the same "path" as
-    before, so existing hooks keep their trusted command."""
+
     return '"' + re.sub(r'([$`"\\])', r'\\\1', s) + '"'
 
 
@@ -90,7 +70,7 @@ def block(mcp_url, otel_endpoint='', otel_headers=None, guard=False):
 
 
 def split(text):
-    """(text before the block, the block, text after it). The block is '' when there is none."""
+
     lines = text.splitlines(keepends=True)
     starts = [i for i, ln in enumerate(lines) if ln.rstrip('\n') == BEGIN]
     ends = [i for i, ln in enumerate(lines) if ln.rstrip('\n') == END]
@@ -104,7 +84,7 @@ def split(text):
 
 
 def conflicts(text, otel):
-    """Tables or keys outside the block that the block would redefine (TOML forbids defining a table twice)."""
+
     found, table = [], ''
     for n, ln in enumerate(text.splitlines(), 1):
         m = HEADER_RE.match(ln)
@@ -129,11 +109,11 @@ def conflicts(text, otel):
 
 
 def render(old, new_block):
-    """The whole new file: old with the block replaced, removed (new_block '') or appended."""
+
     before, cur, after = split(old)
     if cur:
         if not new_block and before.endswith('\n\n'):
-            before = before[:-1]                    # drop the blank line the install put before the block
+            before = before[:-1]
         return before + new_block + after
     if not new_block:
         return old
@@ -144,10 +124,10 @@ def render(old, new_block):
 
 def validate(text):
     try:
-        import tomllib                              # Python 3.11+
+        import tomllib
     except ImportError:
-        # Older supported Pythons have no TOML parser. Ask Codex to parse an isolated copy, or refuse rather
-        # than assume our conflict scanner understands every valid spelling of the user's configuration.
+
+
         cli = shutil.which('codex')
         if not cli:
             raise InstallError('TOML validation requires Python 3.11+ or the Codex CLI on PATH; nothing written')
@@ -188,8 +168,7 @@ def has_credentials(text):
 
 
 def write(path, text):
-    """Back up the old file, then replace it atomically, restricting credentials to 0600. Returns the backup path ('' when the file
-    did not exist)."""
+
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     backup, mode = '', 0o600
     if os.path.exists(path):
@@ -201,9 +180,9 @@ def write(path, text):
         mode = os.stat(path).st_mode & 0o777
     if has_credentials(text):
         mode = 0o600
-    # a new temporary file each time, created 0600 (mkstemp), so nothing is written through an existing file or link
-    # and the new text (which can hold OTEL headers) is never readable by others; the old mode is applied before the
-    # replace
+
+
+
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or '.', prefix='.config.toml.', suffix='.ctrlb-tmp')
     try:
         with os.fdopen(fd, 'w') as fh:
@@ -224,8 +203,7 @@ HEADER_ITEM = re.compile(r'''\s*((?:"(?:\\.|[^"\\])*"|'[^']*'|[A-Za-z0-9_-]+))\s
 
 
 def hide_header_values(text):
-    """Hide header assignments before diffing. Suppress the rest of their table too, so multiline literal strings
-    and inline tables cannot leak through a later diff hunk."""
+
     out = []
     hidden, multiline = False, ''
     for line in text.splitlines(keepends=True):

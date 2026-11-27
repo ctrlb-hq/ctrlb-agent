@@ -1,25 +1,9 @@
-"""Started agents: a model CLI (claude -p, codex exec) that one agent starts from its shell finds that agent when it
-starts, and, when that agent is in a Relay run, joins the run under its own agent name. Standard library only.
-docs/relay-hooks.md describes it.
 
-No command text is read. Every agent session writes where it can be found when it starts:
-  - a process record, <CTRLB_HOME>/spawn/procs/<pid>.json, for its agent process (Claude Code and Codex);
-  - for Claude Code, CTRLB_PARENT_* lines in CLAUDE_ENV_FILE, so every later Bash command, and every process those
-    commands start, carries them, even when it leaves the process tree (nohup, setsid).
-A session that starts looks for the nearest agent process above its own that left a record; failing that, for the
-CTRLB_PARENT_* variables. That agent is its parent. The decision is kept in <CTRLB_HOME>/spawn/sessions/<sid>.json,
-so every later hook of the session reads the same run and agent name.
-
-The parent joins nothing on its own. The child joins the parent's run when the parent is in one (CTRLB_RUN set, or a
-ctrlb relay tool called in that session), and posts one note saying who started it. A child started with its own
-CTRLB_RUN and its own CTRLB_AGENT is left as it is. A child that inherited its parent's CTRLB_AGENT gets a name of its
-own. joinSpawned (CTRLB_JOIN_SPAWNED) turns this off. spawnIdleMinutes (CTRLB_SPAWN_IDLE_MINUTES) stops a started agent
-whose transcript has not changed for that many minutes (off by default)."""
 import errno, json, os, re, shlex, signal, subprocess, sys, time
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import common  # noqa: E402
+import common
 
 AGENT_PROGRAMS = ('claude', 'codex')
 SHELLS = ('sh', 'bash', 'zsh', 'dash')
@@ -38,10 +22,10 @@ def _dir(*tail):
     return common.private_dir(os.path.join(common.HOME, 'spawn', *tail))
 
 
-# ---------------------------------------------------------------- processes
+
 
 def _proc(pid):
-    """(parent pid, program name, start time) of a process, or None. Linux reads /proc; elsewhere ps."""
+
     try:
         with open(f'/proc/{pid}/stat') as fh:
             s = fh.read()
@@ -72,7 +56,7 @@ def _proc(pid):
 
 
 def _program(name, argv):
-    """'claude' or 'codex' when the process is that agent CLI (directly, or a node script of that name), else name."""
+
     for a in [name] + argv[:2]:
         base = os.path.basename(a or '')
         if base in AGENT_PROGRAMS:
@@ -81,9 +65,7 @@ def _program(name, argv):
 
 
 def agent_process(pid=None):
-    """(pid, program, start) of the agent CLI that runs this hook, or None: the hook's parent, or the parent of the
-    shell that runs it. Nothing further up counts, so a hook run by some other program (a test, a script) under an
-    agent's shell is not taken for that agent's own."""
+
     pid = pid or os.getpid()
     for _ in range(3):
         p = _proc(pid)
@@ -105,8 +87,7 @@ def _record_path(pid):
 
 
 def write_record(me, sid, run, agent, relay, base_agent='', transcript=''):
-    """The process record of this session's agent process me (pid, program, start), and the removal of records whose
-    process has gone."""
+
     pid, prog, start = me
     d = _dir('procs')
     for f in os.listdir(d):
@@ -136,8 +117,7 @@ def _read_json(path):
 
 
 def find_parent(me, sid, env=None):
-    """The agent that started this session: {session, run, agent, relay, how}, or None. The nearest agent process above
-    this session's own (me) with a record wins; else the CTRLB_PARENT_* variables."""
+
     env = os.environ if env is None else env
     pid = me[0] if me else os.getpid()
     for _ in range(MAX_DEPTH):
@@ -164,9 +144,7 @@ def find_parent(me, sid, env=None):
 
 
 def _codex_relay(parent, codex_transcript=''):
-    """The parent, marked as in a relay run when it is a Codex session whose rollout shows a ctrlb relay tool call that
-    writes to a run (Codex has no hook after a tool call; a Claude Code parent's call is in its SessionRecord). Its run
-    stays its own: a session works in the run it started with."""
+
     if not parent['relay'] and codex_transcript:
         import rows_codex
         if rows_codex.relay_call(codex_transcript):
@@ -174,11 +152,10 @@ def _codex_relay(parent, codex_transcript=''):
     return parent
 
 
-# ---------------------------------------------------------------- the parent side
+
 
 def mark_shell(sid, run, agent, relay, env_file=None, base_agent=''):
-    """Claude Code: CTRLB_PARENT_* for every later Bash command of this session, appended to CLAUDE_ENV_FILE (other
-    hooks write to it too, so nothing is replaced). False when there is no such file."""
+
     env_file = env_file if env_file is not None else os.environ.get('CLAUDE_ENV_FILE') or ''
     if not env_file:
         return False
@@ -197,7 +174,7 @@ def mark_shell(sid, run, agent, relay, env_file=None, base_agent=''):
 
 
 def parent_in_relay(parent):
-    """Whether the parent is in a relay run now: its run was set when it started, or it has called a relay tool."""
+
     if parent.get('relay'):
         return True
     try:
@@ -207,29 +184,26 @@ def parent_in_relay(parent):
         return False
 
 
-# ---------------------------------------------------------------- the child side
+
 
 def _session_path(sid, create=True):
-    """The file of a session's decision. create=False only names it: a read must not make the spawn folder (with
-    joinSpawned off nothing is written)."""
+
     d = _dir('sessions') if create else os.path.join(common.HOME, 'spawn', 'sessions')
     return os.path.join(d, re.sub(r'[^A-Za-z0-9_.-]', '_', sid)[:128] + '.json')
 
 
 def joined(sid):
-    """What session-start decided for this session: {parent, parent_agent, run, agent, joined, renamed, ...}, or {}."""
+
     return _read_json(_session_path(sid, create=False)) if sid else {}
 
 
 def short_id(sid):
-    """The last 8 hex digits of a session id (random in UUIDv4 and v7)."""
+
     return sid.replace('-', '')[-8:]
 
 
 def child_name(parent_agent, parent_session, program, sid):
-    """<parent label>.<program>-<last 8 hex digits of the session id>, without the label when the parent has none (its
-    agent name is its session id). The last digits, because Codex session ids are UUIDv7: their first 8 digits are a
-    timestamp that siblings started within about a minute share; the last 8 are random in v4 and v7 alike."""
+
     own = f'{program or "agent"}-{short_id(sid)}'
     if parent_agent and parent_agent != parent_session and not UUID_RE.match(parent_agent):
         return f'{parent_agent}.{own}'
@@ -237,10 +211,7 @@ def child_name(parent_agent, parent_session, program, sid):
 
 
 def decide(cfg, sid, parent, program):
-    """The child's run and agent name: {parent, parent_agent, run, agent, joined, renamed}. joined: the child takes the
-    parent's run (it had none of its own, or the same). renamed: it had the parent's agent name, or the name the parent
-    itself was given before it was renamed (a grandchild inherits the CTRLB_AGENT of the first agent). In local mode a
-    child without CTRLB_RUN in its environment joins nothing: its relay tools need that run."""
+
     own_run = cfg.get('run') or ''
     p_agent = parent['agent'] or parent['session']
     explicit_run = bool(own_run) and own_run != parent['run']
@@ -255,12 +226,10 @@ def decide(cfg, sid, parent, program):
 
 
 def apply(cfg, sid):
-    """Put the session's decided run and agent name in cfg (every hook calls this after config()). Returns the
-    decision, or {}. Never raises: a spawn folder that cannot be read leaves cfg as it is, so the hook's own work (the
-    edit check, the guard) still runs."""
-    # A saved decision applies for the session's whole life, even when joinSpawned is turned off while it runs:
-    # otherwise a renamed child would go back to its parent's name and its session end could release the parent's
-    # holds. The setting only decides new joins (session_start).
+
+
+
+
     if not sid:
         return {}
     try:
@@ -270,7 +239,7 @@ def apply(cfg, sid):
         return {}
     if j:
         try:
-            os.utime(_session_path(sid, create=False))      # in use: pruning keeps the decisions read in the last KEEP_SESSIONS_S
+            os.utime(_session_path(sid, create=False))
         except OSError:
             pass
     if j.get('joined') and j.get('run'):
@@ -281,8 +250,7 @@ def apply(cfg, sid):
 
 
 def link(sid, root):
-    """A Codex subagent thread sid takes the decision of its root session, so every later hook of the thread reads the
-    same run and agent name. Returns the decision, or {}."""
+
     if not sid or not root or sid == root:
         return {}
     d = joined(root)
@@ -304,10 +272,7 @@ def _prune_sessions():
 
 
 def session_start(cfg, sid, source='', env_file=None, transcript=''):
-    """At session start: find the parent, keep the decision, apply it to cfg, and leave this session's own marks for
-    the agents it starts. Returns the decision ({} when the session was not started by an agent). Never raises.
-    With joinSpawned off it makes no new decision and leaves no marks, but a decision saved earlier still applies
-    (after compaction or resume, the session keeps the name it joined under)."""
+
     if not sid:
         return {}
     if not cfg.get('join_spawned'):
@@ -351,8 +316,8 @@ def session_start(cfg, sid, source='', env_file=None, transcript=''):
         except Exception as e:
             common.log(f"spawn note {decision['run']}/{decision['agent']}: {type(e).__name__}: {str(e)[:200]}")
     minutes = cfg.get('spawn_idle_minutes') or 0
-    # A resumed session runs in a process the first watchdog did not watch (that one ended with its process, or when
-    # this process took another session); after compaction the process and its watchdog are the same.
+
+
     if decision and minutes > 0 and me and source != 'compact':
         try:
             watch(dict(pid=me[0], start=me[2], transcript=transcript or '', minutes=minutes, run=decision.get('run') or '',
@@ -362,10 +327,10 @@ def session_start(cfg, sid, source='', env_file=None, transcript=''):
     return decision
 
 
-# ---------------------------------------------------------------- spawnIdleMinutes
+
 
 def watch(payload):
-    """Start the watchdog as a detached process (its own session) and return at once."""
+
     p = subprocess.Popen([sys.executable, '-I', os.path.abspath(__file__), 'watch'], stdin=subprocess.PIPE,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
     try:
@@ -381,14 +346,13 @@ def _alive(pid, start):
 
 
 def _same_session(pid, sid):
-    """Whether the process still runs session sid: a new session in the same process (/clear) rewrites its record."""
+
     rec = _read_json(_record_path(pid))
     return not sid or not rec.get('session') or rec['session'] == sid
 
 
 def _pidfd(pid):
-    """A handle on the process itself (Linux 5.3 and later), so a signal can never reach a process that took its pid
-    later; None elsewhere."""
+
     try:
         return os.pidfd_open(pid)
     except (AttributeError, OSError):
@@ -396,7 +360,7 @@ def _pidfd(pid):
 
 
 def _signal(pid, start, fd, sig):
-    """Send sig to the watched process only: through its pidfd, or after checking its start time once more."""
+
     if fd is not None:
         signal.pidfd_send_signal(fd, sig)
     elif _alive(pid, start):
@@ -406,18 +370,16 @@ def _signal(pid, start, fd, sig):
 
 
 class _Activity:
-    """The transcript seen by one stat per turn. The time of its last change is on the monotonic clock; its mtime is
-    wall time, so it is read only to see that it changed: a wall clock set forward or back neither stops a working
-    agent nor keeps an idle one. A stat that fails changes nothing."""
+
 
     def __init__(self, path):
         self.path = path
         self.seen = self.fail = self.fail_since = None
-        self.changed = time.monotonic()      # the last change seen (the watch's start until the first one)
+        self.changed = time.monotonic()
         self.look()
 
     def _stat(self):
-        """(fingerprint, None), or (None, 'missing') when the file is not there, or (None, 'error')."""
+
         try:
             st = os.stat(self.path)
             return (st.st_mtime_ns, st.st_size, st.st_ino), None
@@ -427,8 +389,7 @@ class _Activity:
             return None, 'error'
 
     def look(self):
-        """One stat: ('ok', seconds since the last change), or ('missing' or 'error', seconds the stat has failed in
-        that way on every look). A failed stat changes nothing: the last fingerprint and change time are kept."""
+
         stamp, fail = self._stat()
         now = time.monotonic()
         if fail:
@@ -442,19 +403,17 @@ class _Activity:
 
 
 def _due(look, limit):
-    """Stop: the latest stat works and shows no change for the whole limit, or the transcript has been missing for
-    the whole limit. A stat that fails in another way never stops the agent."""
+
     state, secs = look
     return state in ('ok', 'missing') and secs >= limit
 
 
 def _watcher(payload, poll_s=WATCH_POLL_S, grace_s=KILL_GRACE_S):
-    """Stop the agent process when its transcript has not changed for the set minutes: SIGTERM (its session-end hook
-    hands its holds back), then SIGKILL after grace_s. Ends when the process ends, or when it starts another session."""
+
     pid, start, limit = int(payload['pid']), payload.get('start'), float(payload['minutes']) * 60
     sid = payload.get('sid') or ''
     fd = _pidfd(pid)
-    if not _alive(pid, start):      # the pid was taken by another process before the handle was opened
+    if not _alive(pid, start):
         return
     try:
         _watch_loop(payload, pid, start, sid, limit, _Activity(payload.get('transcript') or ''), fd, poll_s, grace_s)
@@ -464,12 +423,7 @@ def _watcher(payload, poll_s=WATCH_POLL_S, grace_s=KILL_GRACE_S):
 
 
 def _watch_loop(payload, pid, start, sid, limit, activity, fd, poll_s, grace_s):
-    """One turn: one look at the transcript, then one sleep. A turn whose stat fails changes nothing and signals
-    nothing (a stat that keeps failing is logged once and watched on). A stop takes two turns: the turn that finds the
-    agent due logs it and posts the run note (both can block for seconds), and the look of a later turn, taken after
-    them and right before the signal, decides. SIGTERM only when that look is still due: a good stat with no change
-    for the whole limit, or the transcript still missing. A change cancels the stop; a failed stat leaves it pending.
-    The run note is posted once per stop: again only after the transcript changed."""
+
     noted = logged = pending = False
     while _alive(pid, start) and _same_session(pid, sid):
         look = activity.look()
@@ -506,13 +460,13 @@ def _watch_loop(payload, pid, start, sid, limit, activity, fd, poll_s, grace_s):
         if state == 'error':
             time.sleep(poll_s)
         elif pending:
-            time.sleep(min(poll_s, 1.0))       # the look before the signal comes soon after the note
+            time.sleep(min(poll_s, 1.0))
         else:
             time.sleep(min(poll_s, max(1.0, limit - secs)))
 
 
 def _stop(pid, start, sid, fd, grace_s):
-    """SIGTERM, then SIGKILL after grace_s (monotonic) unless the process ended or runs another session."""
+
     try:
         _signal(pid, start, fd, signal.SIGTERM)
     except OSError:
