@@ -8,10 +8,11 @@ Usage: backfill.py [--codex] [--titles | --cost-ledger] [--project TEXT] [--coun
                   with --codex, each main thread's names from $CODEX_HOME/session_index.jsonl given since the last one
                   sent, oldest first, and the ones an older CtrlB refused, at their own keys. The upload offsets
                   stay as they are
-  --cost-ledger   only put the cost records of the Claude Code transcripts into this machine's cost ledgers, in time
-                  order (sends nothing), so each session is charged only its own spend, also a session that continues
-                  one from before this version. Run it once after upgrading. A Claude Code upload does the same
-                  first, and uploads anyway (saying so) when the ledger file cannot be used
+  --cost-ledger   only put the cost records CtrlB already has, of the Claude Code transcripts, into this machine's
+                  cost ledgers, in time order (sends nothing), so a session that continues one uploaded by plugin
+                  0.3.0 or earlier is charged only its own spend. Run it once after upgrading. With --count, it
+                  only counts them. A Claude Code upload does the same first, also for the records it is about to
+                  upload, and uploads anyway (saying so) when the ledger file cannot be used
   --project TEXT  only project folders whose name contains TEXT (e.g. the repo name); with --codex, only sessions
                   whose working directory contains TEXT
   --count         print what would be uploaded and stop
@@ -95,12 +96,19 @@ def main():
     if a.cost_ledger:
         print(what)
         try:
-            records, ledgers = rows_claude.seed_ledgers(cfg, files, time.time() + 600)
+            records, ledgers, unread = rows_claude.seed_ledgers(cfg, files, time.time() + 600, plan=False,
+                                                                write=not a.count)
         except (OSError, TimeoutError) as e:
             print(f'the cost ledgers could not be filled: {str(e)[:200]}; nothing was sent')
             return 1
-        print(f'{records} cost records are in {ledgers} cost ledgers on this machine; nothing was sent')
-        return 0
+        for f, e in unread:
+            print(f'  could not read {f}: {e[:200]}')
+        print(f'{records} cost records CtrlB has would go into {ledgers} cost ledgers; nothing was written' if a.count
+              else f'{records} cost records are in {ledgers} cost ledgers on this machine (those CtrlB has); nothing '
+              'was sent')
+        if unread:
+            print(f'{len(unread)} transcript files could not be read; their cost records are left out')
+        return 1 if unread else 0
     if a.titles:
         print(what)
         print(f"destination: {cfg['url']}  dataset {cfg['dataset']}  user {cfg['user'] or '(from the key)'}")
@@ -118,8 +126,11 @@ def main():
     if not a.codex:
         # Cost records first, in time order across the files, so the files below can upload in any order.
         try:
-            records, ledgers = rows_claude.seed_ledgers(cfg, files, time.time() + 600)
+            records, ledgers, unread = rows_claude.seed_ledgers(cfg, files, time.time() + 600)
             print(f'  {records} cost records in {ledgers} cost ledgers, in time order')
+            for f, e in unread:
+                seeded = False
+                print(f'  could not read {f} for the cost ledgers: {e[:200]}')
         except (OSError, TimeoutError) as e:
             seeded = False
             print(f'  the cost ledgers could not be filled first ({str(e)[:200]}); uploading anyway, each cost record '

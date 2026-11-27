@@ -594,12 +594,14 @@ class RunState(TokenState):
 
 class CostLedgers:
     """Claude Code's cost ledgers seen on this machine, shared by every transcript's uploads: a JSON object in
-    <CTRLB_HOME>/state/cost-ledgers.json, {ledger: {total, ts, models, applied, planned, seen}} (see rows_claude).
-    Held exclusively (fcntl) while it is read and changed, as FileState is, so concurrent hooks never lose an update.
-    source names the transcript a handle works for. When the file cannot be used, change answers None and the caller
-    falls back to the file's own previous cost record, as before ledgers existed: a file that is not such an object
-    is moved aside (to cost-ledgers.json.unreadable) and the next change starts a new one; a file that cannot be read
-    or written is left as it was. Either way a line goes to the hook log."""
+    <CTRLB_HOME>/state/cost-ledgers.json, {ledger: {total, ts, models, planned, seen}} (see rows_claude). Held
+    exclusively (fcntl) while it is read and changed, as FileState is, so concurrent hooks never lose an update. It
+    keeps at most MAX_LEDGERS ledgers without planned amounts: past that, a write drops those whose last record is
+    oldest, never one it changed. Ledgers with planned amounts are kept until those are used or dropped. source names
+    the transcript a handle works for. When the file cannot be used, change answers None: an upload then counts the
+    record as for a ledger not seen before, and backfill.py's seed fails. A file that is not such an object, or that
+    holds a value this version cannot use, is moved aside (to cost-ledgers.json.unreadable) and the next change starts
+    a new one; a file that cannot be read or written is left as it was. Either way a line goes to the hook log."""
     MAX_LEDGERS = 1000
 
     def __init__(self, path, deadline):
@@ -621,8 +623,8 @@ class CostLedgers:
     def change(self, fn):
         """fn(ledgers) changes the object in place and returns (value, changed); change returns the value, and
         writes the file only when changed is true. None when the file cannot be used (see the class text): fn is not
-        called, or, when the file cannot be written, its changes are lost. Raises TimeoutError when the deadline
-        passes before the file is read or written, or while another upload holds it ('cost ledger busy')."""
+        called, or fn raised, or, when the file cannot be written, its changes are lost. Raises TimeoutError when the
+        deadline passes before the file is read or written, or while another upload holds it ('cost ledger busy')."""
         with private_open(self.mutex_path, 'a') as mx:
             while True:
                 try:
@@ -647,16 +649,17 @@ class CostLedgers:
                 except ValueError:
                     data = None
                 if not isinstance(data, dict):
-                    return self._unreadable()
-                out, changed = fn(data)
-                if not changed:
-                    return out
-                if len(data) > self.MAX_LEDGERS:
-                    # The oldest go first, but not one that keeps amounts backfill.py planned for lines not uploaded yet.
-                    old = sorted((k for k, v in data.items() if not (isinstance(v, dict) and v.get('planned'))),
-                                 key=lambda k: (data[k].get('ts') if isinstance(data[k], dict) else 0) or 0)
-                    for k in old[:len(data) - self.MAX_LEDGERS]:
-                        del data[k]
+                    return self._unreadable('cannot be read as JSON')
+                before = dict(data)
+                try:
+                    out, changed = fn(data)
+                    if not changed:
+                        return out
+                    self._evict(data, {k for k, v in data.items() if before.get(k) is not v})
+                except TimeoutError:
+                    raise
+                except Exception as e:
+                    return self._unreadable(f'holds a value this version cannot use ({type(e).__name__}: {e})')
                 self._time_left()
                 tmp = self.file + '.tmp'
                 try:
@@ -676,8 +679,20 @@ class CostLedgers:
             finally:
                 fcntl.flock(mx, fcntl.LOCK_UN)
 
-    def _unreadable(self):
-        log('cost ledger cannot be read as JSON: moved aside to cost-ledgers.json.unreadable; a new one is started')
+    def _evict(self, data, changed):
+        """Past MAX_LEDGERS ledgers without planned amounts, drop those whose last record is oldest, but none in
+        changed (the keys this write changed)."""
+        def ts(k):
+            v = data[k].get('ts') if isinstance(data[k], dict) else None
+            return v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+
+        free = [k for k, v in data.items() if not (isinstance(v, dict) and v.get('planned'))]
+        if len(free) > self.MAX_LEDGERS:
+            for k in sorted((k for k in free if k not in changed), key=ts)[:len(free) - self.MAX_LEDGERS]:
+                del data[k]
+
+    def _unreadable(self, why):
+        log(f'cost ledger {why[:300]}: moved aside to cost-ledgers.json.unreadable; a new one is started')
         try:
             os.replace(self.file, self.file + '.unreadable')
         except OSError:
@@ -707,19 +722,22 @@ class FileState:
           names, mids, cost   tool names by id, message ids already counted for tokens, the last cumulative cost
           cost_start          Claude Code: the startTime (cost ledger) of the file's last cost record
           cost_models         Claude Code: that record's per-model totals (rows_claude.COST_KINDS)
+          cost_kept           Claude Code: {"<seq>": [total, usd, models]}, the amounts of the cost lines read whose
+                              rows CtrlB has not accepted yet, so a retry sends the same amounts (see rows_claude)
           title               the last title written (or, Claude Code, waiting) for the file; a refused one counts
           title_wait          Claude Code: [seq, title] pairs waiting for the first line with a time
           title_custom        Claude Code: a custom-title was seen, so later ai-title lines are ignored
           title_seqs          Claude Code: the seqs of the title rows CtrlB accepted (the newest TITLE_KEEP)
-          title_upto          Claude Code: the offset at which this version last saved the title and cost-ledger keys;
-                              any other offset means a version without them uploaded lines since
+          title_upto          Claude Code: the offset at which a version with title rows and cost ledgers (after 0.3.0)
+                              last saved the title and cost keys; any other offset means plugin 0.3.0 or earlier
+                              uploaded lines since
           title_at            Codex: the updated_at (µs) of the name written last
           title_rows          Codex: the title rows written, so the next gets block_idx 1000 + title_rows
           title_refused       Codex: [seq, block_idx, time, name, row] of title rows an older CtrlB refused, row
                               holding the cwd, git_branch, run_id and agent they had (all of them are kept)"""
         return dict(offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0, cost_start=None, cost_models={},
-                    title='', title_wait=[], title_custom=False, title_seqs=[], title_upto=None, title_at=None,
-                    title_rows=0, title_refused=[])
+                    cost_kept={}, title='', title_wait=[], title_custom=False, title_seqs=[], title_upto=None,
+                    title_at=None, title_rows=0, title_refused=[])
 
     def __enter__(self):
         self.fh = private_open(self.mutex_path)
