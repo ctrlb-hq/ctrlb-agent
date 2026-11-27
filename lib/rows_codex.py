@@ -28,8 +28,9 @@ is a row, oldest first: role "system", block_type "title", the stripped name as 
 block_idx TITLE_IDX + the title rows already written for the file (so names after one line keep distinct, increasing
 keys, and the newest has the highest) and the time of the last uploaded line + 1 µs + its place in the batch, never
 updated_at (a rename days later must not make an old session look active). Without a line with a time yet they wait
-for a later upload. They go in a call of their own. Rows an older CtrlB refuses (a 400 naming block_type) are kept in
-the file state at their keys, which stay below every later name's, and backfill.py --codex --titles sends them."""
+for a later upload. They go in a call of their own. Rows an older CtrlB refuses (RecordsRefused.refuses_titles) are
+kept in the file state at their keys, which stay below every later name's, and backfill.py --codex --titles sends
+them as they were."""
 import functools, glob, hashlib, json, os, re, shlex, time
 import common, rows_claude
 from paths import edit_paths as normalise_edit_paths
@@ -44,6 +45,7 @@ SHELL_TOOLS = ('shell', 'shell_command', 'exec_command', 'local_shell', 'contain
 TEXT_ITEMS = ('input_text', 'output_text', 'text')
 INDEX = 'session_index.jsonl'
 TITLE_IDX = 1000
+KEPT = ('cwd', 'git_branch', 'run_id', 'agent')       # a refused title row's columns, kept to send it as it was
 WHEN_RE = re.compile(r'(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)?')
 _titles = {}      # index path -> ((mtime_ns, size), {thread id: [(updated_at µs, name)]})
 
@@ -468,7 +470,8 @@ def _when(s):
 
 def thread_titles(home=None):
     """{thread id: [(updated_at µs, name), ...]} from <CODEX_HOME>/session_index.jsonl: every name each thread has had,
-    oldest first by updated_at (file order on a tie; a line without a readable updated_at counts as oldest). Names are
+    in file order, which is updated_at order when the times go forward. A line whose updated_at cannot be read, or is
+    earlier than one before it for the thread, gets the newest time seen so far, so it stays after them. Names are
     stripped; an empty name is left out, and so is a name equal to the one just before it. Lines that are not
     {id, thread_name} objects are skipped; no file is {}. Read again only when the file's mtime or size changes."""
     path = os.path.join(home or codex_home(), INDEX)
@@ -492,12 +495,15 @@ def thread_titles(home=None):
                     continue
                 name = r['thread_name'].strip()
                 if r['id'] and name:
-                    seen.setdefault(r['id'], []).append((_when(r.get('updated_at')), name))
+                    entries = seen.setdefault(r['id'], [])
+                    # The file only grows, so a line is never older than the ones before it: one whose updated_at
+                    # cannot be read, or is earlier than a time already seen for the thread, takes that time and so
+                    # keeps its place in file order (a later name is never dropped as old).
+                    entries.append((max(_when(r.get('updated_at')), entries[-1][0] if entries else 0), name))
     except OSError:
         return {}
     out = {}
     for tid, entries in seen.items():
-        entries.sort(key=lambda e: e[0])       # a stable sort: file order on a tie
         out[tid] = [e for i, e in enumerate(entries) if i == 0 or e[1] != entries[i - 1][1]]
     _titles[path] = (key, out)
     return out
@@ -526,10 +532,11 @@ def _write_title(cfg, path, deadline, ids, backfill, send=True):
     state), oldest first, one title row each (see the module text); a first name equal to title is skipped. A
     backfill first sends the rows an older CtrlB refused (title_refused) at their own keys. Only a main thread whose
     rollout was uploaded before and has a line with a time. Returns the number of rows sent (or, without send, to
-    send). In an upload, a refusal naming block_type keeps the rows in title_refused and counts their names as written
-    (one hook log line), and a spent budget leaves the names for later (one log line); other failures are raised. A
+    send). In an upload, an older CtrlB's refusal (refuses_titles) keeps the rows in title_refused and counts their
+    names as written (one hook log line), and a spent budget leaves the names for later (one log line); other failures
+    are raised. A
     backfill raises them all: common.RecordsRefused, TimeoutError (no time left, or the state file busy) and what
-    ingest_records raises. Names not sent stay unwritten."""
+    ingest_records raises. Names a failure leaves unsent stay unwritten."""
     if ids['parent']:
         return 0
     history = thread_titles().get(ids['sid']) or []
@@ -559,9 +566,11 @@ def _write_title(cfg, path, deadline, ids, backfill, send=True):
         n, host = int(d.get('title_rows') or 0), common.host()
         dirty = migrated                          # save only a change: a refused backfill leaves the file as it was
 
-        def sized(seq, idx, ts, name):
+        def sized(seq, idx, ts, name, kept=None):
             r = _row(cfg, ids, d, host, ts, seq, 'system')
             r.update(block_idx=idx, block_type='title', body=name)
+            if isinstance(kept, dict):            # a refused row: the cwd, branch, run and agent it had then
+                r.update({k: str(v) for k, v in kept.items() if k in KEPT and isinstance(v, str)})
             rows_claude._finish(r, dict(redacted=0))
             return r, rows_claude._size(r)
 
@@ -603,11 +612,11 @@ def _write_title(cfg, path, deadline, ids, backfill, send=True):
                     if not ingest(rows[done_rows:done_rows + k]):
                         break
                 except common.RecordsRefused as e:
-                    if backfill or not e.names('block_type'):
+                    if backfill or not e.refuses_titles():
                         raise
                     rows_claude.log_title_refusal(path, 'backfill.py --codex --titles')
                     d['title_refused'] = (d.get('title_refused') or []) + [
-                        [r['seq'], r['block_idx'], r['_timestamp'], names[j]]
+                        [r['seq'], r['block_idx'], r['_timestamp'], names[j], {k: r[k] for k in KEPT}]
                         for j, (r, _) in enumerate(rows) if j >= done_rows]
                     mark(len(pending))
                     break

@@ -47,12 +47,12 @@ def titles(cfg, files, a):
             n = upload_titles(cfg, f, time.time() + 600, send=False)
         except Exception as e:
             unread += 1
-            print(f'  could not read {f}: {str(e)[:200]}')
+            print(f'  could not check {f}: {str(e)[:200]}')
             continue
         if n:
             found.append((f, n))
     print(f'{len(found)} uploaded transcript files with {sum(n for _, n in found)} session titles not sent yet'
-          + (f'; {unread} files could not be read' if unread else ''))
+          + (f'; {unread} files could not be checked' if unread else ''))
     if a.count or not found:
         return 1 if unread else 0
     if not a.yes and input('Send them? [y/N] ').strip().lower() != 'y':
@@ -63,7 +63,7 @@ def titles(cfg, files, a):
         try:
             sent += upload_titles(cfg, f, time.time() + 600)
         except common.RecordsRefused as e:
-            if e.names('block_type'):
+            if e.refuses_titles():
                 print(f'CtrlB refused the title rows ({str(e)[:200]}): it is older than session titles. '
                       f'{sent} session titles were sent before that. Upgrade it, then run this again.')
                 return 1

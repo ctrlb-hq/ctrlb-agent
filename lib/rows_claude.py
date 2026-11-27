@@ -39,10 +39,10 @@ Session title: Claude Code writes the title the user sets as {"type": "custom-ti
 the one it generates as {"type": "ai-title", "aiTitle": ...} lines, with no timestamp and repeated many times. A
 custom title wins: once a file has had one, later ai-title lines are ignored. The first title of a file, and each
 change, is one row with role "system", block_type "title", block_idx 0 and the title as body; a repeat writes nothing.
-Its seq is the title line's own and its time that of the last message or cost record read + 1 µs (other lines with a
-timestamp do not count); a title before any such line with a time waits, keeping its seq, for the first one and
-takes its time. Title rows go to CtrlB in a call of their own, so an older CtrlB that refuses block_type "title"
-refuses only them."""
+Its seq is the title line's own and its time that of the row before it + 1 µs (a message, a cost record or another
+title row; lines that make no row do not count, even with a timestamp); a title before any message or cost record
+with a time waits, keeping its seq, for the first one and takes its time. Title rows go to CtrlB in a call of their
+own, so an older CtrlB that refuses block_type "title" refuses only them."""
 import copy, datetime, glob, itertools, json, os, time
 import common
 from paths import edit_paths as normalise_edit_paths
@@ -395,10 +395,10 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
     Title rows (block_type "title") wait until their line is complete and go in calls of their own, sent before the
     transcript rows of every checkpoint. The seqs CtrlB accepts are saved at once (title_seqs), and a title row whose
     seq is there is not sent again, so a retry after a later failure does not duplicate it. When CtrlB refuses title
-    rows with a 400 naming block_type (a CtrlB older than title rows), they and the rest of this upload's title rows
-    are skipped with one line in the hook log and the transcript rows go on; their title is in the parse state, which
-    the next checkpoint saves, so later uploads do not send them again (backfill.py --titles does). Any other failure
-    stops the upload without moving the offset."""
+    rows as one older than title rows does (common.RecordsRefused.refuses_titles), they and the rest of this upload's
+    title rows are skipped with one line in the hook log and the transcript rows go on; their title is in the parse
+    state, which the next checkpoint saves, so later uploads do not send them again (backfill.py --titles does). Any
+    other failure stops the upload without moving the offset."""
     counts = dict(rows=0, lines=0, redacted=0)
     until = time.monotonic() + max(0, deadline - time.time())
     if not path or not os.path.isfile(path) or time.monotonic() >= until:
@@ -410,6 +410,10 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
     with common.FileState(path, deadline) as fs:
         if os.path.getsize(path) < fs.data['offset']:
             fs.reset()
+        elif 'title_custom' not in fs.saved and fs.data['offset'] and rows_fn is rows_from:
+            # A state from before title rows does not say whether the uploaded lines held a custom title. Without
+            # knowing, a later ai-title line would be written above the user's own title.
+            fs.data['title_custom'] = _had_custom(path, fs.data['offset'])
         pending = copy.deepcopy(fs.data)
         first_line = pending['line']
         batch, nbytes = [], 2             # JSON array brackets; each row includes its separator
@@ -440,7 +444,7 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
                     if not send(rows):
                         return False
                 except common.RecordsRefused as e:
-                    if not e.names('block_type'):
+                    if not e.refuses_titles():
                         raise
                     refused = True
                     log_title_refusal(path, 'backfill.py --titles')
@@ -526,10 +530,34 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
     return counts
 
 
+def _had_custom(path, upto):
+    """Whether the first upto bytes of path hold a custom-title line with a title (a byte search, then a parse of the
+    lines it finds)."""
+    with open(path, 'rb') as fh:
+        rest = b''
+        while fh.tell() < upto:
+            chunk = rest + fh.read(min(1 << 20, upto - fh.tell()))
+            lines = chunk.split(b'\n')
+            rest = lines.pop()
+            if b'custom-title' not in chunk:
+                continue
+            for raw in lines:
+                if b'custom-title' not in raw:
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except ValueError:
+                    continue
+                title = rec.get('customTitle') if isinstance(rec, dict) and rec.get('type') == 'custom-title' else None
+                if isinstance(title, str) and title.strip():
+                    return True
+    return False
+
+
 def _title_rows(cfg, path, upto):
     """The title rows a parse from the first line gives for the first upto lines of path (what upload_file writes
-    for a file it uploaded from its first line), and the parse state after them; ([], None) when none of those lines
-    holds a title."""
+    for a file it uploaded from its first line), and the parse state after them; ([], None) when no line mentions a
+    title line type (a byte search, so a line that only quotes one gives ([], state))."""
     marks = tuple(t.encode() for t in TITLE_TYPES)
     with open(path, 'rb') as fh:
         if not any(m in raw for raw in itertools.islice(fh, upto) for m in marks):

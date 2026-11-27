@@ -326,9 +326,16 @@ class RecordsRefused(SeekerError):
     """CtrlB answered a records call with 400: it validated the rows and refused them, so sending the same rows again
     gets the same answer. A SeekerError subclass, so a caller that catches SeekerError catches it too."""
 
-    def names(self, field):
-        """Whether the refusal names field, e.g. block_type when an older CtrlB does not know a block type."""
-        return field in self.text
+    def refuses_titles(self):
+        """Whether this is the answer of a CtrlB older than session titles to title rows: a 400 whose JSON error
+        holds its validator's text for an unknown block type, 'block_type must be one of ' and 'got "title"'. Any
+        other 400, also one that names block_type for another reason, or a body that is not such JSON, is not.
+        Callers ask it only of a call that held title rows alone."""
+        try:
+            msg = json.loads(self.text).get('error')
+        except (ValueError, AttributeError):
+            return False
+        return isinstance(msg, str) and 'block_type must be one of ' in msg and 'got "title"' in msg
 
 
 def request(cfg, method, path, body=None, query=None, timeout=10, expected_status=None):
@@ -649,10 +656,10 @@ class CostLedgers:
 
 
 class FileState:
-    """Upload progress for one transcript file (see fresh() for its keys). Used as a context manager it holds the
-    state file exclusively (fcntl), so two hooks never upload one transcript at once; it waits until the deadline
-    (epoch seconds)."""
-    TITLE_KEEP = 500
+    """Upload progress for one transcript file: path, the keys fresh() lists, and the cwd and branch the parsers keep
+    (reset() leaves those three). Used as a context manager it holds the state file exclusively (fcntl), so two hooks
+    never upload one transcript at once; it waits until the deadline (epoch seconds)."""
+    TITLE_KEEP = 500          # title_seqs keeps the newest 500; past them, backfill.py --titles sends a title again
 
     def __init__(self, path, deadline):
         d = private_dir(os.path.join(HOME, 'state'))
@@ -673,10 +680,11 @@ class FileState:
           title               the last title written (or, Claude Code, waiting) for the file; a refused one counts
           title_wait          Claude Code: [seq, title] pairs waiting for the first line with a time
           title_custom        Claude Code: a custom-title was seen, so later ai-title lines are ignored
-          title_seqs          Claude Code: the seqs of the title rows CtrlB accepted
+          title_seqs          Claude Code: the seqs of the title rows CtrlB accepted (the newest TITLE_KEEP)
           title_at            Codex: the updated_at (µs) of the name written last
           title_rows          Codex: the title rows written, so the next gets block_idx 1000 + title_rows
-          title_refused       Codex: [seq, block_idx, time, name] of title rows an older CtrlB refused"""
+          title_refused       Codex: [seq, block_idx, time, name, row] of title rows an older CtrlB refused, row
+                              holding the cwd, git_branch, run_id and agent they had (all of them are kept)"""
         return dict(offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0, cost_start=None, cost_models={},
                     title='', title_wait=[], title_custom=False, title_seqs=[], title_at=None, title_rows=0,
                     title_refused=[])
@@ -692,9 +700,12 @@ class FileState:
                     self.fh.close()
                     raise TimeoutError('state file busy')
                 time.sleep(0.05)
+        self.saved = set()          # the keys the saved state had (a state from an older version lacks some)
         try:
             with open(self.file) as fh:
-                self.data.update(json.load(fh))
+                saved = json.load(fh)
+            self.data.update(saved)
+            self.saved = set(saved)
         except Exception:
             pass
         return self
@@ -707,8 +718,7 @@ class FileState:
         if len(names) > 5000:
             self.data['names'] = dict(list(names.items())[-2000:])
         self.data['mids'] = self.data.get('mids', [])[-200:]
-        for k in ('title_seqs', 'title_refused'):
-            self.data[k] = (self.data.get(k) or [])[-self.TITLE_KEEP:]
+        self.data['title_seqs'] = (self.data.get('title_seqs') or [])[-self.TITLE_KEEP:]
         tmp = self.file + '.tmp'
         with private_open(tmp) as fh:
             json.dump(self.data, fh)
