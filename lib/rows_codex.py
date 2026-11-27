@@ -509,14 +509,16 @@ def thread_titles(home=None):
     return out
 
 
-def _written(history, title, at):
+def _written(history, title, at, rows=0):
     """How many of a thread's names (history, oldest first) a file's state counts as written, from title (the name
-    written last) and at (its updated_at, µs):
+    written last), at (its updated_at, µs) and rows (the title rows written for the file, title_rows):
       no at, no title   none: nothing was written yet
       no at, a title    (a state with a title but no title_at) up to the newest name equal to title; when no name is,
                         all but the newest, so the current name is still sent and never an older one after a newer one
-      at                up to the newest name at time at that equals title, or, when none at that time does, up to
-                        and including every name at that time"""
+      at                up to the name at time at that equals title; when several do (a name given again at the same
+                        time, or after a line whose time went back), the first one that is at least the rows-th name,
+                        so a rename between them is still sent; when none at that time does, up to and including every
+                        name at that time"""
     if at is None:
         if not title:
             return 0
@@ -524,7 +526,9 @@ def _written(history, title, at):
         return named[-1] + 1 if named else len(history) - 1
     ties = [i for i, (when, _) in enumerate(history) if when == at]
     named = [i for i in ties if history[i][1] == title]
-    return named[-1] + 1 if named else sum(1 for when, _ in history if when <= at)
+    if named:
+        return next((i for i in named if i + 1 >= rows), named[-1]) + 1
+    return sum(1 for when, _ in history if when <= at)
 
 
 def _write_title(cfg, path, deadline, ids, backfill, send=True):
@@ -551,7 +555,7 @@ def _write_title(cfg, path, deadline, ids, backfill, send=True):
         if not d['line'] or os.path.getsize(path) < d['offset'] or d['prev_ts'] < rows_claude.TIME_MIN:
             return 0
         last = d.get('title') or ''
-        done = _written(history, last, d.get('title_at'))
+        done = _written(history, last, d.get('title_at'), int(d.get('title_rows') or 0))
         pending = history[done:]
         skip = 1 if pending and pending[0][1] == last else 0
         if not send:

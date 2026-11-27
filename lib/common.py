@@ -594,24 +594,35 @@ class RunState(TokenState):
 
 class CostLedgers:
     """Claude Code's cost ledgers seen on this machine, shared by every transcript's uploads: a JSON object in
-    <CTRLB_HOME>/state/cost-ledgers.json, {ledger: {total, ts, models, applied}} (see rows_claude). Held exclusively
-    (fcntl) while it is read and changed, as FileState is, so concurrent hooks never lose an update. source names the
-    transcript a handle works for. A file that cannot be read or written as such an object is moved aside (to
-    cost-ledgers.json.unreadable) with a log line, and change answers None: the caller falls back to the file's own
-    previous cost record, as before ledgers existed, and the next change starts a new file."""
+    <CTRLB_HOME>/state/cost-ledgers.json, {ledger: {total, ts, models, applied, planned, seen}} (see rows_claude).
+    Held exclusively (fcntl) while it is read and changed, as FileState is, so concurrent hooks never lose an update.
+    source names the transcript a handle works for. When the file cannot be used, change answers None and the caller
+    falls back to the file's own previous cost record, as before ledgers existed: a file that is not such an object
+    is moved aside (to cost-ledgers.json.unreadable) and the next change starts a new one; a file that cannot be read
+    or written is left as it was. Either way a line goes to the hook log."""
     MAX_LEDGERS = 1000
 
     def __init__(self, path, deadline):
         d = private_dir(os.path.join(HOME, 'state'))
         self.file = os.path.join(d, 'cost-ledgers.json')
         self.mutex_path = os.path.join(d, 'cost-ledgers.mutex')
-        self.source = hashlib.sha1(os.path.abspath(path).encode()).hexdigest()[:16]
+        self.source = self.source_of(path)
         self.deadline = time.monotonic() + max(0, deadline - time.time())
 
+    @staticmethod
+    def source_of(path):
+        """The name a transcript's lines have in the ledgers: <source>:<seq>."""
+        return hashlib.sha1(os.path.abspath(path).encode()).hexdigest()[:16]
+
+    def _time_left(self):
+        if time.monotonic() >= self.deadline:
+            raise TimeoutError('cost ledger: no time left')
+
     def change(self, fn):
-        """fn(ledgers) changes the object in place and returns a value, which change returns; None when the file is
-        unreadable (fn is not called). Raises TimeoutError('cost ledger busy') when another upload holds it past the
-        deadline."""
+        """fn(ledgers) changes the object in place and returns (value, changed); change returns the value, and
+        writes the file only when changed is true. None when the file cannot be used (see the class text): fn is not
+        called, or, when the file cannot be written, its changes are lost. Raises TimeoutError when the deadline
+        passes before the file is read or written, or while another upload holds it ('cost ledger busy')."""
         with private_open(self.mutex_path, 'a') as mx:
             while True:
                 try:
@@ -622,32 +633,51 @@ class CostLedgers:
                         raise TimeoutError('cost ledger busy')
                     time.sleep(0.02)
             try:
+                self._time_left()
                 try:
-                    with open(self.file) as fh:
-                        data = json.load(fh)
+                    with open(self.file, 'rb') as fh:
+                        raw = fh.read()
                 except FileNotFoundError:
-                    data = {}
-                except (OSError, ValueError):
+                    raw = b'{}'
+                except OSError as e:
+                    log(f'cost ledger cannot be read ({e.strerror or e}): left as it was')
+                    return None
+                try:
+                    data = json.loads(raw)
+                except ValueError:
                     data = None
                 if not isinstance(data, dict):
-                    return self._unreadable('cannot be read')
-                out = fn(data)
+                    return self._unreadable()
+                out, changed = fn(data)
+                if not changed:
+                    return out
                 if len(data) > self.MAX_LEDGERS:
-                    for k in sorted(data, key=lambda k: (data[k] or {}).get('ts') or 0)[:len(data) - self.MAX_LEDGERS]:
+                    # The oldest go first, but not one that keeps amounts backfill.py planned for lines not uploaded yet.
+                    old = sorted((k for k, v in data.items() if not (isinstance(v, dict) and v.get('planned'))),
+                                 key=lambda k: (data[k].get('ts') if isinstance(data[k], dict) else 0) or 0)
+                    for k in old[:len(data) - self.MAX_LEDGERS]:
                         del data[k]
+                self._time_left()
+                tmp = self.file + '.tmp'
                 try:
-                    tmp = self.file + '.tmp'
+                    text = json.dumps(data, separators=(',', ':'))
                     with private_open(tmp) as fh:
-                        json.dump(data, fh)
+                        fh.write(text)
                     os.replace(tmp, self.file)
-                except (OSError, TypeError, ValueError):
-                    return self._unreadable('cannot be written')
+                except (OSError, TypeError, ValueError) as e:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    log(f'cost ledger cannot be written ({getattr(e, "strerror", None) or e}): left as it was, '
+                        'without this change')
+                    return None
                 return out
             finally:
                 fcntl.flock(mx, fcntl.LOCK_UN)
 
-    def _unreadable(self, why):
-        log(f'cost ledger {why}: moved aside; this cost record is counted from its own file\'s previous one')
+    def _unreadable(self):
+        log('cost ledger cannot be read as JSON: moved aside to cost-ledgers.json.unreadable; a new one is started')
         try:
             os.replace(self.file, self.file + '.unreadable')
         except OSError:
@@ -681,13 +711,15 @@ class FileState:
           title_wait          Claude Code: [seq, title] pairs waiting for the first line with a time
           title_custom        Claude Code: a custom-title was seen, so later ai-title lines are ignored
           title_seqs          Claude Code: the seqs of the title rows CtrlB accepted (the newest TITLE_KEEP)
+          title_upto          Claude Code: the offset at which this version last saved the title and cost-ledger keys;
+                              any other offset means a version without them uploaded lines since
           title_at            Codex: the updated_at (µs) of the name written last
           title_rows          Codex: the title rows written, so the next gets block_idx 1000 + title_rows
           title_refused       Codex: [seq, block_idx, time, name, row] of title rows an older CtrlB refused, row
                               holding the cwd, git_branch, run_id and agent they had (all of them are kept)"""
         return dict(offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0, cost_start=None, cost_models={},
-                    title='', title_wait=[], title_custom=False, title_seqs=[], title_at=None, title_rows=0,
-                    title_refused=[])
+                    title='', title_wait=[], title_custom=False, title_seqs=[], title_upto=None, title_at=None,
+                    title_rows=0, title_refused=[])
 
     def __enter__(self):
         self.fh = private_open(self.mutex_path)
@@ -700,12 +732,9 @@ class FileState:
                     self.fh.close()
                     raise TimeoutError('state file busy')
                 time.sleep(0.05)
-        self.saved = set()          # the keys the saved state had (a state from an older version lacks some)
         try:
             with open(self.file) as fh:
-                saved = json.load(fh)
-            self.data.update(saved)
-            self.saved = set(saved)
+                self.data.update(json.load(fh))
         except Exception:
             pass
         return self

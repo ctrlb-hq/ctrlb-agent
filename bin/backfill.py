@@ -9,9 +9,9 @@ Usage: backfill.py [--codex] [--titles | --cost-ledger] [--project TEXT] [--coun
                   sent, oldest first, and the ones an older CtrlB refused, at their own keys. The upload offsets
                   stay as they are
   --cost-ledger   only put the cost records of the Claude Code transcripts into this machine's cost ledgers, in time
-                  order (sends nothing), so each session is charged only its own spend, also a session started later
-                  in an app process that ran before this version. Run it once after upgrading. A Claude Code
-                  upload does the same first
+                  order (sends nothing), so each session is charged only its own spend, also a session that continues
+                  one from before this version. Run it once after upgrading. A Claude Code upload does the same
+                  first, and uploads anyway (saying so) when the ledger file cannot be used
   --project TEXT  only project folders whose name contains TEXT (e.g. the repo name); with --codex, only sessions
                   whose working directory contains TEXT
   --count         print what would be uploaded and stop
@@ -94,7 +94,11 @@ def main():
     files, what = codex_files(a.project) if a.codex else claude_files(a.project)
     if a.cost_ledger:
         print(what)
-        records, ledgers = rows_claude.seed_ledgers(cfg, files, time.time() + 600)
+        try:
+            records, ledgers = rows_claude.seed_ledgers(cfg, files, time.time() + 600)
+        except (OSError, TimeoutError) as e:
+            print(f'the cost ledgers could not be filled: {str(e)[:200]}; nothing was sent')
+            return 1
         print(f'{records} cost records are in {ledgers} cost ledgers on this machine; nothing was sent')
         return 0
     if a.titles:
@@ -110,10 +114,16 @@ def main():
     if not a.yes and input('Upload them? Secrets matching the redaction patterns are replaced first. [y/N] ').strip().lower() != 'y':
         print('nothing sent')
         return
+    seeded = True
     if not a.codex:
         # Cost records first, in time order across the files, so the files below can upload in any order.
-        records, ledgers = rows_claude.seed_ledgers(cfg, files, time.time() + 600)
-        print(f'  {records} cost records in {ledgers} cost ledgers, in time order')
+        try:
+            records, ledgers = rows_claude.seed_ledgers(cfg, files, time.time() + 600)
+            print(f'  {records} cost records in {ledgers} cost ledgers, in time order')
+        except (OSError, TimeoutError) as e:
+            seeded = False
+            print(f'  the cost ledgers could not be filled first ({str(e)[:200]}); uploading anyway, each cost record '
+                  'counted as it is uploaded')
     total = dict(rows=0, lines=0, redacted=0)
     t0 = time.time()
     failed = 0
@@ -129,7 +139,7 @@ def main():
             print(f'  {i}/{len(files)} files, {total["rows"]} rows, {total["redacted"]} redactions, {time.time() - t0:.0f}s')
     common.log(f'backfill {total}')
     print(f'{failed}/{len(files)} files failed')
-    return 1 if failed else 0
+    return 1 if failed or not seeded else 0
 
 
 if __name__ == '__main__':

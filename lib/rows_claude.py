@@ -13,36 +13,43 @@ Beyond the content blocks:
                   record): what the session spent since the previous record of its cost ledger, so the sum of
                   cost_usd over a session's rows is its cost. Float; 0.0 elsewhere. See "Cost" below
 
-Cost: Claude Code keeps one running total per app process, its cost ledger, named by the startTime in each
-cost-state record ("<host>:<startTime>"). When the desktop app starts or forks another session in that process, the
-ledger goes on counting, so the new session's first record also holds what the process spent before it. The ledgers
-seen on this machine are kept across transcripts (common.CostLedgers: each ledger's last total, its time and its
-per-model totals), and a record's cost is its total less the ledger's last total, so a session pays only its own
-spend. For one record (total T, time t, the ledger's last total L at time tL, the file's own previous record of the
-ledger P):
+Cost: Claude Code keeps a running cost total, its cost ledger, named by the startTime in each cost-state record
+("<host>:<startTime>"). A session forked from another one (in the desktop app) starts from the total the other one
+had, and a resumed session goes on from its own saved total under the same startTime, so a fork's first record also
+holds what was spent before it. The ledgers seen on this machine are kept across transcripts (common.CostLedgers:
+each ledger's last total, its time and its per-model totals), and a record's cost is its total less the ledger's last
+total, so a session pays only its own spend. A cost-state record has no time of its own: it takes the time of the row
+before it + 1 µs, and "time order" below is that order. For one record (total T, time t, the ledger's last total L at
+time tL, the file's own previous record of the ledger P):
   a ledger not seen before            T - P when T >= P, else T (P is 0 for a file with none)
-  t >= tL, T >= L                     T - max(L, P)
-  t >= tL, T < L, T >= P              T - P: a session resumed in a new process, from its own saved total
-  t >= tL, T < P                      T: a restart, counted whole
+  t >= tL, T >= L                     T - max(L, P), never below 0
+  t >= tL, P <= T < L                 T - P: a session resumed from its own saved total (with P 0, a restart: T)
+  t >= tL, T < L, T < P               T: a restart, counted whole
   t < tL (it arrived after a later    max(0, T - L), and L moves only up: a late record never counts again what a
   record of the ledger)               later one counted, so nothing is counted twice and nothing is negative
-Each model's costUSD and token counts follow the same base. A record without a startTime (a stream-json "result",
-or an older cost-state) is counted from its own file's previous record. The amounts are also in the row's body, which
-keeps the record and adds "ctrlb_cost": {"ledger": "<host>:<startTime>", "usd": <cost_usd>, "models": {<model>:
-{costUSD, inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens}}} (each the increase over the
-same base). input_tokens and output_tokens stay 0.0 on these rows: a session's tokens are on its assistant rows, and
-adding the ledger's here would count them twice. A retried upload reproduces a record's amounts (the ledger keeps
-them by transcript and line). Without a ledger file that can be read and written, a record is counted from its own
-file's previous one, as before ledgers existed.
+The rules for T < L in time order assume that a ledger's total goes down only on a restart. Claude Code writes a
+cost-state line when it saves a session, with that session's own total, so a line written later into a transcript
+that was idle repeats its total. Each model's costUSD and token counts follow the same base; when that base's
+per-model totals are not known (a record without modelUsage, or one a version before ledgers counted whose line is not
+found), models is {}. A record without a startTime (a stream-json "result", or an older cost-state) is counted from
+its own file's previous record, whatever that record's ledger. The amounts are also in the row's body, which keeps the
+record and adds "ctrlb_cost": {"ledger": "<host>:<startTime>", "usd": <cost_usd>, "models": {<model>: {costUSD,
+inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens}}} (each the increase over the same base).
+input_tokens and output_tokens stay 0.0 on these rows: a session's tokens are on its assistant rows, and adding the
+ledger's here would count them twice. A retried upload reproduces a record's amounts: the ledger keeps them by
+transcript and line for KEEP_S after counting them, and after that only that the line was counted (it then counts 0).
+Amounts backfill.py plans for lines not uploaded yet are kept until those lines are uploaded. Without a ledger file
+that can be read and written, a record is counted from its own file's previous one, as before ledgers existed.
 
 Session title: Claude Code writes the title the user sets as {"type": "custom-title", "customTitle": ...} lines and
 the one it generates as {"type": "ai-title", "aiTitle": ...} lines, with no timestamp and repeated many times. A
 custom title wins: once a file has had one, later ai-title lines are ignored. The first title of a file, and each
 change, is one row with role "system", block_type "title", block_idx 0 and the title as body; a repeat writes nothing.
-Its seq is the title line's own and its time that of the row before it + 1 µs (a message, a cost record or another
-title row; lines that make no row do not count, even with a timestamp); a title before any message or cost record
-with a time waits, keeping its seq, for the first one and takes its time. Title rows go to CtrlB in a call of their
-own, so an older CtrlB that refuses block_type "title" refuses only them."""
+Its seq is the title line's own and its time that of the line before it that counts + 1 µs: a user, assistant or
+system message line (even one whose blocks all make no row), a cost record or another title row; lines of other types
+do not count, even with a timestamp. A title before any such line with a time waits, keeping its seq, for the first
+one and takes its time. Title rows go to CtrlB in a call of their own, so an older CtrlB that refuses block_type
+"title" refuses only them."""
 import copy, datetime, glob, itertools, json, os, time
 import common
 from paths import edit_paths as normalise_edit_paths
@@ -50,8 +57,7 @@ from redact import redact
 
 SUMMARY_PREFIX = 'This session is being continued from a previous conversation'
 COST_KINDS = ('costUSD', 'inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens')
-APPLIED_KEEP = 1000           # a ledger's records kept by transcript and line, so a retry or a planned upload gets the
-                              # same amounts
+KEEP_S = 7 * 24 * 3600        # how long a ledger keeps a record's amounts by transcript and line, so a retry gets them
 TITLE_TYPES = {'custom-title': 'customTitle', 'ai-title': 'aiTitle'}     # line type -> the key holding the title
 SKIP_TYPES = {'mode', 'permission-mode', 'bridge-session', 'agent-name', 'queue-operation',
               'file-history-snapshot', 'file-history-delta', 'last-prompt', 'atis-latch', 'tools-used', 'attachment'}
@@ -157,8 +163,8 @@ def _increase(models, base):
 
 def ledger_step(entry, total, models, ts, own_total, own_models):
     """One cost record against its ledger (the module text has the rules): (usd, per-model increases, the ledger's
-    entry after it). entry is {total, ts, models} or None for a ledger not seen before; own_* is the file's own
-    previous record of the ledger (0.0 and {} when it has none)."""
+    {total, ts, models} after it). entry is {total, ts, models} or None for a ledger not seen before; own_* is the
+    file's own previous record of the ledger (0.0 and {} when it has none)."""
     if entry is None:
         base = (own_total, own_models) if total >= own_total else (0.0, {})
         new = dict(total=total, ts=ts, models=models)
@@ -172,28 +178,85 @@ def ledger_step(entry, total, models, ts, own_total, own_models):
         new = dict(total=total, ts=ts, models=models)
     elif total > entry['total']:
         base = (entry['total'], entry['models'])
-        new = dict(entry, total=total, models=models)
+        new = dict(total=total, ts=entry['ts'], models=models)
     else:
-        base, new = (total, models), entry
-    return round(max(0.0, total - base[0]), 8), _increase(models, base[1]), new
+        base = (total, models)
+        new = dict(total=entry['total'], ts=entry['ts'], models=entry['models'])
+    # A base above 0 without per-model totals (a record without modelUsage, or one counted before ledgers whose line
+    # was not found) gives no per-model increases: the whole per-model totals would not be the increase.
+    ups = _increase(models, base[1]) if base[1] or base[0] <= 0 else {}
+    return round(max(0.0, total - base[0]), 8), ups, new
+
+
+def _kept(entry, name):
+    v = entry.get(name) if isinstance(entry, dict) else None
+    return v if isinstance(v, dict) else {}
+
+
+def _apply(books, key, source, seq, total, models, ts, own_total, own_models, plan=None):
+    """One cost record, line seq of transcript source, against books, the ledger file's object
+    {ledger: {total, ts, models, applied, planned, seen}}: ((usd, per-model increases), changed).
+      applied   {"<source>:<seq>": [total, usd, models, counted at (epoch s)]}: amounts kept KEEP_S for a retry
+      planned   {"<source>:<seq>": [total, usd, models]}: amounts backfill.py's seed planned for a line not uploaded
+                yet, kept until it is uploaded
+      seen      {source: the highest seq counted}: a line at or below it whose amounts are gone counts 0
+    A line kept with the same total gets the amounts it got then; a planned one moves to applied when it is uploaded.
+    plan is for the seed: True keeps the amounts as planned, False keeps none (a line uploaded already), None (an
+    upload) keeps them in applied."""
+    entry = books.get(key) if isinstance(books.get(key), dict) else None
+    line = f'{source}:{seq}'
+    applied, planned, seen = _kept(entry, 'applied'), _kept(entry, 'planned'), _kept(entry, 'seen')
+    for kept in (applied, planned):
+        got = kept.get(line)
+        if isinstance(got, list) and len(got) >= 3 and got[0] == total:
+            if kept is planned and plan is None:          # the line is uploaded now: its amounts are in use
+                planned = {k: v for k, v in planned.items() if k != line}
+                books[key] = dict(entry, planned=planned, applied=dict(applied, **{line: got[:3] + [int(time.time())]}))
+                return (got[1], got[2]), True
+            return (got[1], got[2]), False
+    if entry is not None and isinstance(seen.get(source), int) and seq <= seen[source]:
+        return (0.0, _increase(models, models)), False    # counted before, and its amounts are no longer kept
+    try:
+        step = None if entry is None else dict(total=float(entry['total']), ts=int(entry['ts']),
+                                               models=entry['models'] if isinstance(entry['models'], dict) else {})
+    except (KeyError, TypeError, ValueError):
+        step = None                                        # an entry this version cannot read: a ledger not seen before
+    usd, ups, new = ledger_step(step, total, models, ts, own_total, own_models)
+    if plan is None:
+        applied = dict(applied, **{line: [total, usd, ups, int(time.time())]})
+    elif plan:
+        planned = dict(planned, **{line: [total, usd, ups]})
+    seen = dict(seen, **{source: max(seq, seen.get(source) if isinstance(seen.get(source), int) else -1)})
+    books[key] = dict(new, applied=applied, planned=planned, seen=seen)
+    return (usd, ups), True
+
+
+def _prune(books):
+    """Drop the amounts counted more than KEEP_S ago, from every ledger (their lines stay in seen)."""
+    old = time.time() - KEEP_S
+    for entry in books.values():
+        applied = _kept(entry, 'applied')
+        gone = [k for k, v in applied.items() if not (isinstance(v, list) and len(v) >= 4 and isinstance(v[3], (int, float))
+                                                      and v[3] >= old)]
+        if not gone:
+            continue
+        seen = dict(_kept(entry, 'seen'))
+        for k in gone:
+            source, _, seq = k.rpartition(':')
+            if seq.isdigit():
+                seen[source] = max(int(seq), seen.get(source) if isinstance(seen.get(source), int) else -1)
+            del applied[k]
+        entry['seen'] = seen
 
 
 def _ledger_apply(ledgers, key, seq, total, models, ts, own_total, own_models):
     """(usd, per-model increases) for one record, against the ledger file; None when it cannot be used. A record
     already applied (a retried upload: the same transcript, line and total) gets the amounts it got then."""
-    line = f'{ledgers.source}:{seq}'
-
     def fn(books):
-        entry = books.get(key)
-        done = (entry or {}).get('applied') or {}
-        if isinstance(done.get(line), list) and len(done[line]) == 3 and done[line][0] == total:
-            return done[line][1], done[line][2]
-        usd, models_up, new = ledger_step(entry, total, models, ts, own_total, own_models)
-        applied = dict(done)
-        applied[line] = [total, usd, models_up]
-        new = dict(new, applied=dict(list(applied.items())[-APPLIED_KEEP:]))
-        books[key] = new
-        return usd, models_up
+        out, changed = _apply(books, key, ledgers.source, seq, total, models, ts, own_total, own_models)
+        if changed:
+            _prune(books)
+        return out, changed
 
     return ledgers.change(fn)
 
@@ -206,8 +269,9 @@ def _start(rec):
 
 def _own(st, start):
     """The file's own previous cost record of ledger start, as (total, models): one of the same ledger, or of an
-    unknown one (a state from before ledgers); (0.0, {}) after a record of another ledger."""
-    if st.get('cost_start') in (None, start):
+    unknown one (a state from before ledgers); (0.0, {}) after a record of another ledger. A record without a ledger
+    (start None) takes the file's previous record, whatever its ledger."""
+    if start is None or st.get('cost_start') in (None, start):
         return _num(st.get('cost')), st.get('cost_models') or {}
     return 0.0, {}
 
@@ -225,8 +289,7 @@ def _cost_row(rec, seq, st, ids, cfg, hostname):
     if start is not None and ids.get('ledgers') is not None:
         found = _ledger_apply(ids['ledgers'], key, seq, total, models, ts, own_total, own_models)
     if found is None:                 # no ledger: counted from the file's own previous record
-        base_total, base_models = (own_total, own_models) if total >= own_total else (0.0, {})
-        found = round(total - base_total, 8), _increase(models, base_models)
+        found = ledger_step(None, total, models, ts, own_total, own_models)[:2]
     usd, models_up = found
     st.update(cost=total, cost_start=start, cost_models=models)
     parent = ids['parent'] or (rec.get('sessionId') if ids['agent_id'] else '') or ''
@@ -410,10 +473,13 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
     with common.FileState(path, deadline) as fs:
         if os.path.getsize(path) < fs.data['offset']:
             fs.reset()
-        elif 'title_custom' not in fs.saved and fs.data['offset'] and rows_fn is rows_from:
-            # A state from before title rows does not say whether the uploaded lines held a custom title. Without
-            # knowing, a later ai-title line would be written above the user's own title.
-            fs.data['title_custom'] = _had_custom(path, fs.data['offset'])
+        elif rows_fn is rows_from and fs.data['offset'] and fs.data.get('title_upto') != fs.data['offset']:
+            # The lines up to the offset were uploaded by a version without title rows and cost ledgers (an upgrade,
+            # or a downgrade and an upgrade again), which did not keep the title and cost keys up to date.
+            if not _catch_up(path, fs, until):
+                common.log(f'upload {os.path.basename(path)}: no time left to check its uploaded lines; the next '
+                           'upload does')
+                return counts
         pending = copy.deepcopy(fs.data)
         first_line = pending['line']
         batch, nbytes = [], 2             # JSON array brackets; each row includes its separator
@@ -424,6 +490,8 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
             fs.data = copy.deepcopy(state)
             if accepted:
                 fs.data['title_seqs'] = _merged(fs.data.get('title_seqs'), accepted)
+            if rows_fn is rows_from:
+                fs.data['title_upto'] = fs.data['offset']
             fs.save()
             counts['lines'] = state['line'] - first_line
 
@@ -530,28 +598,62 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
     return counts
 
 
-def _had_custom(path, upto):
-    """Whether the first upto bytes of path hold a custom-title line with a title (a byte search, then a parse of the
-    lines it finds)."""
+def _catch_up(path, fs, until):
+    """Bring the title and cost keys of fs up to date with the lines up to its offset, which a version without them
+    uploaded: whether they held a custom title, and the ledger and per-model totals of the last cost record (a
+    version before ledgers kept only its total). A version that started the file over (it got shorter) leaves the
+    offset below title_upto: the title keys are then for lines that are gone, and start over. Saves the state at once.
+    False when the time runs out first."""
+    d = fs.data
+    if isinstance(d.get('title_upto'), int) and d['title_upto'] > d['offset']:
+        d.update({k: v for k, v in common.FileState.fresh().items() if k.startswith('title')})
+    found = _scan_uploaded(path, d['offset'], until)
+    if found is None:
+        return False
+    custom, cost = found
+    d['title_custom'] = bool(d.get('title_custom')) or custom
+    if cost is not None and _num(cost.get('totalCostUSD')) == _num(d.get('cost')):
+        d.update(cost_start=_start(cost), cost_models=model_totals(cost.get('modelUsage')))
+    else:                       # the last cost record is not a cost-state line found here: its ledger is unknown
+        d.update(cost_start=None, cost_models={})
+    d['title_upto'] = d['offset']
+    fs.save()
+    return True
+
+
+def _scan_uploaded(path, upto, until):
+    """(whether the first upto bytes of path hold a custom-title line with a title, their last cost-state record or
+    None): a byte search, then a parse of the lines it finds. None when the time (monotonic) runs out first."""
+    custom, cost = False, None
     with open(path, 'rb') as fh:
         rest = b''
         while fh.tell() < upto:
-            chunk = rest + fh.read(min(1 << 20, upto - fh.tell()))
-            lines = chunk.split(b'\n')
-            rest = lines.pop()
-            if b'custom-title' not in chunk:
+            if time.monotonic() >= until:
+                return None
+            data = fh.read(min(1 << 20, upto - fh.tell()))
+            if not data:
+                break                                  # the file got shorter since its size was checked
+            chunk = rest + data
+            cut = chunk.rfind(b'\n') + 1
+            chunk, rest = chunk[:cut], chunk[cut:]
+            want_custom = not custom and b'custom-title' in chunk
+            if not want_custom and b'cost-state' not in chunk:
                 continue
-            for raw in lines:
-                if b'custom-title' not in raw:
+            for raw in chunk.split(b'\n'):
+                if b'cost-state' not in raw and not (want_custom and b'custom-title' in raw):
                     continue
                 try:
                     rec = json.loads(raw)
                 except ValueError:
                     continue
-                title = rec.get('customTitle') if isinstance(rec, dict) and rec.get('type') == 'custom-title' else None
-                if isinstance(title, str) and title.strip():
-                    return True
-    return False
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get('type') == 'cost-state':
+                    cost = rec
+                elif rec.get('type') == 'custom-title':
+                    title = rec.get('customTitle')
+                    custom = custom or (isinstance(title, str) and bool(title.strip()))
+    return custom, cost
 
 
 def _title_rows(cfg, path, upto):
@@ -622,12 +724,27 @@ def upload_titles(cfg, path, deadline, send=True):
         return sent
 
 
+def _uploaded_lines(path):
+    """How many lines of path CtrlB has, from its upload state (read without holding it); 0 when it has none or the
+    file got shorter than its offset (its next upload starts it over)."""
+    try:
+        with open(common.FileState(path, 0).file) as fh:
+            st = json.load(fh)
+        n, offset = st.get('line'), st.get('offset')
+        return n if isinstance(n, int) and isinstance(offset, int) and os.path.getsize(path) >= offset else 0
+    except (OSError, ValueError, AttributeError):
+        return 0
+
+
 def seed_ledgers(cfg, paths, deadline):
     """Put every complete cost-state line of paths into the cost ledgers in time order across the files, as hooks
     see them when sessions run one after another: lines already uploaded become the ledgers' history, and the
-    amounts of lines not uploaded yet are kept, so uploading them later, in any order, gives each session only its
-    own spend. Sends nothing and changes no file's upload state; a line already in a ledger keeps its amounts.
-    backfill.py runs it before a Claude Code upload, and alone with --cost-ledger. Returns (records, ledgers)."""
+    amounts of lines not uploaded yet are planned and kept until they are uploaded, so uploading them later, in any
+    order, gives each session only its own spend. Sends nothing and changes no file's upload state; a line already in
+    a ledger keeps its amounts. One change of the ledger file, so hooks wait for it only once. backfill.py runs it
+    before a Claude Code upload, and alone with --cost-ledger. Returns (records, ledgers). Raises OSError when the
+    ledger file cannot be read or written, TimeoutError when another upload holds it past the deadline (at least a
+    minute after the transcripts are read)."""
     host, events = common.host(), []
     for path in paths:
         if not os.path.isfile(path):
@@ -637,6 +754,7 @@ def seed_ledgers(cfg, paths, deadline):
                 continue
             fh.seek(0)
             ids, st = ids_for_file(cfg, path), common.FileState.fresh()
+            source, uploaded = common.CostLedgers.source_of(path), _uploaded_lines(path)
             for seq, raw in enumerate(fh):
                 if not raw.endswith(b'\n'):
                     break                      # a line still being written: its upload waits for it too
@@ -651,15 +769,24 @@ def seed_ledgers(cfg, paths, deadline):
                 for r in rows_from(rec, seq, st, ids, cfg, host):
                     if r['block_type'] == 'result' and start is not None:
                         events.append((r['_timestamp'], path, seq, f'{host}:{start}', _num(rec.get('totalCostUSD')),
-                                       model_totals(rec.get('modelUsage')), own))
+                                       model_totals(rec.get('modelUsage')), own, source, seq >= uploaded))
                 if len(st['mids']) > 400:
                     del st['mids'][:-200]
     events.sort(key=lambda e: (e[0], e[1], e[2]))
-    handles = {}
-    for ts, path, seq, key, total, models, own in events:
-        ledgers = handles.setdefault(path, common.CostLedgers(path, deadline))
-        if _ledger_apply(ledgers, key, seq, total, models, ts, own[0], own[1]) is None:
-            raise OSError('the cost ledger file cannot be read or written')
+    if not events:
+        return 0, 0
+
+    def fn(books):
+        changed = False
+        for ts, _, seq, key, total, models, own, source, plan in events:
+            changed = _apply(books, key, source, seq, total, models, ts, own[0], own[1], plan=plan)[1] or changed
+        if changed:
+            _prune(books)
+        return True, changed
+
+    # The wait for the ledger file gets at least a minute, however long reading the transcripts took.
+    if common.CostLedgers(events[0][1], max(deadline, time.time() + 60)).change(fn) is None:
+        raise OSError('the cost ledger file cannot be read or written (the hook log says why)')
     return len(events), len({e[3] for e in events})
 
 

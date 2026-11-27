@@ -3,7 +3,7 @@
 CtrlB is a local fake that answers with the synthetic responses in tests/fixtures/seeker/.
 Nothing is sent anywhere else, Claude is never called, and no real config is read: every CTRLB_* variable from the
 calling environment is dropped and CTRLB_HOME points into tests/work/."""
-import base64, errno, glob, hashlib, http.server, json, os, re, shutil, signal, socket, socketserver, stat, subprocess, sys, textwrap, threading, time, traceback
+import base64, copy, errno, glob, hashlib, http.server, json, os, re, shutil, signal, socket, socketserver, stat, subprocess, sys, textwrap, threading, time, traceback
 from unittest import mock
 sys.dont_write_bytecode = True
 
@@ -5678,7 +5678,7 @@ def test_title_backfill_concurrency(seeker):
           and st['line'] == 3 and st['title_seqs'] == [0], json.dumps([busy, out, len(sent), st.get('line')]))
 
 
-LEDGER_START = 1795418565258        # the startTime 60d3cc98 and 0b207b4d share in the verification data
+LEDGER_START = 1700000000000        # a made-up startTime shared by the sessions of one cost ledger
 
 
 def cost_line(total, start, models=None):
@@ -5699,18 +5699,18 @@ def cost_rows(seeker, sid=None):
 
 
 def cost_files(base, start=LEDGER_START, a='aaaa1111-0000-4000-8000-00000000000a', b='bbbb2222-0000-4000-8000-00000000000b'):
-    """Two sessions of one ledger: a ends at $469.4923; b, started later in the same app process, records $509.3964
-    three times (its own spend is $39.9041)."""
+    """Two sessions of one ledger: a ends at $100; b, which continues it, records $130 three times (its own spend is
+    $30)."""
     os.makedirs(base, exist_ok=True)
     pa, pb = os.path.join(base, a + '.jsonl'), os.path.join(base, b + '.jsonl')
     with open(pa, 'w') as fh:
-        fh.writelines([line('user', 'start', '2026-11-23T07:30:00Z'), cost_line(2.3354, start, {'claude-opus-5-5': model_use(2.3354, 10, 20, 30, 40)}),
-                       line('user', 'more', '2026-11-23T09:00:00Z'),
-                       cost_line(469.4923, start, {'claude-opus-5-5': model_use(469.4923, 100, 200, 300, 400)})])
+        fh.writelines([line('user', 'start', '2026-03-02T07:30:00Z'), cost_line(2.0, start, {'claude-opus-5-5': model_use(2.0, 10, 20, 30, 40)}),
+                       line('user', 'more', '2026-03-02T09:00:00Z'),
+                       cost_line(100.0, start, {'claude-opus-5-5': model_use(100.0, 100, 200, 300, 400)})])
     with open(pb, 'w') as fh:
-        fh.write(line('user', 'next session', '2026-11-24T10:00:00Z'))
-        fh.writelines(cost_line(509.3964, start, {'claude-opus-5-5': model_use(500.0, 150, 260, 380, 500),
-                                                  'claude-haiku-5-5': model_use(9.3964, 5, 6, 7, 8)}) for _ in range(3))
+        fh.write(line('user', 'next session', '2026-03-03T10:00:00Z'))
+        fh.writelines(cost_line(130.0, start, {'claude-opus-5-5': model_use(120.0, 150, 260, 380, 500),
+                                               'claude-haiku-5-5': model_use(10.0, 5, 6, 7, 8)}) for _ in range(3))
     return pa, pb
 
 
@@ -5729,39 +5729,55 @@ def test_cost_ledgers(seeker):
         rows_claude.upload_file(cfg, pb, time.time() + 10)
         a_rows = [r['cost_usd'] for r in cost_rows(seeker) if r['session_id'].startswith('aaaa')]
         b = [r for r in cost_rows(seeker) if r['session_id'].startswith('bbbb')]
-        check('cost: a session started in the same app process pays only its own spend',
-              a_rows == [2.3354, 467.1569] and [r['cost_usd'] for r in b] == [39.9041, 0.0, 0.0], json.dumps([a_rows, [r['cost_usd'] for r in b]]))
+        check('cost: a session that continues another one pays only its own spend',
+              a_rows == [2.0, 98.0] and [r['cost_usd'] for r in b] == [30.0, 0.0, 0.0], json.dumps([a_rows, [r['cost_usd'] for r in b]]))
         cc = json.loads(b[0]['body'])['ctrlb_cost'] if b else {}
         check('cost: the body keeps the record and adds ctrlb_cost with the ledger, usd and per-model increases',
-              cc == {'ledger': f'{host}:{LEDGER_START}', 'usd': 39.9041, 'models': {
-                  'claude-opus-5-5': {'costUSD': 30.5077, 'inputTokens': 50, 'outputTokens': 60, 'cacheReadInputTokens': 80, 'cacheCreationInputTokens': 100},
-                  'claude-haiku-5-5': {'costUSD': 9.3964, 'inputTokens': 5, 'outputTokens': 6, 'cacheReadInputTokens': 7, 'cacheCreationInputTokens': 8}}}
-              and json.loads(b[0]['body'])['totalCostUSD'] == 509.3964 and b[0]['input_tokens'] == 0.0 and b[0]['output_tokens'] == 0.0,
+              cc == {'ledger': f'{host}:{LEDGER_START}', 'usd': 30.0, 'models': {
+                  'claude-opus-5-5': {'costUSD': 20.0, 'inputTokens': 50, 'outputTokens': 60, 'cacheReadInputTokens': 80, 'cacheCreationInputTokens': 100},
+                  'claude-haiku-5-5': {'costUSD': 10.0, 'inputTokens': 5, 'outputTokens': 6, 'cacheReadInputTokens': 7, 'cacheCreationInputTokens': 8}}}
+              and json.loads(b[0]['body'])['totalCostUSD'] == 130.0 and b[0]['input_tokens'] == 0.0 and b[0]['output_tokens'] == 0.0,
               json.dumps(cc))
         # The first session resumed later in a new process, from its own saved total (below the ledger's last).
         with open(pa, 'a') as fh:
-            fh.writelines([line('user', 'resumed', '2026-11-25T08:00:00Z'), cost_line(480.0, LEDGER_START)])
+            fh.writelines([line('user', 'resumed', '2026-03-04T08:00:00Z'), cost_line(105.0, LEDGER_START)])
         seeker.reset()
         rows_claude.upload_file(cfg, pa, time.time() + 10)
         check('cost: a session resumed from its own saved total pays from there, not the whole total',
-              [r['cost_usd'] for r in cost_rows(seeker)] == [10.5077])
+              [r['cost_usd'] for r in cost_rows(seeker)] == [5.0])
         # A later session of the ledger whose total is below the ledger's last and its own: a restart, counted whole.
         pc = os.path.join(base, 'shared', 'cccc3333-0000-4000-8000-00000000000c.jsonl')
         with open(pc, 'w') as fh:
-            fh.writelines([line('user', 'after a restart', '2026-11-26T08:00:00Z'), cost_line(4.0, LEDGER_START)])
+            fh.writelines([line('user', 'after a restart', '2026-03-05T08:00:00Z'), cost_line(4.0, LEDGER_START)])
         seeker.reset()
         rows_claude.upload_file(cfg, pc, time.time() + 10)
         check("cost: a total below the ledger's last, in time order, is a restart and counts whole",
               [r['cost_usd'] for r in cost_rows(seeker)] == [4.0])
+        # The resumed session goes on, now above the ledger's last (the restart's) but counted from its own total.
+        with open(pa, 'a') as fh:
+            fh.writelines([line('user', 'goes on', '2026-03-05T09:00:00Z'), cost_line(110.0, LEDGER_START)])
+        seeker.reset()
+        rows_claude.upload_file(cfg, pa, time.time() + 10)
+        check("cost: in time order, a total above the ledger's last counts from the file's own previous record when "
+              "that is higher", [r['cost_usd'] for r in cost_rows(seeker)] == [5.0], json.dumps([r['cost_usd'] for r in cost_rows(seeker)]))
         # A new startTime is a new ledger, also inside one file.
         pd = os.path.join(base, 'shared', 'dddd4444-0000-4000-8000-00000000000d.jsonl')
         with open(pd, 'w') as fh:
-            fh.writelines([line('user', 'one', '2026-11-26T09:00:00Z'), cost_line(3.0, 1795500000001),
-                           line('user', 'two', '2026-11-26T09:30:00Z'), cost_line(4.0, 1795500000002)])
+            fh.writelines([line('user', 'one', '2026-03-06T09:00:00Z'), cost_line(3.0, LEDGER_START + 1),
+                           line('user', 'two', '2026-03-06T09:30:00Z'), cost_line(4.0, LEDGER_START + 2)])
         seeker.reset()
         rows_claude.upload_file(cfg, pd, time.time() + 10)
         check('cost: a new startTime is a new ledger and counts whole, also after another ledger in the same file',
               [r['cost_usd'] for r in cost_rows(seeker)] == [3.0, 4.0])
+        # A record without a startTime after one with a startTime counts from the file's previous record.
+        pe = os.path.join(base, 'shared', 'eeee4444-0000-4000-8000-00000000000e.jsonl')
+        with open(pe, 'w') as fh:
+            fh.writelines([line('user', 'one', '2026-03-06T10:00:00Z'), cost_line(5.0, LEDGER_START + 3),
+                           line('user', 'two', '2026-03-06T10:30:00Z'), cost_line(7.0, None)])
+        seeker.reset()
+        rows_claude.upload_file(cfg, pe, time.time() + 10)
+        check('cost: a record without a startTime after one with a startTime counts from the file\'s previous record',
+              [r['cost_usd'] for r in cost_rows(seeker)] == [5.0, 2.0], json.dumps([r['cost_usd'] for r in cost_rows(seeker)]))
         # The title backfill parses cost lines without touching the ledgers.
         ledger_file = os.path.join(home, 'state', 'cost-ledgers.json')
         before = read(ledger_file)
@@ -5777,7 +5793,7 @@ def test_cost_ledgers(seeker):
         rows_claude.upload_file(cfg, pa, time.time() + 10)
         got = [r['cost_usd'] for r in cost_rows(seeker)]
     check('cost: records that arrive after a later one of their ledger count only what is new: no double count, '
-          'nothing negative', got == [509.3964, 0.0, 0.0, 0.0, 0.0] and abs(sum(got) - 509.3964) < 1e-9, json.dumps(got))
+          'nothing negative', got == [130.0, 0.0, 0.0, 0.0, 0.0] and abs(sum(got) - 130.0) < 1e-9, json.dumps(got))
 
     # A planned backfill: the ledgers are filled in time order first, so the files can upload in any order.
     projects = clean(os.path.join(WORK, 'cost-backfill-projects'))
@@ -5791,7 +5807,7 @@ def test_cost_ledgers(seeker):
     for r in cost_rows(seeker):
         by.setdefault(r['session_id'][:4], []).append(r['cost_usd'])
     check('cost: backfill.py puts the cost records in the ledgers in time order first, so the later session that '
-          'uploads first still pays only its own spend', p.returncode == 0 and by == {'aaaa': [39.9041, 0.0, 0.0], 'bbbb': [2.3354, 467.1569]}
+          'uploads first still pays only its own spend', p.returncode == 0 and by == {'aaaa': [30.0, 0.0, 0.0], 'bbbb': [2.0, 98.0]}
           and '5 cost records in 1 cost ledgers' in p.stdout, p.stdout[-300:] + json.dumps(by))
     seeker.reset()
     p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'backfill.py'), '--cost-ledger'], capture_output=True,
@@ -5799,7 +5815,7 @@ def test_cost_ledgers(seeker):
     check('cost: backfill.py --cost-ledger sends nothing and changes nothing already recorded',
           p.returncode == 0 and not seeker.calls and '5 cost records are in 1 cost ledgers' in p.stdout, p.stdout[-300:])
 
-    # A retried upload gets the same amounts.
+    # A retried upload gets the same amounts, and reads the ledger file without writing it again.
     home = clean(os.path.join(WORK, 'home-cost-retry'))
     pa, pb = cost_files(os.path.join(base, 'retry'))
     try:
@@ -5812,9 +5828,13 @@ def test_cost_ledgers(seeker):
             except common.SeekerError:
                 pass
             seeker.state.pop('records_answer')
+            ledger_file = os.path.join(home, 'state', 'cost-ledgers.json')
+            before = (os.stat(ledger_file).st_ino, read(ledger_file))
             rows_claude.upload_file(cfg, pb, time.time() + 10)
+            after = (os.stat(ledger_file).st_ino, read(ledger_file))
             got = [r['cost_usd'] for r in cost_rows(seeker)]
-        check('cost: a retried upload gets the amounts the first try computed', got == [39.9041, 0.0, 0.0], json.dumps(got))
+        check('cost: a retried upload gets the amounts the first try computed', got == [30.0, 0.0, 0.0], json.dumps(got))
+        check('cost: records already in the ledger file do not write it again', after == before)
     finally:
         seeker.state.pop('records_answer', None)
 
@@ -5827,7 +5847,7 @@ def test_cost_ledgers(seeker):
         with open(path, 'w') as fh:
             for total in range(first, 41, 2):
                 fh.write(line('user', f'turn {total}', at(total)))
-                fh.write(cost_line(float(total), 1795600000000, {'claude-opus-5-5': model_use(float(total), total, total, total, total)}))
+                fh.write(cost_line(float(total), LEDGER_START + 10, {'claude-opus-5-5': model_use(float(total), total, total, total, total)}))
         paths.append(path)
     errors, change = [], common.CostLedgers.change
 
@@ -5850,7 +5870,7 @@ def test_cost_ledgers(seeker):
             w.join(60)
         got = [r['cost_usd'] for r in cost_rows(seeker)]
         books = json.loads(read(os.path.join(home, 'state', 'cost-ledgers.json')))
-        entry = books.get(f'{host}:1795600000000', {})
+        entry = books.get(f'{host}:{LEDGER_START + 10}', {})
     check('cost: concurrent hooks on one ledger lose no update and count the ledger once',
           not errors and len(got) == 40 and min(got) >= 0 and abs(sum(got) - 40.0) < 1e-9 and entry.get('total') == 40.0
           and len(entry.get('applied', {})) == 40, json.dumps([errors and str(errors[0]), len(got), sum(got), entry.get('total')]))
@@ -5869,13 +5889,13 @@ def test_cost_ledgers(seeker):
         moved = os.path.exists(ledger_file + '.unreadable')
         pc = os.path.join(base, 'corrupt', 'cccc3333-0000-4000-8000-00000000000c.jsonl')
         with open(pc, 'w') as fh:
-            fh.writelines([line('user', 'new process', '2026-11-27T08:00:00Z'), cost_line(1.5, 1795700000000)])
+            fh.writelines([line('user', 'new process', '2026-03-07T08:00:00Z'), cost_line(1.5, LEDGER_START + 20)])
         seeker.reset()
         rows_claude.upload_file(cfg, pc, time.time() + 10)
         fresh = json.loads(read(ledger_file))
     check("cost: an unreadable ledger file falls back to the file's own records, logs, and is replaced; uploads go on",
-          c['lines'] == 4 and got == [509.3964, 0.0, 0.0] and moved and 'cost ledger cannot be read' in _log(home)
-          and f'{host}:1795700000000' in fresh and [r['cost_usd'] for r in cost_rows(seeker)] == [1.5], json.dumps(got))
+          c['lines'] == 4 and got == [130.0, 0.0, 0.0] and moved and 'cost ledger cannot be read' in _log(home)
+          and f'{host}:{LEDGER_START + 20}' in fresh and [r['cost_usd'] for r in cost_rows(seeker)] == [1.5], json.dumps(got))
 
     # A cost-state without a startTime keeps the per-file rule.
     home = clean(os.path.join(WORK, 'home-cost-nostart'))
@@ -5889,6 +5909,226 @@ def test_cost_ledgers(seeker):
     got = cost_rows(seeker)
     check('cost: a cost-state without a startTime is counted from its own file (ledger "")',
           [r['cost_usd'] for r in got] == [1.0, 0.25] and json.loads(got[1]['body'])['ctrlb_cost']['ledger'] == '')
+
+
+def test_cost_ledger_file(seeker):
+    """How the ledger file is read and written: failures keep it, nothing is written for nothing, and the time left
+    is checked before its I/O."""
+    cfg = dict(TITLE_CFG, url=seeker.url)
+    base = clean(os.path.join(WORK, 'cost-ledger-file'))
+
+    # A write that fails (a full disk) keeps the intact file and its history; no temporary file is left.
+    home = clean(os.path.join(WORK, 'home-cost-nospace'))
+    pa, pb = cost_files(os.path.join(base, 'nospace'))
+    replace = os.replace
+
+    def full_disk(src, dst):
+        if dst.endswith('cost-ledgers.json'):
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        return replace(src, dst)
+
+    with mock.patch.object(common, 'HOME', home):
+        rows_claude.upload_file(cfg, pa, time.time() + 10)
+        ledger_file = os.path.join(home, 'state', 'cost-ledgers.json')
+        before = read(ledger_file)
+        seeker.reset()
+        with mock.patch.object(common.os, 'replace', full_disk):
+            rows_claude.upload_file(cfg, pb, time.time() + 10)
+        failed = [r['cost_usd'] for r in cost_rows(seeker)]
+        kept = os.path.isfile(ledger_file) and read(ledger_file) == before and not os.path.exists(ledger_file + '.unreadable') \
+            and not os.path.exists(ledger_file + '.tmp')
+        pc = os.path.join(base, 'nospace', 'cccc3333-0000-4000-8000-00000000000c.jsonl')
+        with open(pc, 'w') as fh:
+            fh.writelines([line('user', 'disk freed', '2026-03-04T08:00:00Z'), cost_line(140.0, LEDGER_START)])
+        seeker.reset()
+        rows_claude.upload_file(cfg, pc, time.time() + 10)
+        then = [r['cost_usd'] for r in cost_rows(seeker)]
+    check('cost: a ledger file that cannot be written is kept as it was, with no temporary file; the record falls '
+          'back to its own file, and the next one counts against the kept history',
+          kept and failed == [130.0, 0.0, 0.0] and then == [40.0] and 'cost ledger cannot be written' in _log(home),
+          json.dumps([kept, failed, then]))
+
+    # A ledger file that cannot be read (here a directory) is left where it is, not moved aside.
+    home = clean(os.path.join(WORK, 'home-cost-noread'))
+    pa, _ = cost_files(os.path.join(base, 'noread'))
+    with mock.patch.object(common, 'HOME', home):
+        ledger_file = os.path.join(home, 'state', 'cost-ledgers.json')
+        os.makedirs(ledger_file)
+        seeker.reset()
+        rows_claude.upload_file(cfg, pa, time.time() + 10)
+        got = [r['cost_usd'] for r in cost_rows(seeker)]
+    check('cost: a ledger file that cannot be read is left as it was; records fall back to their own file',
+          os.path.isdir(ledger_file) and not os.path.exists(ledger_file + '.unreadable') and got == [2.0, 98.0]
+          and 'cost ledger cannot be read' in _log(home), json.dumps(got))
+
+    # A record's amounts are kept for a week; after that the ledger keeps only that its line was counted.
+    home = clean(os.path.join(WORK, 'home-cost-week'))
+    pa, pb = cost_files(os.path.join(base, 'week'))
+    with mock.patch.object(common, 'HOME', home):
+        rows_claude.upload_file(cfg, pa, time.time() + 10)
+        ledger_file = os.path.join(home, 'state', 'cost-ledgers.json')
+        books = json.loads(read(ledger_file))
+        for entry in books.values():
+            for kept in entry['applied'].values():
+                kept[3] -= rows_claude.KEEP_S + 60
+        with open(ledger_file, 'w') as fh:
+            json.dump(books, fh)
+        rows_claude.upload_file(cfg, pb, time.time() + 10)
+        entry = json.loads(read(ledger_file))[f'{common.host()}:{LEDGER_START}']
+        os.unlink(common.FileState(pa, time.time() + 1).file)        # pa is read again from its first line
+        seeker.reset()
+        rows_claude.upload_file(cfg, pa, time.time() + 10)
+        again = [r['cost_usd'] for r in cost_rows(seeker)]
+    source = common.CostLedgers.source_of(pa)
+    check('cost: amounts counted more than a week ago are dropped, and their lines count 0 if read again',
+          sorted(entry['applied']) == sorted(f'{common.CostLedgers.source_of(pb)}:{n}' for n in (1, 2, 3))
+          and entry['seen'].get(source) == 3 and again == [0.0, 0.0], json.dumps([sorted(entry['applied']), again]))
+
+    # A seed run again once those amounts are gone changes no ledger: the lines it counted before are known.
+    home = clean(os.path.join(WORK, 'home-cost-reseed'))
+    pa, _ = cost_files(os.path.join(base, 'reseed'))
+    pc = os.path.join(base, 'reseed', 'cccc3333-0000-4000-8000-00000000000c.jsonl')
+    pd = os.path.join(base, 'reseed', 'dddd4444-0000-4000-8000-00000000000d.jsonl')
+    with open(pc, 'w') as fh:
+        fh.writelines([line('user', 'after a restart', '2026-03-05T08:00:00Z'), cost_line(4.0, LEDGER_START)])
+    with open(pd, 'w') as fh:
+        fh.writelines([line('user', 'another ledger', '2026-03-06T08:00:00Z'), cost_line(1.0, LEDGER_START + 60)])
+    with mock.patch.object(common, 'HOME', home):
+        rows_claude.upload_file(cfg, pa, time.time() + 10)
+        rows_claude.upload_file(cfg, pc, time.time() + 10)
+        ledger_file = os.path.join(home, 'state', 'cost-ledgers.json')
+        books = json.loads(read(ledger_file))
+        for entry in books.values():
+            for kept in entry['applied'].values():
+                kept[3] -= rows_claude.KEEP_S + 60
+        with open(ledger_file, 'w') as fh:
+            json.dump(books, fh)
+        rows_claude.upload_file(cfg, pd, time.time() + 10)          # a write: the old amounts are dropped
+        key = f'{common.host()}:{LEDGER_START}'
+        before = {k: v for k, v in json.loads(read(ledger_file))[key].items() if k in ('total', 'ts', 'models')}
+        rows_claude.seed_ledgers(cfg, [pa], time.time() + 10)       # as with --project, over some transcripts only
+        after = {k: v for k, v in json.loads(read(ledger_file))[key].items() if k in ('total', 'ts', 'models')}
+    check('cost: a seed run again after the amounts are dropped changes no ledger', before == after and after['total'] == 4.0,
+          json.dumps([before.get('total'), after.get('total')]))
+
+    # No time left once the file is free: neither read nor written.
+    home = clean(os.path.join(WORK, 'home-cost-late'))
+    called = []
+    with mock.patch.object(common, 'HOME', home):
+        try:
+            common.CostLedgers(pa, time.time() - 1).change(lambda books: (called.append(1), (None, True))[1])
+            late = None
+        except TimeoutError as e:
+            late = str(e)
+    check('cost: with no time left, the ledger file is neither read nor written', late is not None and not called
+          and not os.path.exists(os.path.join(home, 'state', 'cost-ledgers.json')), str(late))
+
+    # backfill.py fills the ledgers in one change of the file, not one per record.
+    home = clean(os.path.join(WORK, 'home-cost-seed-once'))
+    pa, pb = cost_files(os.path.join(base, 'seed-once'))
+    calls, change = [], common.CostLedgers.change
+
+    def counted(self, fn):
+        calls.append(1)
+        return change(self, fn)
+
+    with mock.patch.object(common, 'HOME', home), mock.patch.object(common.CostLedgers, 'change', counted):
+        n = rows_claude.seed_ledgers(cfg, [pa, pb], time.time() + 10)
+    check('cost: backfill.py fills the ledgers in one change of the file', n == (5, 1) and calls == [1], json.dumps([n, len(calls)]))
+
+    # A first backfill of a ledger with more than 1,000 records gives every record its planned amount.
+    home = clean(os.path.join(WORK, 'home-cost-many'))
+    path = os.path.join(base, 'many', SID + '.jsonl')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as fh:
+        fh.write(line('user', 'a long session', '2026-03-08T08:00:00Z'))
+        fh.writelines(cost_line(float(k), LEDGER_START + 30, {'claude-opus-5-5': model_use(float(k), k, k, k, k)}) for k in range(1, 1002))
+    with mock.patch.object(common, 'HOME', home):
+        rows_claude.seed_ledgers(cfg, [path], time.time() + 60)
+        seeker.reset()
+        rows_claude.upload_file(cfg, path, time.time() + 120)
+        got = [r['cost_usd'] for r in cost_rows(seeker)]
+    check('cost: a first backfill of a ledger with 1,001 records uploads each record\'s planned amount',
+          len(got) == 1001 and set(got) == {1.0}, json.dumps([len(got), sorted(set(got))[:5]]))
+
+    # Past the cap on ledgers, the oldest go first, but not one that keeps planned amounts for lines not uploaded yet.
+    home = clean(os.path.join(WORK, 'home-cost-cap'))
+    pa, pb = cost_files(os.path.join(base, 'cap'))
+    newer = os.path.join(base, 'cap', 'cccc3333-0000-4000-8000-00000000000c.jsonl')
+    with open(newer, 'w') as fh:
+        fh.writelines([line('user', 'another ledger', '2026-03-10T08:00:00Z'), cost_line(1.0, LEDGER_START + 50)])
+    with mock.patch.object(common, 'HOME', home), mock.patch.object(common.CostLedgers, 'MAX_LEDGERS', 1):
+        rows_claude.seed_ledgers(cfg, [pa, pb, newer], time.time() + 10)
+        seeker.reset()
+        rows_claude.upload_file(cfg, pb, time.time() + 10)
+        got = [r['cost_usd'] for r in cost_rows(seeker)]
+    check('cost: past the cap on ledgers, a ledger with planned amounts is kept until they are uploaded',
+          got == [30.0, 0.0, 0.0], json.dumps(got))
+
+    # backfill.py reports a ledger file it cannot use, and an upload backfill goes on without it.
+    projects = clean(os.path.join(WORK, 'cost-badfile-projects'))
+    cost_files(os.path.join(projects, '-work-cost'))
+    home = clean(os.path.join(WORK, 'home-cost-badfile'))
+    os.makedirs(os.path.join(home, 'state', 'cost-ledgers.json'))
+    seeker.reset()
+    env = base_env(seeker.url, home, CLAUDE_PROJECTS_DIR=projects)
+    alone = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'backfill.py'), '--cost-ledger'], capture_output=True,
+                           text=True, env=env, timeout=60)
+    upload = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'backfill.py'), '--yes'], capture_output=True,
+                            text=True, env=env, timeout=60)
+    check('cost: backfill.py --cost-ledger reports a ledger file it cannot use, without a traceback',
+          alone.returncode == 1 and 'the cost ledgers could not be filled' in alone.stdout and 'Traceback' not in alone.stderr,
+          alone.stdout[-300:] + alone.stderr[-300:])
+    check('cost: an upload backfill says the ledgers could not be filled and uploads anyway',
+          upload.returncode == 1 and 'could not be filled first' in upload.stdout and len(cost_rows(seeker)) == 5
+          and '0/2 files failed' in upload.stdout and 'Traceback' not in upload.stderr, upload.stdout[-400:] + upload.stderr[-300:])
+
+
+def test_cost_upgrade(seeker):
+    """A session in progress when the plugin is upgraded from a version without cost ledgers."""
+    cfg = dict(TITLE_CFG, url=seeker.url)
+    base = clean(os.path.join(WORK, 'cost-upgrade'))
+    path = os.path.join(base, SID + '.jsonl')
+    os.makedirs(base, exist_ok=True)
+    with open(path, 'w') as fh:      # an older Claude Code: its cost-state has no startTime
+        fh.writelines([line('user', 'before', '2026-03-09T08:00:00Z'),
+                       cost_line(2.0, None, {'claude-opus-5-5': model_use(2.0, 10, 20, 30, 40)})])
+    home = clean(os.path.join(WORK, 'home-cost-upgrade'))
+    with mock.patch.object(common, 'HOME', home):
+        rows_claude.upload_file(cfg, path, time.time() + 10)
+        st = common.FileState(path, time.time() + 1)
+        old = {k: v for k, v in json.loads(read(st.file)).items()            # the state as plugin 0.3.0 left it
+               if not k.startswith('title') and k not in ('cost_start', 'cost_models')}
+        with open(st.file, 'w') as fh:
+            json.dump(old, fh)
+        with open(path, 'a') as fh:
+            fh.writelines([line('user', 'after', '2026-03-09T09:00:00Z'),
+                           cost_line(5.0, LEDGER_START + 40, {'claude-opus-5-5': model_use(5.0, 25, 50, 75, 100)})])
+        seeker.reset()
+        rows_claude.upload_file(cfg, path, time.time() + 10)
+        got = cost_rows(seeker)
+    cc = json.loads(got[0]['body'])['ctrlb_cost'] if got else {}
+    check('cost: after an upgrade from a version without ledgers, the first record counts from the last one before, '
+          'per model too',
+          [r['cost_usd'] for r in got] == [3.0] and cc.get('models') == {'claude-opus-5-5': {
+              'costUSD': 3.0, 'inputTokens': 15, 'outputTokens': 30, 'cacheReadInputTokens': 45, 'cacheCreationInputTokens': 60}},
+          json.dumps(cc))
+
+    # A base without per-model figures (the record before had no modelUsage) gives no per-model increases, rather
+    # than the whole per-model totals.
+    path = os.path.join(base, 'nomodels', SID + '.jsonl')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as fh:
+        fh.writelines([line('user', 'one', '2026-03-09T10:00:00Z'), cost_line(4.0, LEDGER_START + 41),
+                       line('user', 'two', '2026-03-09T11:00:00Z'),
+                       cost_line(6.0, LEDGER_START + 41, {'claude-opus-5-5': model_use(6.0, 1, 2, 3, 4)})])
+    with mock.patch.object(common, 'HOME', clean(os.path.join(WORK, 'home-cost-nomodels'))):
+        seeker.reset()
+        rows_claude.upload_file(cfg, path, time.time() + 10)
+        got = cost_rows(seeker)
+    cc = json.loads(got[-1]['body'])['ctrlb_cost'] if got else {}
+    check('cost: an increase over a record without per-model figures has none either, not the whole totals',
+          [r['cost_usd'] for r in got] == [4.0, 2.0] and cc.get('models') == {}, json.dumps(cc))
 
 
 def strip_title_keys(path):
@@ -5967,6 +6207,103 @@ def test_title_upgrade_rules(seeker):
     check('titles: backfill.py --titles records the custom title, so a later ai-title is ignored',
           n == 1 and accepted_titles(seeker) == [] and st['title'] == 'Mine' and st['title_custom'] is True,
           json.dumps([n, accepted_titles(seeker), st.get('title')]))
+
+
+def like_old_version(rec, seq, st, *args):
+    """rows_claude.rows_from as a version without title rows parsed and kept its state: no title rows, and the
+    title keys left as they were."""
+    kept = {k: copy.deepcopy(v) for k, v in st.items() if k.startswith('title')}
+    rows = [r for r in rows_claude.rows_from(rec, seq, st, *args) if r['block_type'] != 'title']
+    st.update(kept)
+    return rows
+
+
+def test_title_downgrade(seeker):
+    import threading
+    cfg = dict(TITLE_CFG, url=seeker.url)
+    base = clean(os.path.join(WORK, 'title-downgrade'))
+
+    # A custom title set while a version without titles ran: after the upgrade again, generated titles stay out.
+    path = os.path.join(base, 'custom', SID + '.jsonl')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as fh:
+        fh.writelines([line('user', 'a', at(0)), ai_line('Generated'), line('user', 'b', at(1))])
+    with mock.patch.object(common, 'HOME', clean(os.path.join(WORK, 'home-downgrade-custom'))):
+        rows_claude.upload_file(cfg, path, time.time() + 5)
+        with open(path, 'a') as fh:
+            fh.writelines([title_line('Mine'), line('user', 'c', at(2))])
+        rows_claude.upload_file(cfg, path, time.time() + 5, rows_fn=like_old_version)
+        with open(path, 'a') as fh:
+            fh.writelines([ai_line('Other'), line('user', 'd', at(3))])
+        seeker.reset()
+        rows_claude.upload_file(cfg, path, time.time() + 5)
+        st = file_state(path)
+    check('titles: a custom title set while a version without titles ran still keeps later generated titles out',
+          accepted_titles(seeker) == [] and st['title_custom'] is True, json.dumps([accepted_titles(seeker), st.get('title_custom')]))
+
+    # A version without titles that started a shorter transcript over leaves no stale title tracking behind.
+    path = os.path.join(base, 'shorter', SID + '.jsonl')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as fh:
+        fh.writelines([line('user', 'a long first prompt ' * 20, at(0)), title_line('Before'), line('user', 'b', at(1))])
+    with mock.patch.object(common, 'HOME', clean(os.path.join(WORK, 'home-downgrade-shorter'))):
+        rows_claude.upload_file(cfg, path, time.time() + 5)
+        with open(path, 'w') as fh:
+            fh.writelines([line('user', 'short', at(2)), ai_line('After'), line('user', 'c', at(3))])
+        st = common.FileState(path, time.time() + 1)
+        data = json.loads(read(st.file))
+        data.update(offset=0, line=0, row=0, prev_ts=0, names={}, mids=[], cost=0.0)   # that version's reset()
+        with open(st.file, 'w') as fh:
+            json.dump(data, fh)
+        rows_claude.upload_file(cfg, path, time.time() + 5, rows_fn=like_old_version)
+        with open(path, 'a') as fh:
+            fh.write(line('user', 'd', at(4)))
+        rows_claude.upload_file(cfg, path, time.time() + 5)
+        seeker.reset()
+        sent = rows_claude.upload_titles(cfg, path, time.time() + 5)
+        st = file_state(path)
+    check('titles: after a version without titles started a shorter transcript over, its title rows are sent again '
+          'at their seq, and a custom title from before no longer keeps generated ones out',
+          sent == 1 and accepted_titles(seeker) == [(1, 'After')] and st['title_custom'] is False,
+          json.dumps([sent, accepted_titles(seeker), st.get('title_custom')]))
+
+    # The check of uploaded lines stops at the end of a file that got shorter, and when the time runs out.
+    path = os.path.join(base, 'scan', SID + '.jsonl')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as fh:
+        fh.writelines([line('user', 'a', at(0)), title_line('Mine'), line('user', 'b', at(1))])
+    out = {}
+    worker = threading.Thread(target=lambda: out.update(found=rows_claude._scan_uploaded(path, os.path.getsize(path) + 4096,
+                                                                                          time.monotonic() + 30)))
+    worker.daemon = True
+    worker.start()
+    worker.join(5)
+    check('titles: the check of uploaded lines ends at the end of a file shorter than its offset',
+          not worker.is_alive() and out.get('found') == (True, None), str(out))
+    check('titles: the check of uploaded lines gives up when the time runs out',
+          rows_claude._scan_uploaded(path, os.path.getsize(path), time.monotonic() - 1) is None)
+
+    # Its result is saved at once, so a failed upload does not make the next one read the file again.
+    path = os.path.join(base, 'saved', SID + '.jsonl')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w') as fh:
+        fh.writelines([line('user', 'a', at(0)), title_line('Mine'), line('user', 'b', at(1))])
+    try:
+        with mock.patch.object(common, 'HOME', clean(os.path.join(WORK, 'home-downgrade-saved'))):
+            rows_claude.upload_file(cfg, path, time.time() + 5, rows_fn=without_titles)
+            strip_title_keys(path)
+            with open(path, 'a') as fh:
+                fh.write(line('user', 'c', at(2)))
+            seeker.state['records_answer'] = lambda rows: (500, {'error': 'boom'})
+            try:
+                rows_claude.upload_file(cfg, path, time.time() + 5)
+            except common.SeekerError:
+                pass
+            st = file_state(path)
+    finally:
+        seeker.state.pop('records_answer', None)
+    check('titles: the check of uploaded lines is saved even when the upload after it fails',
+          st.get('title_custom') is True and st.get('title_upto') == st.get('offset'), json.dumps({k: st.get(k) for k in ('title_custom', 'title_upto', 'offset')}))
 
 
 def test_title_resets(seeker):
@@ -6331,6 +6668,27 @@ def test_codex_title_history(seeker):
     check('codex titles: names written, by title and title_at, with ties at title_at',
           [rows_codex._written(h, *a) for a in (('', None), ('B', None), ('Z', None), ('B', 2), ('C', 2), ('X', 2),
                                                  ('D', 3))] == [0, 2, 3, 2, 3, 3, 4])
+
+    # A name given again at the time of the one written last (a line whose updated_at went back or cannot be read
+    # takes the newest time seen): the rename between the two is still sent.
+    chome, main, _ = setup_codex(os.path.join(WORK, 'codex-home-tie'))
+    index = os.path.join(chome, 'session_index.jsonl')
+    with mock.patch.dict(os.environ, CODEX_HOME=chome), mock.patch.object(common, 'HOME', clean(os.path.join(WORK, 'home-codex-tie'))):
+        rows_codex.upload_file(cfg, main, time.time() + 10)
+        with open(index, 'w') as fh:
+            fh.write(index_line(CSID, 'Alpha', '2026-12-10T08:00:00Z'))
+        more('Named.', '2026-09-06T12:05:00.000Z')
+        rows_codex.upload_file(cfg, main, time.time() + 10)
+        with open(index, 'a') as fh:
+            fh.write(index_line(CSID, 'Beta', '2026-12-01T08:00:00Z'))
+            fh.write(index_line(CSID, 'Alpha', 'soon'))
+        more('Renamed and back.', '2026-09-06T12:06:00.000Z')
+        seeker.reset()
+        rows_codex.upload_file(cfg, main, time.time() + 10)
+        got, *_ = codex_titles(seeker)
+    check('codex titles: a rename between two equal names at one time is still sent',
+          [(r['body'], r['block_idx']) for r in got] == [('Beta', 1001), ('Alpha', 1002)],
+          json.dumps([(r['body'], r['block_idx']) for r in got]))
 
 
 def test_codex_titles(seeker):
@@ -7807,7 +8165,10 @@ def main():
     run_test(test_title_retries, seeker)
     run_test(test_title_backfill_concurrency, seeker)
     run_test(test_cost_ledgers, seeker)
+    run_test(test_cost_ledger_file, seeker)
+    run_test(test_cost_upgrade, seeker)
     run_test(test_title_upgrade_rules, seeker)
+    run_test(test_title_downgrade, seeker)
     run_test(test_title_resets, seeker)
     run_test(test_codex_title_budget, seeker)
     run_test(test_backfill_titles_exits, seeker)

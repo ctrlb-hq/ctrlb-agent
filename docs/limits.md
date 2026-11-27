@@ -89,7 +89,7 @@ Even in `enforce` mode:
 - The detectors (duplicate edits, silent agents, stalled tasks) are computed when the page reads the run. There are no alerts on them.
 - `done` evidence is what the agent says it ran. CtrlB does not run the command or check the exit code; the session record shows whether the agent ran it.
 - Edits made from a shell have no `paths` column, so the duplicate-edit detector does not see them.
-- Cost is shown for Claude Code sessions, from their `cost_usd`: each session's own spend, even when the desktop app ran several sessions in one process (see the [README](../README.md#cost)). Sessions uploaded before the plugin kept cost ledgers keep the figure they were uploaded with, which can include earlier sessions of their app process. Codex sessions record tokens only.
+- Cost is shown for Claude Code sessions, from their `cost_usd`: each session's own spend, also for a session that continues another one, such as a fork in the desktop app (see the [README](../README.md#cost)). Nothing is counted twice, but when two sessions of one cost ledger upload out of order, part of the earlier one's spend can land on the later one, and two sessions started in the same millisecond can be charged too little. Sessions uploaded before the plugin kept cost ledgers keep the figure they were uploaded with, which can include the cost of the session they continue. Codex sessions record tokens only.
 
 ## Steering
 
