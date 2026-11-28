@@ -1,6 +1,7 @@
 import ast
 import difflib
 import io
+import re
 import subprocess
 import sys
 import tokenize
@@ -22,8 +23,8 @@ def main():
             continue
         with tokenize.open(path) as source:
             text = source.read()
-        old = git("show", f"{base}:{name}").decode("utf-8").splitlines() if name in base_files else []
-        new = text.splitlines()
+        old = re.split(r"\r\n|\r|\n", git("show", f"{base}:{name}").decode("utf-8")) if name in base_files else []
+        new = re.split(r"\r\n|\r|\n", text)
         changed = set()
         for tag, _, _, start, end in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
             if tag in ("replace", "insert"):
