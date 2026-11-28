@@ -2,6 +2,8 @@
 
 Use Python 3.9 or newer on Linux or macOS. The hooks, installers and tests use only the Python standard library; do not add third-party Python dependencies or require newer Python features.
 
+Follow the [coding standards](CODING_STANDARDS.md); in Python, the no-comments rule covers `#` comments and docstrings.
+
 Keep changes focused. Describe the problem and resulting behavior in your pull request, and add a regression test for behavior changes in `tests/run_tests.py`.
 
 ## Tests
