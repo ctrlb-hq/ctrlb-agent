@@ -1,18 +1,4 @@
-"""CtrlB Relay hooks, shared by plugin/hooks/hook.py and codex/hook.py. Standard
-library only. docs/relay-hooks.md lists each hook's event, the fields it reads, what it writes and its time budget.
 
-A  a sub-agent spawn (PreToolUse on Agent) registers a task: `task <n> <description>`, the prompt as its text, the
-   workspace paths the prompt names as its files, and an interface block of the prompt as a contract. Synchronous,
-   inside REGISTER_S, so the task is in the record before the sub-agent's first claim; nothing is written when CtrlB
-   does not answer, and the spawn always goes ahead.
-B  a small text file written under the session's scratchpad or the run's scratch directory is posted as a NOTE keyed
-   artifact:<relative path> with its hash, by a detached process; the same content is posted once.
-C  a session of a relay run (CTRLB_RUN) starts with a block of the record: open tasks and holders, contracts, open
-   handoffs, its own last notes, and its artefacts written back to the scratch directory.
-D  the scratch directory: common.scratch_dir.
-E  autoSlots: an edit of a listed file is wrapped in a slot:<path> claim (pre-tool) and its release (post-tool).
-
-Run as a script (python3 -I relay_hooks.py post-artifact, the payload on stdin) it is the detached artefact poster."""
 import hashlib
 import json
 import os
@@ -29,25 +15,24 @@ if __name__ == '__main__':
     sys.dont_write_bytecode = True
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import common  # noqa: E402
-import redact  # noqa: E402
-from paths import edit_paths as normalise_edit_paths, is_path, key as resource_key  # noqa: E402
+import common
+import redact
+from paths import edit_paths as normalise_edit_paths, is_path, key as resource_key
 
-REGISTER_S = 2.5        # A: the task and contract writes together (the hook's alarm is REGISTER_S + 0.5)
-SLOT_S = 1.5            # E: the slot claim, inside pre-tool's two-second alarm
-RELEASE_S = 1.0         # E: the slot release, synchronous in post-tool
-RECORD_S = 3.0          # C: every read of the session-start block together
-ARTIFACT_POST_S = 10    # B: the detached post
+REGISTER_S = 2.5
+SLOT_S = 1.5
+RELEASE_S = 1.0
+RECORD_S = 3.0
+ARTIFACT_POST_S = 10
 ARTIFACT_MAX = 32 * 1024
-BLOCK_MAX = 2000        # C: the context block, in bytes (under 2 KB)
-TEXT_MAX = 2000         # CtrlB cuts a brief's text here
-MAX_PATHS = 32          # CtrlB takes at most 32 paths per task or contract
+BLOCK_MAX = 2000
+TEXT_MAX = 2000
+MAX_PATHS = 32
 ARTIFACT = 'artifact:'
 
 
 def in_relay(cfg, run, agent, sid):
-    """Whether the session is in a relay run, as the session-end handoff decides it: CTRLB_RUN is set, or a ctrlb relay
-    tool was called in this session."""
+
     if cfg.get('run'):
         return True
     if not run or not agent:
@@ -59,22 +44,20 @@ def in_relay(cfg, run, agent, sid):
 
 
 def _clean_text(text, limit=TEXT_MAX):
-    """Text with the plugin's secret patterns redacted, cut at limit bytes (on a character boundary)."""
+
     out, _ = redact.redact(text or '')
     b = out.encode()
     return out if len(b) <= limit else b[:limit].decode(errors='ignore')
 
 
-# ---------------------------------------------------------------- A: a spawn registers a task
+
 
 _SPLIT = re.compile(r'[\s`\'"()\[\]{}<>,;|*=]+')
 _LINE_REF = re.compile(r':\d+(?::\d+)?$')
 
 
 def prompt_paths(prompt, cwd):
-    """The repository paths a prompt names that resolve to a file or directory under the workspace (cwd), relative to
-    it, in order, once each, at most MAX_PATHS. A token counts when it reads as a path (a '/' or a file extension);
-    `src/app.py:12` names src/app.py; URLs and paths outside the workspace are left out."""
+
     if not cwd or not os.path.isdir(cwd):
         return []
     root = os.path.realpath(cwd)
@@ -97,7 +80,7 @@ def prompt_paths(prompt, cwd):
 
 
 def prompt_test(prompt):
-    """The first test command the prompt quotes (in backticks or a fenced block), or ''."""
+
     from hooks_shared import is_test_command
     spans = re.findall(r'`([^`\n]+)`', prompt or '')
     fenced = re.findall(r'^\s*(?:```|~~~)[^\n]*\n(.*?)^\s*(?:```|~~~)', prompt or '', re.S | re.M)
@@ -117,10 +100,7 @@ _FENCE = re.compile(r'^\s*(```+|~~~+)\s*([\w+.-]*)')
 
 
 def prompt_contract(prompt):
-    """(title, text) of the first interface the prompt carries, or None: a section under a heading that names an
-    interface (API, contract, interface, shape, schema, fields, signature; a markdown heading or a short line ending in
-    ':'), with its body up to the next heading; or a fenced block whose language is an interface language (json,
-    typescript, proto, graphql, openapi) or whose language or preceding line names an interface."""
+
     lines = (prompt or '').splitlines()
     title, body, i = None, [], 0
 
@@ -159,7 +139,7 @@ def prompt_contract(prompt):
 
 
 def _task_number(run):
-    """The next task number of the run on this machine (a counter under the state directory)."""
+
     def bump(d):
         d['n'] = int(d.get('n') or 0) + 1
         return d['n']
@@ -167,14 +147,12 @@ def _task_number(run):
 
 
 def _name_part(s, limit):
-    """A name segment: no '/' or '\\' (which would key it as a path), white space collapsed, at most limit chars."""
+
     return ' '.join(str(s or '').replace('/', ' ').replace('\\', ' ').split())[:limit].strip()
 
 
 def register_spawn(cfg, run, agent, tool_input, cwd, budget=REGISTER_S):
-    """The task a sub-agent spawn registers, and the contract when the prompt carries an interface:
-    {task, paths, test?, contract?}, or None when the prompt names no workspace path (a task needs one). Raises on a
-    CtrlB error or timeout; the caller logs it and lets the spawn go ahead."""
+
     deadline = time.time() + budget
     args = tool_input if isinstance(tool_input, dict) else {}
     prompt = str(args.get('prompt') or '')
@@ -201,14 +179,14 @@ def register_spawn(cfg, run, agent, tool_input, cwd, budget=REGISTER_S):
     return out
 
 
-# ---------------------------------------------------------------- B: artefacts
+
 
 SECRET_NAME = re.compile(r'(?:^|/)(?:\.env(?:\..*)?|.*\.(?:pem|key|p12|pfx|keystore)|id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?'
                          r'|auth\.json|credentials(?:\.json)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials)$', re.I)
 
 
 def artifact_roots(cfg, run, inp):
-    """The directories whose files are artefacts: the session's scratchpad_dir and the run's scratch directory."""
+
     out = []
     for d in (inp.get('scratchpad_dir'), common.scratch_dir(cfg, run)):
         if isinstance(d, str) and d and os.path.isdir(d):
@@ -219,9 +197,7 @@ def artifact_roots(cfg, run, inp):
 
 
 def artifact_of(path, roots):
-    """(relative path, text, hash) of a file that is an artefact, or None. A file outside the roots is no artefact (no
-    log line); a binary, one of ARTIFACT_MAX bytes or more, one with a secret-looking name, or one any secret pattern
-    matches is skipped with a line in the hook log that names only its relative path."""
+
     if not isinstance(path, str) or not path:
         return None
     real = os.path.realpath(path)
@@ -254,7 +230,7 @@ def artifact_of(path, roots):
 
 
 def _copy_dir(run, agent):
-    """Where the plugin keeps a local copy of each artefact it posted (the session-start fallback)."""
+
     name = hashlib.sha1(f'{run}\0{agent}'.encode()).hexdigest()
     return os.path.join(common.HOME, 'state', 'artifacts-' + name)
 
@@ -268,8 +244,7 @@ def _safe_rel(rel):
 
 
 def _write(path, text):
-    """Write text to path through a new temporary file in the same directory (mode 0600, a fresh name each time, so
-    no existing file or link is written through), then replace path with it."""
+
     d = os.path.dirname(path)
     os.makedirs(d, mode=0o700, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix='.' + os.path.basename(path) + '.', suffix='.ctrlb-tmp')
@@ -286,8 +261,7 @@ def _write(path, text):
 
 
 def _confined(root, rel):
-    """root/rel when every directory between root and the file is a real directory (not a link) and the result
-    resolves inside root; '' otherwise. A link named by rel itself is replaced by the write, never followed."""
+
     parts = rel.split('/')
     cur = root
     for p in parts[:-1]:
@@ -303,9 +277,7 @@ def _confined(root, rel):
 
 
 def post_artifact(cfg, run, agent, path, inp):
-    """One written file: skipped (None), unchanged since its last post ('same'), or handed to a
-    detached poster ('posted'). The hash cache is updated before the post; the poster takes the entry back when the
-    post fails, so the next write tries again."""
+
     found = artifact_of(path, artifact_roots(cfg, run, inp))
     if not found:
         return None
@@ -330,8 +302,7 @@ def post_artifact(cfg, run, agent, path, inp):
 
 
 def detach(mode, payload):
-    """Run this module as a detached process (its own session, stdout and stderr to /dev/null) with payload on its
-    stdin, and return at once: the hook's own output is printed by then or never."""
+
     p = subprocess.Popen([sys.executable, '-I', os.path.abspath(__file__), mode], stdin=subprocess.PIPE,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
     try:
@@ -358,23 +329,20 @@ def _poster(payload):
         common.RunState(run, agent, 'artifacts').change(drop)
 
 
-# ---------------------------------------------------------------- E: hook-managed slots
+
 
 def slot_paths(cfg, paths, cwd):
-    """The edited paths (as the edit check sends them) that autoSlots lists."""
+
     want = set(cfg.get('auto_slots') or [])
     if not want:
         return []
     return [p for p in normalise_edit_paths(paths, cwd or '') if (p[2:] if p.startswith('./') else p) in want]
 
 
-def held_text(rel, holder):
-    return f'CtrlB Relay: {rel} is held by {holder}, try again in a moment.'
 
 
 def claim_slots(cfg, run, agent, rels, cwd, timeout=SLOT_S):
-    """Claim slot:<path> with the file for each autoSlots path of an edit. Returns (denied reason or '', claimed
-    paths). Only a definite answer that another agent holds it denies; any error raises (the caller fails open)."""
+
     from hooks_shared import record_tokens
     deadline = time.time() + timeout
     claimed = []
@@ -387,29 +355,26 @@ def claim_slots(cfg, run, agent, rels, cwd, timeout=SLOT_S):
             continue
         holder = ans.get('held_by')
         if holder and holder != agent:
-            return held_text(bare, holder), claimed
+            return f'CtrlB Relay: {bare} is held by {holder}, try again in a moment.', claimed
         common.log(f"auto slot {run}/{agent} {bare}: not held ({ans.get('reason') or ans.get('message') or '?'}); edit allowed")
     return '', claimed
 
 
 def release_slots(cfg, run, agent, rels, cwd, timeout=RELEASE_S):
-    """Release slot:<path> for each autoSlots path of an edit whose slot this agent holds (a token is kept for it)."""
+
     from hooks_shared import record_tokens
     deadline = time.time() + timeout
-    done = []
     for rel in rels:
         bare = rel[2:] if rel.startswith('./') else rel
         k = resource_key('slot:' + bare)[0]
         if not common.TokenState(run, agent).get([k]):
             continue
         ans = common.release(cfg, run, agent, 'slot:' + bare, cwd=cwd, timeout=max(0.1, deadline - time.time()))
-        # The hold is gone either way (released now, or already lapsed): forget its token.
+
         record_tokens(run, agent, 'release', dict(ans, key=ans.get('key') or k, released=1))
-        done.append(bare)
-    return done
 
 
-# ---------------------------------------------------------------- C: a session starts with the record
+
 
 def _get(cfg, run, tail, query, deadline, out, name):
     try:
@@ -419,9 +384,7 @@ def _get(cfg, run, tail, query, deadline, out, name):
 
 
 def read_record(cfg, run, agent, budget=RECORD_S):
-    """The record parts the session-start block needs, read in parallel inside budget: tasks, contracts, notes,
-    handoffs and this agent's artefacts. A part that did not arrive comes from the local cache (the last read that
-    did); fresh parts refresh the cache. Returns (parts, names of the parts taken from the cache)."""
+
     deadline = time.time() + budget
     got = {}
     reads = [('tasks', 'tasks', None), ('contracts', 'contracts', dict(agent=agent)),
@@ -461,8 +424,7 @@ def read_record(cfg, run, agent, budget=RECORD_S):
 
 
 def _restore(root, rel, text):
-    """Walk through stable directory descriptors and create only an absent file. No pathname check can make
-    a later replace safe: another session can create work or swap a directory between the two operations."""
+
     os.makedirs(root, mode=0o700, exist_ok=True)
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -481,7 +443,7 @@ def _restore(root, rel, text):
             with os.fdopen(dest, 'w') as fh:
                 fh.write(text)
             try:
-                # link publishes the complete inode exclusively; replace would destroy concurrent work.
+
                 os.link(tmp, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
             except FileExistsError:
                 return stat.S_ISREG(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode)
@@ -493,8 +455,7 @@ def _restore(root, rel, text):
 
 
 def restore_artifacts(parts, run, agent, scratch):
-    """Write this agent's artefacts into the scratch directory, those it does not have yet: from CtrlB's answer, else
-    from the local copies of the artefacts this machine posted. Returns the relative paths now there."""
+
     have = []
     items = (parts.get('artifacts') or {}).get('artifacts') if isinstance(parts.get('artifacts'), dict) else None
     texts = {}
@@ -532,9 +493,7 @@ def _cut(s, n):
 
 
 def record_block(parts, stale, run, agent, scratch, artefacts):
-    """The session-start context block, under BLOCK_MAX bytes: open tasks with holder, stalled flag and test; contract
-    names; handoffs addressed to this agent or open; its last notes; and where its artefacts are. '' when there is
-    nothing to say."""
+
     tasks = [t for t in (parts.get('tasks') or {}).get('tasks') or [] if isinstance(t, dict) and t.get('state') != 'finished']
     lines = []
     if tasks:
@@ -572,7 +531,7 @@ def record_block(parts, stale, run, agent, scratch, artefacts):
         head += f" ({', '.join(stale)} from the local cache of {time.strftime('%H:%M:%S', time.localtime(parts['cache_ts']))}; CtrlB did not answer in time)"
     text = head + ':\n' + '\n'.join(lines)
     while len(text.encode()) > BLOCK_MAX and len(lines) > 1:
-        # Drop the least needed line first: notes, then handoffs, then contracts; the artefacts line stays.
+
         for drop in ('Your last notes:', 'Handoffs:', 'Contracts:'):
             idx = next((i for i, ln in enumerate(lines) if ln.startswith(drop)), None)
             if idx is not None:
@@ -587,7 +546,7 @@ def record_block(parts, stale, run, agent, scratch, artefacts):
 
 
 def make_scratch(cfg, run):
-    """Create the run's scratch directory; returns its path ('' when it cannot be made)."""
+
     d = common.scratch_dir(cfg, run)
     try:
         common.private_dir(common.HOME)
@@ -602,8 +561,7 @@ def make_scratch(cfg, run):
 
 
 def session_start_block(cfg, run, agent, source='', budget=RECORD_S):
-    """The record block for a session whose environment carries a run id (CTRLB_RUN), except after a
-    compaction (the same session goes on, with its scratch files in place). '' otherwise or when there is nothing."""
+
     if not cfg.get('run') or not run or not agent or source == 'compact':
         return ''
     scratch = make_scratch(cfg, run)

@@ -1,35 +1,18 @@
-"""Every ctrlb-agent hook for Codex. Usage: hook.py <session-start|subagent-start|flush|upload|session-end|pre-tool|pre-bash>, with the
-hook's JSON on stdin (Codex 0.166: session_id, transcript_path, cwd, hook_event_name; agent_id and
-agent_transcript_path on subagent events and on tool calls inside a subagent; tool_name and tool_input on PreToolUse).
-codex/install.py writes the [[hooks.*]] tables that call it. Output shapes are Claude Code's, which Codex accepts:
-hookSpecificOutput.additionalContext, and on PreToolUse permissionDecision "deny" with a permissionDecisionReason.
 
-A hook never fails or blocks a session: every error goes to ~/.ctrlb/hooks.log and the hook exits 0. pre-tool fails
-open (no output) on any error and gives up after two seconds.
-
-As described in docs/relay-hooks.md, session-start creates the run's scratch directory and, in a relay run (CTRLB_RUN), adds
-the record block, and a session started from another agent's shell finds that agent (lib/spawn.py: a process record,
-since Codex has no environment file). Codex gets no spawn registration, no artefact posting and
-no autoSlots: its hooks have no sub-agent tool input to read and no hook after a tool call, so a slot
-claimed before a patch could not be released after it. A session started for one task (CTRLB_LAUNCH, lib/launch.py)
-gets the one-task rule or the descendant rule; its claim's result is read from its rollout at Stop, PreCompact and
-SessionEnd."""
 import json, os, signal, sys, time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
-import common, launch, model_call_guard, relay_hooks, rows_codex, spawn  # noqa: E402
-from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, relay_text, launch_text, start_context, spawned_text, decide, starters, _deny  # noqa: E402
+import common, launch, model_call_guard, relay_hooks, rows_codex, spawn
+from hooks_shared import CHECK_S, RECALL, SUBAGENT, RELAY, session_start_text, relay_text, launch_text, start_context, spawned_text, decide, starters, _deny
 
 SYNC_S, ASYNC_S = 5, 90
 HANDOFF_S = 0.8
-# Codex has no hook after a tool call, so the hook keeps no record of edits or tests: its open handoff says so.
+
 CODEX_HANDOFF_TEXT = 'Session ended (Codex: the hook keeps no record of edits or tests; read the task\'s files and notes).'
 
 
 def session_end(cfg, inp, deadline=None):
-    """For Codex, in a relay run (CTRLB_RUN set, joined to its starter's run, or a ctrlb relay tool called in the
-    session: in_relay), hand off every hold the agent still has in its own run, in one write (common.handoff_all).
-    CtrlB unreachable or an error: nothing is written."""
+
     if common.relay_off(cfg):
         return None
     sid = inp.get('session_id') or ''
@@ -50,9 +33,7 @@ def session_end(cfg, inp, deadline=None):
 
 
 def launch_result(cfg, inp):
-    """The worker of a launch (lib/launch.py): its claim of the named task, read from its own rollout (Codex has no
-    hook after a tool call), as the result file. Nothing for a subagent thread, another session or no launch. Returns
-    the claim written, or None."""
+
     info = launch.current()
     sid = inp.get('session_id') or ''
     transcript = inp.get('transcript_path') or ''
@@ -86,10 +67,7 @@ def upload(cfg, paths, budget, event, sid):
 
 
 def in_relay(cfg, run, agent, sid, transcript):
-    """Whether a Codex session or thread is in a relay run: CTRLB_RUN set (or joined to its starter's run), or its root
-    session's rollout, or its own, shows a ctrlb relay tool call that writes to a run (Codex has no hook after a tool
-    call). A subagent thread that claimed files itself counts even when its root made no relay call. Its run stays its
-    own."""
+
     if relay_hooks.in_relay(cfg, run, agent, sid):
         return True
     try:
@@ -104,14 +82,13 @@ def in_relay(cfg, run, agent, sid, transcript):
 
 
 def session_run(cfg, sid, transcript):
-    """(run id, parent thread id) of a Codex session. A thread whose rollout names a parent_thread_id is a subagent
-    and joins its parent's run."""
+
     parent = str(rows_codex.read_meta(transcript).get('parent_thread_id') or '') if transcript else ''
     return rows_codex.session_run(cfg, sid, parent, transcript), parent
 
 
 def pre_tool(cfg, inp):
-    """For apply_patch: the paths come from the patch's *** Update File / Add File / Delete File lines."""
+
     if common.relay_off(cfg) or cfg['enforce'] == 'off':
         return None
     paths = rows_codex.input_paths(inp.get('tool_input'))
@@ -121,15 +98,13 @@ def pre_tool(cfg, inp):
     run, parent = session_run(cfg, sid, inp.get('transcript_path'))
     sub = inp.get('agent_id') or ''
     agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid, parent)
-    # Who started this agent is looked up only after CtrlB's check found a conflict, to choose the words (decide).
+
     return decide(cfg, run, agent, paths, inp.get('cwd') or '',
                   lambda: _starters(cfg, sid, run, parent, sub, inp.get('transcript_path') or ''))
 
 
 def _starters(cfg, sid, run, parent, sub, transcript):
-    """The agents that started this one: the session's own agent for a subagent in it; for a subagent thread, its
-    parent thread's agent, known only when that thread is the root (a deeper parent's name is not recorded); then
-    the spawn records (starters())."""
+
     starter = ''
     if sub:
         starter = rows_codex.agent_for(cfg, sid, parent)
@@ -139,8 +114,7 @@ def _starters(cfg, sid, run, parent, sub, transcript):
 
 
 def pre_bash(cfg, inp):
-    """guardModelCalls: refuse a shell command that starts a model CLI without a time limit. Codex matches its shell
-    tools as Bash, with the command in tool_input.command."""
+
     if not model_call_guard.enabled(cfg):
         return None
     ti = inp.get('tool_input')
@@ -176,18 +150,18 @@ def main():
     event = inp.get('hook_event_name') or mode
     out = None
     if mode != 'session-start':
-        spawn.apply(cfg, sid)      # a session that joined its parent's run at start keeps that run and agent name
+        spawn.apply(cfg, sid)
     if mode == 'session-start':
         common.start_local_server(cfg)
         _, parent = session_run(cfg, sid, inp.get('transcript_path'))
         started = {}
-        if parent:      # a subagent thread: it takes the decision its root session made at its own start
+        if parent:
             try:
                 spawn.link(sid, rows_codex.root_session(sid, parent, inp.get('transcript_path') or ''))
             except Exception as e:
                 common.log(f"codex spawn link {sid}: {type(e).__name__}: {str(e)[:200]}")
             spawn.apply(cfg, sid)
-        else:           # Codex has no environment file: '' keeps a CLAUDE_ENV_FILE inherited from a parent's shell unused
+        else:
             started = spawn.session_start(cfg, sid, inp.get('source') or '', env_file='',
                                           transcript=inp.get('transcript_path') or '')
         run, parent = session_run(cfg, sid, inp.get('transcript_path'))
@@ -197,22 +171,13 @@ def main():
             return
         agent = rows_codex.agent_for(cfg, sid, parent)
         scratch = relay_hooks.make_scratch(cfg, run) or common.scratch_dir(cfg, run)
-        # started for one task: its worker, or another session of the same launch (a subagent thread never is the worker)
+
         info = launch.current()
         rule = launch_text(info, launch.role(info, sid, subagent=bool(parent)), run, agent, scratch) if info else ''
-        if started.get('joined'):
-            text = head + (spawned_text(started, '', '', '') + '\n\n' + rule if rule else spawned_text(started, run, agent, scratch))
-            block = ''
-        else:
-            in_run = in_relay(cfg, run, agent, sid, inp.get('transcript_path'))
-            text = head + spawned_text(started, '', '', '') + '\n\n' + (rule or relay_text(in_run, run, agent, scratch))
-            block = ''
-            if in_run:
-                try:      # a relay run's session starts with the record
-                    block = relay_hooks.session_start_block(cfg, run, agent, inp.get('source') or '')
-                except Exception as e:
-                    common.log(f"codex session-start record: {type(e).__name__}: {str(e)[:200]}")
-        out = start_context(cfg, 'SessionStart', text + ('\n\n' + block if block else ''))
+        text = session_start_text(cfg, head, started, rule, run, agent, scratch, inp.get('source') or '',
+                                  lambda: in_relay(cfg, run, agent, sid, inp.get('transcript_path')),
+                                  'codex session-start record')
+        out = start_context(cfg, 'SessionStart', text)
     elif mode == 'subagent-start':
         upload(cfg, [inp.get('transcript_path')], SYNC_S - 1, event, sid)
         if common.relay_off(cfg):
@@ -222,7 +187,7 @@ def main():
         sub = inp.get('agent_id') or ''
         agent = rows_codex.agent_for(cfg, sub, sid) if sub else rows_codex.agent_for(cfg, sid)
         in_run = in_relay(cfg, run, agent, sid, inp.get('transcript_path'))
-        info = launch.current()      # a subagent is never a launch's worker: it gets the descendant rule
+        info = launch.current()
         out = start_context(cfg, 'SubagentStart', SUBAGENT.format(sid=sid) + '\n\n'
                       + (launch_text(info, launch.DESCENDANT, run, agent, common.scratch_dir(cfg, run)) if info else
                          relay_text(in_run, run, agent, common.scratch_dir(cfg, run))))
@@ -244,24 +209,16 @@ def main():
             common.log(f"codex session-end: {type(e).__name__}: {str(e)[:200]}")
         upload(cfg, [inp.get('agent_transcript_path'), inp.get('transcript_path')], max(0, deadline - time.monotonic()), event, sid)
     elif mode == 'upload':
-        try:      # Stop: the end of a turn, before a session end that a killed worker may never reach
+        try:
             launch_result(cfg, inp)
         except Exception as e:
             common.log(f"codex launch result: {type(e).__name__}: {str(e)[:200]}")
         upload(cfg, [inp.get('agent_transcript_path') or inp.get('transcript_path')], ASYNC_S, event, sid)
-    elif mode == 'pre-tool':
+    elif mode in ('pre-tool', 'pre-bash'):
         try:
-            out = pre_tool(cfg, inp)
-        except BaseException as e:      # fail open: the patch goes ahead
-            common.log(f"codex pre-tool fail open: {type(e).__name__}: {str(e)[:200]}")
-            out = None
-        finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-    elif mode == 'pre-bash':
-        try:
-            out = pre_bash(cfg, inp)
-        except BaseException as e:      # fail open: the command runs
-            common.log(f"codex pre-bash fail open: {type(e).__name__}: {str(e)[:200]}")
+            out = pre_tool(cfg, inp) if mode == 'pre-tool' else pre_bash(cfg, inp)
+        except BaseException as e:
+            common.log(f"codex {mode} fail open: {type(e).__name__}: {str(e)[:200]}")
             out = None
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)

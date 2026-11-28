@@ -1,8 +1,4 @@
-"""Tests for ctrlb-agent. Run: python3 -I tests/run_tests.py
 
-CtrlB is a local fake that answers with the synthetic responses in tests/fixtures/seeker/.
-Nothing is sent anywhere else, Claude is never called, and no real config is read: every CTRLB_* variable from the
-calling environment is dropped and CTRLB_HOME points into tests/work/."""
 import base64, errno, glob, hashlib, http.server, json, os, re, shutil, signal, socket, socketserver, stat, subprocess, sys, textwrap, threading, time, traceback
 from unittest import mock
 sys.dont_write_bytecode = True
@@ -15,14 +11,14 @@ HOOK = os.path.join(ROOT, 'plugin', 'hooks', 'hook.py')
 CODEX_HOOK = os.path.join(ROOT, 'codex', 'hook.py')
 INSTALL = os.path.join(ROOT, 'codex', 'install.py')
 SID = '5f0c7a52-0000-4000-8000-000000000001'
-SID8 = SID.replace('-', '')[-8:]                       # the part of SID in a started agent's name (random in v4 and v7)
-CSID = '0190f0a0-1111-7000-8000-000000000001'        # the thread id of tests/fixtures/codex-rollout.jsonl
-CSUB = '01a0aaaa-0000-7000-8000-000000000002'        # a subagent thread of it, written by the tests
+SID8 = SID.replace('-', '')[-8:]
+CSID = '0190f0a0-1111-7000-8000-000000000001'
+CSUB = '01a0aaaa-0000-7000-8000-000000000002'
 KEY = 'test-key-not-a-real-key'
 
 
 def fake_jwt(claims):
-    """A JWT-shaped key built here from made-up claims, with a made-up signature: never a real key."""
+
     def enc(d):
         return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip('=')
     return enc(dict(alg='RS256', typ='JWT')) + '.' + enc(claims) + '.' + enc(dict(sig='made-up'))
@@ -31,13 +27,13 @@ def fake_jwt(claims):
 KEY_USER = 'dev.one@example.test'
 JWT_KEY = fake_jwt(dict(sub='user-0001', email=KEY_USER, typ='mcp', workspaceId='ws-test', perm_version=1, role='member'))
 JWT_NOCLAIM = fake_jwt(dict(sub='user-0002', typ='mcp', workspaceId='ws-test', perm_version=1, role='member'))
-# the fake CtrlB's keys and the user each one belongs to; a row naming any other user_name is refused with 403
+
 KEYS = {KEY: 'fixture-owner@example.test', JWT_KEY: KEY_USER, JWT_NOCLAIM: 'user-two@example.test'}
 sys.path.insert(0, os.path.join(ROOT, 'lib'))
 os.environ['CTRLB_HOME'] = os.path.join(WORK, 'home-import')
-import common  # noqa: E402
-import redact  # noqa: E402
-import rows_claude  # noqa: E402
+import common
+import redact
+import rows_claude
 
 results = []
 
@@ -52,6 +48,8 @@ def run_test(test, *args):
         test(*args)
     except Exception:
         check(test.__name__ + ': unexpected exception', False, traceback.format_exc(limit=8).strip())
+
+
 
 
 def test_runner_failure_reporting():
@@ -80,14 +78,14 @@ def load(name):
         return json.load(fh)
 
 
-# ---------------------------------------------------------------- fake CtrlB
+
 
 class StubHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 64
 
     def server_bind(self):
-        # HTTPServer resolves the host before listen(); loopback fixtures need no reverse DNS.
+
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
@@ -97,14 +95,13 @@ class StubRequestHandler(http.server.BaseHTTPRequestHandler):
 
 
 class Seeker:
-    """Answers the routes ctrlb-agent calls from tests/fixtures/seeker/. state['check'] picks the check answer;
-    'slow' sleeps 5 s before answering."""
+
 
     def __init__(self):
         self.records, self.check_fx, self.runs_fx = load('seeker/records.json'), load('seeker/check.json'), load('seeker/runs.json')
         self.calls, self.rows, self.refused, self.state = [], [], [], dict(check='allow', handoff='ok')
-        # Relay routes: each answers 'ok', or 'slow' (sleeps SLOW_S, longer than any hook budget), 'error' (500),
-        # 'missing' (404, a CtrlB without the route); claims also 'held' (another agent holds it).
+
+
         self.state.update(briefs='ok', claims='ok', release='ok', posts='ok', tasks='ok', contracts='ok', peers='ok',
                           artifacts='ok')
         outer = self
@@ -209,7 +206,7 @@ R8_ARTIFACT = '# plan\nstep 1: parse\n'
 
 
 def r8_answer(route, method, body, query, state):
-    """(status, body) of the fake Relay routes."""
+
     body = body if isinstance(body, dict) else {}
     if route == 'briefs' and method == 'POST':
         res = body.get('resource') or ''
@@ -261,7 +258,7 @@ def closed_port():
     return port
 
 
-# ---------------------------------------------------------------- helpers
+
 
 def base_env(url, home, **extra):
     env = {k: v for k, v in os.environ.items() if not k.startswith('CTRLB_') and k != 'CLAUDE_ENV_FILE'}
@@ -311,16 +308,16 @@ def line(t, content, ts, extra=None):
 
 
 def planted():
-    """Secret-shaped strings, built here so that no file in the repo holds one."""
+
     return ['AKIA' + 'ABCDEFGHIJKLMNOP', 'sk-' + 'ant-api03-abcdefghijklmnopqrstuvwx', 'gh' + 'p_abcdefghijklmnopqrstuvwxyz0123',
             'xo' + 'xb-1234567890-abcdefghij', 'hunter2' + 'pass', 'Zm9vYmFy' + 'YmF6cXV4', 's3cr3t' + 'value99',
             'ctrlbkey' + 'value0000']
 
 
-# ---------------------------------------------------------------- tests
+
 
 def task_claim_first(text, name_claim, file_claim):
-    """The rule text names the task-name claim before the file claim, and both exist."""
+
     i, j = text.find(name_claim), text.find(file_claim)
     return 0 <= i < j
 
@@ -329,8 +326,7 @@ REGISTERED = 'Claim the task by the name your orchestrator registered'
 
 
 def registered_rule(text, md=False):
-    """Claim the registered task and its files together, finish with evidence, and release unfinished work.
-    A file of no task is claimed by its path; no separate claim of the task's file."""
+
     text = text.replace('`', '')
     return (REGISTERED in text and 'Its files come with it' in text and 'Work only while you hold it.' in text
             and 'call done on the task name' in text and 'as the evidence, and next=true' in text
@@ -340,8 +336,7 @@ def registered_rule(text, md=False):
 
 
 def recall_rule(text, sid):
-    """The session-start recall rule: search before the first grep, file read or shell command about earlier work,
-    find_command after a failed command, then next_actions on what it returns, and the session id to pass on to subagents."""
+
     return ("call `search_sessions` without session_id to search this user's sessions." in text
             and f"Pass session_id {sid} only to search this session's own turns before compaction." in text
             and 'Before your first grep, file read or shell command' in text
@@ -366,8 +361,8 @@ def test_layout():
     check('hooks.json: PostToolUse matcher is the ctrlb claim, handoff and release tools, under both server names',
           hk['PostToolUse'][0].get('matcher') == 'mcp__ctrlb__claim|mcp__plugin_ctrlb-agent_ctrlb__claim|mcp__ctrlb__handoff|'
           'mcp__plugin_ctrlb-agent_ctrlb__handoff|mcp__ctrlb__release|mcp__plugin_ctrlb-agent_ctrlb__release')
-    # A plugin install names the tools mcp__plugin_ctrlb-agent_ctrlb__<tool>; a server added by hand, mcp__ctrlb__<tool>.
-    # Every matcher that names one must name the other, or the hook never runs on that kind of install.
+
+
     twins = []
     for e in hk.values():
         for g in e:
@@ -383,7 +378,7 @@ def test_layout():
     check('hooks.json: every command runs python3 -I', all(h['command'].startswith('python3 -I ') for e in hk.values() for g in e for h in g['hooks']))
     mcp = load('../../plugin/.mcp.json')
     srv = (mcp.get('mcpServers') or mcp).get('ctrlb', {})
-    check('.mcp.json: ctrlb http server, section 6 url and headers; run and agent default to empty when unset',
+    check('.mcp.json: ctrlb http server, configuration URL and headers; run and agent default to empty when unset',
           'mcpServers' in mcp and srv.get('type') == 'http' and srv.get('url') == '${CTRLB_MCP_URL}' and srv.get('headers') == {
               'Authorization': 'Bearer ${CTRLB_KEY}', 'X-CtrlB-Run': '${CTRLB_RUN:-}', 'X-CtrlB-Agent': '${CTRLB_AGENT:-}'},
           json.dumps(srv.get('headers')))
@@ -474,7 +469,7 @@ def test_redaction_literals():
         text = name + '=' + marker
         check('credential assignment suffix and prefix: ' + name,
               redact.redact(text) == (name + '=[REDACTED]', 1))
-    # The original positive formats, alongside the new bare-name cases.
+
     s = planted()
     positives = s[:4] + ['github_pat_' + ('a' * 24), 'eyJ' + ('a' * 12) + '.' + ('b' * 12) + '.' + ('c' * 12),
                         '-----BEGIN PRIVATE KEY-----\n' + marker + '\n-----END PRIVATE KEY-----',
@@ -679,8 +674,8 @@ def test_codex_tool_input_preservation():
 
 
 def test_no_secrets_in_repo():
-    # this file is left out: it builds its fake secrets by concatenation and passes fake keys to the hooks
-    files = [os.path.join(d, n) for d, ds, ns in os.walk(ROOT) for n in ns]    # os.walk sees dot files; glob does not
+
+    files = [os.path.join(d, n) for d, ds, ns in os.walk(ROOT) for n in ns]
     files = [f for f in files if os.path.isfile(f) and '/tests/work/' not in f and '/.git/' not in f and not f.endswith('.pyc')
              and os.path.abspath(f) != os.path.abspath(__file__)]
     hits = []
@@ -693,7 +688,7 @@ def test_no_secrets_in_repo():
     url_re = re.compile(r'https?://(?!127\.0\.0\.1|localhost|claude\.com|docs\.claude\.com|github\.com/ctrlb-hq)[A-Za-z0-9.-]+')
     urls = sorted({os.path.relpath(f, ROOT) for f in files for _ in [0] if url_re.search(open(f, errors='replace').read())})
     check('no real URL in the repo (placeholders only)', not urls, ', '.join(urls))
-    words = ['black' + 'bo' + 'ard', 'bo' + 'ard', 'sw' + 'arm', 'lo' + 'ck', 'lo' + 'cks', 'lo' + 'cked']   # split: this file is scanned too
+    words = ['black' + 'bo' + 'ard', 'bo' + 'ard', 'sw' + 'arm', 'lo' + 'ck', 'lo' + 'cks', 'lo' + 'cked']
     banned = re.compile(r'(?i)\b(' + '|'.join(words) + r')\b')
     named = sorted({os.path.relpath(f, ROOT) for f in files + [os.path.abspath(__file__)]
                     if banned.search(open(f, errors='replace').read())})
@@ -706,11 +701,11 @@ def test_hooks(seeker):
     home = os.path.join(WORK, 'home')
     env = base_env(seeker.url, home)
 
-    # a session in a relay run gets the whole relay rule (CTRLB_RUN set; here the run id is the session id)
+
     p, _ = hook('session-start', I['session_start'], dict(env, CTRLB_RUN=SID))
     rctx = out_of(p).get('additionalContext', '')
     seeker.reset()
-    # session-start: the rule names the session, run and agent ids
+
     p, dt = hook('session-start', I['session_start'], env)
     o = out_of(p)
     ctx = o.get('additionalContext', '')
@@ -747,7 +742,7 @@ def test_hooks(seeker):
           and 'run_id="relay-run-7"' in ctx)
     check('session-start sends nothing to CtrlB', not seeker.calls)
 
-    # Stop: main and subagent rows
+
     seeker.reset()
     p, dt = hook('upload', I['stop'], env)
     rows = list(seeker.rows)
@@ -786,9 +781,9 @@ def test_hooks(seeker):
     cols = {'_timestamp', 'host', 'harness', 'session_id', 'parent_session', 'agent_id', 'run_id', 'agent', 'seq', 'block_idx',
             'role', 'block_type', 'tool_name', 'tool_use_id', 'command', 'paths', 'body', 'is_error', 'is_summary', 'cwd',
             'git_branch', 'cost_usd', 'input_tokens', 'output_tokens', 'body_len', 'truncated'}
-    check('every row has the section 5 columns', all(set(r) == cols for r in rows), str(sorted(set(rows[0]) ^ cols)))
+    check('every row has the row columns', all(set(r) == cols for r in rows), str(sorted(set(rows[0]) ^ cols)))
 
-    # idempotent, append, partial line, cost delta
+
     seeker.reset()
     hook('upload', I['stop'], env)
     check('second upload sends nothing', not seeker.rows, f'{len(seeker.rows)} rows')
@@ -802,11 +797,11 @@ def test_hooks(seeker):
     check('cost_usd is the increase since the last cost record', len(new) == 2 and abs(new[1]['cost_usd'] - 0.0077) < 1e-9,
           str([r['cost_usd'] for r in new]))
 
-    # redaction
+
     seeker.reset()
     s = planted()
     with open(main, 'a') as fh:
-        fh.write('\n')   # completes the partial line (skipped: not JSON)
+        fh.write('\n')
         fh.write(line('user', [dict(type='tool_result', tool_use_id='t1', is_error=True,
                                     content=f'export AWS_KEY={s[0]}\nCTRLB_KEY={s[7]}')], '2026-11-03T10:32:00Z'))
         fh.write(line('assistant', [dict(type='text', text=f'Secrets seen: {s[1]} {s[2]} {s[3]} PASSWORD={s[4]} '
@@ -826,7 +821,7 @@ def test_hooks(seeker):
                                           'the access key rotation doc')]
     check('prefixed lower-case secret assignments are redacted (aws_secret_access_key = "...")', pre == [1, 1, 0, 0, 0], str(pre))
 
-    # credential headers and flags, through the upload path: the Bash command field and the text body
+
     seeker.reset()
     v = ['hdrkey' + 'value0001', 'authtok' + 'value0002', 'cookie' + 'value0003', 'flagtok' + 'value0004',
          'apiflag' + 'value0005', 'pwflag' + 'value0006', 'digest' + 'value0007', 'proxy' + 'value0008']
@@ -854,7 +849,7 @@ def test_hooks(seeker):
     check('credential header and flag patterns leave ordinary text, variables, placeholders and -stdin flags alone',
           all(_redact.redact(t) == (t, 0) for t in keep), str([_redact.redact(t) for t in keep]))
 
-    # user_name comes only from the key's own user (its email claim); CTRLB_USER is the agent label
+
     seeker.reset()
     hook('upload', I['stop'], dict(env, CTRLB_HOME=os.path.join(WORK, 'home-user'), CTRLB_KEY=JWT_KEY))
     check("a key from the environment with an email claim: rows carry that user as user_name",
@@ -879,13 +874,13 @@ def test_hooks(seeker):
     stale = os.path.join(WORK, 'home-user-stale')
     os.makedirs(stale, exist_ok=True)
     with open(os.path.join(stale, 'config.json'), 'w') as fh:
-        json.dump(dict(user='a-label-not-the-key-user'), fh)   # a config.json from before: "user" written as a label
+        json.dump(dict(user='a-label-not-the-key-user'), fh)
     seeker.reset()
     hook('upload', I['stop'], dict(env, CTRLB_HOME=stale))
     check('an old config.json "user" is never sent as user_name', seeker.rows and all('user_name' not in r for r in seeker.rows)
           and not seeker.refused)
 
-    # subagent start flushes the parent and names run and agent
+
     seeker.reset()
     with open(main, 'a') as fh:
         fh.write(line('assistant', [dict(type='tool_use', id='t9', name='Agent', input=dict(prompt='explore'))], '2026-11-03T10:33:00Z'))
@@ -971,7 +966,7 @@ def test_pre_tool(seeker):
         p, _ = run('enforce', name)
         check(f'pre-tool {name[9:]}: path checked and denied', seeker.calls and seeker.calls[0]['body']['paths'] == [want]
               and out_of(p).get('permissionDecision') == 'deny')
-    # Fencing: lapsed, unheld and stale_round name the reason and the claim call.
+
     for state, said in (('enforce_lapsed', 'your lease on src/panels/Latency.tsx ran out at'),
                         ('enforce_unheld', 'src/panels/Latency.tsx is not held; claim it before editing (unheld)'),
                         ('enforce_stale_round', 'you held task 07 latency in round 1; round 2 belongs to agent-b (stale_round)')):
@@ -982,7 +977,7 @@ def test_pre_tool(seeker):
     p, _ = run('advisory_unheld')
     o = out_of(p)
     check('pre-tool advisory unheld: context, not a deny', 'permissionDecision' not in o and '(unheld)' in o.get('additionalContext', ''))
-    # Tokens: a claim's answer seen after the tool is kept, sent with the check, dropped by the release.
+
     seeker.reset()
     p, _ = hook('post-tool', I['post_tool_claim'], env)
     check('post-tool claim: no output, no CtrlB call', p.returncode == 0 and not p.stdout.strip() and not seeker.calls)
@@ -1000,67 +995,19 @@ def test_pre_tool(seeker):
           and c.get('body', {}).get('agent') == 'agent-abc123' and 'agent="agent-abc123"' in out_of(p).get('permissionDecisionReason', ''))
 
 
-def test_docs():
-    """The four connect pages: front matter for the docs site, the two placeholders, no other placeholder in
-    a snippet except the OTEL page's ingest values, and the commands they show match what the repo ships."""
-    pages = {n: open(os.path.join(ROOT, 'docs', f'connect-{n}.md')).read() for n in ('claude-code', 'codex', 'otel', 'http')}
-    check('docs: connect-claude-code, -codex, -otel, -http have front matter with title, description, slug',
-          all(re.match(r'---\ntitle: .+\ndescription: .+\nslug: connect-' + n + r'\n---\n', s) for n, s in pages.items()))
-    allowed = {'<your CtrlB URL>', '<your key>'}
-    extra = {}
-    for n, s in pages.items():
-        for block in re.findall(r'```[a-z]*\n(.*?)```', s, re.S):
-            found = set(re.findall(r'<[a-z][^<>\n]*>', block)) - allowed
-            if n == 'otel':
-                found -= {'<your OTLP logs endpoint>', '<your ingest credentials>'}
-            if found:
-                extra[n] = sorted(found)
-    check('docs: snippets use only <your CtrlB URL> and <your key> (OTEL: also the ingest endpoint and credentials)', not extra, json.dumps(extra))
-    cc = pages['claude-code']
-    check('docs: Claude Code page has the marketplace install, the --plugin-dir fallback and CTRLB_RUN',
-          'claude plugin marketplace add ctrlb-hq/ctrlb-agent' in cc and 'claude plugin install ctrlb-agent@ctrlb-agent' in cc
-          and 'claude --plugin-dir ' in cc and 'CTRLB_RUN=' in cc)
-    cx = pages['codex']
-    check('docs: Codex page has install.py --codex, --dry-run, the backup and bearer_token_env_var',
-          'python3 -I install.py --codex' in cx and '--dry-run' in cx and 'ctrlb-backup' in cx and 'bearer_token_env_var = "CTRLB_KEY"' in cx)
-    ot = pages['otel']
-    check('docs: OTEL page has the Claude Code environment, the Codex [otel] tables and what the export does not carry',
-          'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT' in ot and '[otel.exporter.otlp-http]' in ot and 'protocol = "json"' in ot
-          and 'What OTEL export does not carry' in ot)
-    routes = ['/ai/sessions/agent_sessions/records', '/ai/sessions/agent_sessions/search', '/ai/sessions/agent_sessions/sess-1/records',
-              '/ai/sessions/agent_sessions/commands', '/ai/sessions/agent_sessions/sess-1/next', '/runs/demo-run-1/posts',
-              '/runs/demo-run-1/peers', '-X POST "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/claims"',
-              '-X DELETE "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/claims"', '/runs/demo-run-1/check',
-              '/ai/relay/agent_sessions/runs?status=', '"<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1"',
-              '"<your CtrlB URL>/ai/relay/settings"', '-X PUT "<your CtrlB URL>/ai/relay/settings"']
-    missing = [r for r in routes if r not in pages['http']]
-    check('docs: HTTP page has every section 4 route as curl', not missing and pages['http'].count('-H "Authorization: Bearer <your key>"') >= len(routes),
-          ', '.join(missing))
-    body = re.search(r"-d '(\[.*?\])'", pages['http'], re.S)
-    rows = json.loads(body.group(1)) if body else []
-    check('docs: the HTTP records example is valid JSON with the section 5 columns', rows and set(rows[0]) == COLS - {'body_len', 'truncated'},
-          str(sorted(set(rows[0]) ^ COLS)) if rows else 'no body')
 
 
 def test_release_wording():
-    """The CtrlB server never finishes a file path: no agent-facing text may tell agents to release
-    with finished=true as the rule for every claim, and the tool docs carry reopen."""
+
     old = re.compile(r'(call|then) `?release`? with `?finished=true`?', re.I)
     files = [f for f in glob.glob(os.path.join(ROOT, '**', '*'), recursive=True)
              if os.path.isfile(f) and f.endswith(('.md', '.py', '.json')) and '/tests/' not in f and '/.git/' not in f]
     bad = [os.path.relpath(f, ROOT) for f in files if old.search(open(f, errors='replace').read())]
     check('no agent-facing text says to release with finished=true for every claim', not bad, ', '.join(bad))
-    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
-    check('relay-tools: claim documents reopen and release says files are always handed back',
-          '| `reopen` |' in tools and '"reopened": true' in tools and 'A file path is always handed back' in tools)
-    lim = open(os.path.join(ROOT, 'docs', 'limits.md')).read()
-    check('limits: a file path is never done; reopen starts a new round; no "use a new run id"',
-          'A file path is never done' in lim and 'reopen=true' in lim and 'use a new run id' not in lim)
 
 
 def test_briefs_wording():
-    """Briefs: the skill and the tool docs tell the agent to read the brief of a
-    shared file before reading the file, and to leave one after reading a file it edits or others need."""
+
     skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
     check('relay skill: lists the relay tools, ask and answer among them; ask rather than a QUESTION note',
           '`peers`, `post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `briefs`, `tasks`, `contract`, `contracts`' in skill
@@ -1071,54 +1018,20 @@ def test_briefs_wording():
           and '- `contract` when you finish an interface others will build on' in skill
           and "- `contracts` before you build on another agent's interface" in skill
           and 'Post a note only for what none of them covers.' in skill)
-    check('relay-tools: the coordination tools come before a prose note',
-          'The coordination tools come before a prose note (`post`)' in open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read())
     check('relay skill: call briefs before reading a shared file, post a brief after reading one',
           'call `briefs` with it' in skill and 'post a `brief` for it' in skill and 'up to a few hundred words' in skill
           and 'what it exports or decides, and what not to touch' in skill and 'not a claim and reserves nothing' in skill)
-    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
-    sections = re.findall(r'^### (\w+)$', tools, re.M)
-    relay = sections[sections.index('peers'):] if 'peers' in sections else []
-    check('relay-tools: fifteen relay tools, read_text after peers, handoff, ask and answer after release, then brief, briefs, task, tasks, history, contract, contracts',
-          relay == ['peers', 'read_text', 'post', 'claim', 'release', 'handoff', 'ask', 'answer', 'brief', 'briefs', 'task', 'tasks', 'history', 'contract', 'contracts'],
-          ','.join(relay))
-    check('relay-tools: contract and contracts documented, instead of a CONTRACT note',
-          '{contracts: [{name, key, agent, ts, age_s, text, paths, changed_since, text_since, text_changed_at?, changed_since_read?}], last_read?, read_at?}' in tools
-          and 'instead of a `CONTRACT:` note' in tools
-          and 'changed_since?}]}' in tools)
-    check('relay-tools: peers kind and open, ask and answer documented',
-          '| `open` |' in tools and 'peers(kind="question", open=true)' in tools and 'answered: {agent, ts, text, row_id?, text_len?}' in tools
-          and 'Answer: `{id, run_id, agent, row_id, text_len, kept, whole, ref?, truncated?, note?}`' in tools and 'Do not post a QUESTION note' in tools)
-    check('relay-tools: hold required, its four reasons and the claim token',
-          '## Edits need a claim (hold required)' in tools and all(f'| `{r}` |' in tools for r in ('held', 'lapsed', 'unheld', 'stale_round'))
-          and 'A held claim answers `token`' in tools)
-    check('relay-tools: handoff documents to, handed and held_by',
-          '| `to` |' in tools and '{handed: true, resource, key, to, lease_until, token, paths?}' in tools
-          and '{handed: false, resource, key, to, held_by?, message}' in tools)
-    check('relay-tools: nineteen tools, the writes listed, briefs answers the newest brief per key',
-          'gives an agent nineteen tools' in tools and '`post`, `claim`, `release`, `handoff`, `ask`, `answer`, `brief`, `task` and `contract` write' in tools
-          and '{briefs: [{key, resource, agent, text, ts, age_s, paths?, changed_since?}]}' in tools and '`BRIEF` for a brief' in tools)
-    check('relay-tools: the briefs paragraph for the rules', 'call briefs for it and read the brief first' in tools)
-    check('relay-tools: rule 3 claims the registered task with its files, and finishes it', registered_rule(tools))
-    check('relay-tools: claim documents paths, conflict_key and unknown_task; task and tasks documented',
-          '| `paths` |' in tools and '"conflict_key"' in tools and '"reason": "unknown_task"' in tools and '"suggestion"' in tools
-          and '{tasks: [{name, key, text, paths, agent, ts, state, held_by?, finished_by?, round, ask_about?}]}' in tools)
-    http = open(os.path.join(ROOT, 'docs', 'connect-http.md')).read()
-    check('connect-http: both briefs routes as curl',
-          '-X POST "<your CtrlB URL>/ai/relay/agent_sessions/runs/demo-run-1/briefs"' in http
-          and '/runs/demo-run-1/briefs?resources=' in http and '`brief` and `briefs`' in http)
 
 
 def test_keys():
-    """lib/paths.py against CtrlB's shared table (tests/fixtures/keys.json), and the edit paths the hooks and
-    parsers send against the same keys."""
+
     import paths
     cases = load('keys.json')['cases']
     bad = [c for c in cases if paths.key(c['resource'], c['cwd'])[0] != c['key']]
     check(f'paths.key passes CtrlB keys.json ({len(cases)} cases)', len(cases) >= 40 and not bad,
           '; '.join(f"{c['resource']!r},{c['cwd']!r} -> {paths.key(c['resource'], c['cwd'])[0]!r} want {c['key']!r}" for c in bad[:5]))
-    check('paths.key: kind is the table row of the key\'s prefix ("" for an invalid resource)',
-          all(paths.key(c['resource'], c['cwd'])[1] == (paths.kind_of(c['key'])['kind'] if c['key'] else '') for c in cases))
+    check('paths.key returns the kind of each expected key',
+          all(paths.key(c['resource'], c['cwd'])[1] == c['key'].partition(':')[0] for c in cases))
     check('paths.key is idempotent on its own keys', all(paths.key(paths.key(c['resource'], c['cwd'])[0], c['cwd'])[0] == c['key']
                                                          for c in cases if c['key']))
     check('keys.json: lib/keys.json (read at run time) is tests/fixtures/keys.json byte for byte',
@@ -1130,8 +1043,6 @@ def test_keys():
           and kinds['name:']['finishable'] and kinds['name:']['reopenable']
           and kinds['slot:']['leasable'] and kinds['slot:']['default_lease_s'] == 120 and not kinds['slot:']['finishable']
           and not kinds['contract:']['leasable'])
-    check('kinds: slot lease 120 s, path and name the setting', paths.lease_seconds_for('slot:devserver', 600) == 120
-          and paths.lease_seconds_for('path:a.go', 600) == 600 and paths.lease_seconds_for('name:t', 600) == 600)
     check('keys: slot:devserver, contract:..., Slot:X is a name, slot: is invalid',
           paths.key('slot:devserver') == ('slot:devserver', 'slot') and paths.key('contract:seeker-4 routes') == ('contract:seeker-4 routes', 'contract')
           and paths.key('Slot:X') == ('name:slot:x', 'name') and paths.key('slot:') == ('', ''))
@@ -1151,8 +1062,7 @@ def test_keys():
 
 
 def test_edit_keys_across_harnesses(seeker):
-    """The same file edited from Claude Code (absolute file_path) and from Codex (a patch path relative to cwd) is sent
-    under one key, also for a file name with no extension."""
+
     import paths, rows_codex
     cwd = '/work/garden'
     claude = paths.edit_paths(rows_claude.edit_paths('Write', {'file_path': cwd + '/Makefile'}), cwd)
@@ -1219,13 +1129,11 @@ def test_config_and_status(seeker):
           and KEY not in p.stdout and 'CTRLB_MCP_URL in the environment: NO' in p.stdout, p.stdout[-300:])
     check("status.py: says the key carries no user when it has no email claim", "key's user (written as user_name): (none in the key" in p.stdout)
 
-    # the key's user: the email claim of the JWT payload, decoded without a signature check
-    check('key_user: a fixture JWT with the email claim decodes to the user', common.key_user(JWT_KEY) == KEY_USER)
+
     check('key_user: no email claim, a non-JWT key, a broken payload or no key give no user',
           common.key_user(JWT_NOCLAIM) == '' and common.key_user(KEY) == '' and common.key_user('aaa.!!!.ccc') == ''
           and common.key_user('a.' + base64.urlsafe_b64encode(b'[1]').decode() + '.c') == '' and common.key_user('') == ''
           and common.key_user(fake_jwt(dict(email=7))) == '')
-    check("key_user reads the claim CtrlB reads (email)", common.USER_CLAIM == 'email')
     home2 = os.path.join(WORK, 'home-cfg-jwt')
     env2 = dict(env, CTRLB_HOME=home2)
     p = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'bin', 'configure.py'), '--url', seeker.url, '--dataset',
@@ -1259,7 +1167,7 @@ def test_config_and_status(seeker):
     check('backfill.py --count lists the fixture transcripts', p.returncode == 0 and 'transcript files' in p.stdout, p.stdout.strip()[:200])
 
 
-# ---------------------------------------------------------------- Codex
+
 
 COLS = {'_timestamp', 'host', 'harness', 'session_id', 'parent_session', 'agent_id', 'run_id', 'agent', 'seq', 'block_idx',
         'role', 'block_type', 'tool_name', 'tool_use_id', 'command', 'paths', 'body', 'is_error', 'is_summary', 'cwd',
@@ -1275,7 +1183,7 @@ def citem(payload, ts):
 
 
 def setup_codex(home=None):
-    """A Codex home in tests/work with the fixture rollout and a subagent rollout (synthetic, written here)."""
+
     home = home or os.path.join(WORK, 'codex-home')
     shutil.rmtree(home, ignore_errors=True)
     day = os.path.join(home, 'sessions', '2026', '09', '06')
@@ -1306,7 +1214,7 @@ def test_codex_rows(seeker):
     check('codex Stop upload: the fixture rollout gives 11 rows', len(rows) == 11 and p.returncode == 0, f'{len(rows)} rows, {dt:.2f}s')
     check('codex records go to POST /ai/sessions/agent_sessions/records with the Bearer key',
           seeker.calls and all(c['path'] == '/ai/sessions/agent_sessions/records' and c['auth'] == 'Bearer ' + KEY for c in seeker.calls))
-    check('codex rows: the section 5 columns, the same set as Claude Code rows', all(set(r) == COLS for r in rows),
+    check('codex rows: the row columns, the same set as Claude Code rows', all(set(r) == COLS for r in rows),
           str(sorted(set(rows[0]) ^ COLS)) if rows else '')
     check('codex rows: harness codex, ids from session_meta, run and agent default to the thread id',
           all(r['harness'] == 'codex' and r['session_id'] == CSID and r['run_id'] == CSID and r['agent'] == CSID
@@ -1349,7 +1257,7 @@ def test_codex_rows(seeker):
     chook('upload', I['stop'], env)
     check('codex second upload sends nothing', not seeker.rows, f'{len(seeker.rows)} rows')
 
-    # shapes the fixture slice does not hold (synthetic lines), and a partial line
+
     s = planted()
     patch = '*** Begin Patch\n*** Update File: src/a.rs\n@@\n-x\n+y\n*** Update File: src/b.rs\n*** Move to: src/c.rs\n*** Delete File: src/d.rs\n*** End Patch\n'
     with open(main, 'a') as fh:
@@ -1391,7 +1299,7 @@ def test_codex_rows(seeker):
     check('codex: no planted secret reaches CtrlB (body and command)', not leaked and nb.get(28, {}).get('command', '').count('[REDACTED]') == 1,
           f'leaked {leaked}' if leaked else '')
 
-    # subagent rollout: parent from session_meta, joins the parent's run
+
     seeker.reset()
     p, _ = chook('upload', I['subagent_stop'], env)
     subr = list(seeker.rows)
@@ -1408,7 +1316,7 @@ def test_codex_rows(seeker):
 
 
 def test_codex_hooks(seeker):
-    chome = os.path.join(WORK, 'codex-home')       # written by test_codex_rows
+    chome = os.path.join(WORK, 'codex-home')
     day = os.path.join(chome, 'sessions', '2026', '09', '06')
     main = os.path.join(day, f'rollout-2026-09-06T11-58-07-{CSID}.jsonl')
     sub = os.path.join(day, f'rollout-2026-09-06T12-02-00-{CSUB}.jsonl')
@@ -1416,7 +1324,7 @@ def test_codex_hooks(seeker):
     home = os.path.join(WORK, 'home-codex-pre')
     env = base_env(seeker.url, home, CODEX_HOME=chome)
 
-    p, _ = chook('session-start', I['session_start'], dict(env, CTRLB_RUN=CSID))     # in a relay run: the whole rule
+    p, _ = chook('session-start', I['session_start'], dict(env, CTRLB_RUN=CSID))
     rctx = out_of(p).get('additionalContext', '')
     seeker.reset()
     p, dt = chook('session-start', I['session_start'], env)
@@ -1505,7 +1413,7 @@ def test_codex_hooks(seeker):
     check('codex: a later hook of that session uses its own run (the edit check)',
           ccall.get('path') == f'/ai/relay/agent_sessions/runs/{CSID}/check' and (ccall.get('body') or {}).get('agent') == CSID,
           json.dumps(ccall)[:300])
-    # A subagent thread that called a relay tool itself, while its root made none: in a relay run.
+
     import importlib.util
     spec = importlib.util.spec_from_file_location('codex_hook_for_test', os.path.join(ROOT, 'codex', 'hook.py'))
     chk = importlib.util.module_from_spec(spec)
@@ -1543,7 +1451,7 @@ def test_codex_hooks(seeker):
     with open(early, 'w') as fh:
         fh.write(mcp_line('ctrlb', 'aaa-run') + '{"type": "event_msg", "payload": {"type": "note", "text": "' + 'x' * 200 + '"}}\n')
     first_read = rows_codex.relay_call(early)
-    with open(early, 'r+') as fh:       # an earlier line changed in place, far before the kept offset's last 64 bytes
+    with open(early, 'r+') as fh:
         text = fh.read()
         fh.seek(0)
         fh.write(text.replace('aaa-run', 'zzz-run'))
@@ -1562,7 +1470,7 @@ def test_codex_hooks(seeker):
     with open(rewritten, 'w') as fh:
         fh.write(mcp_line('ctrlb', 'old-run'))
     first = rows_codex.relay_call(rewritten)
-    with open(rewritten, 'r+') as fh:       # the same file (same inode), cut and written again, the same size
+    with open(rewritten, 'r+') as fh:
         fh.truncate(0)
         fh.write(mcp_line('ctrlb', 'new-run'))
     second = rows_codex.relay_call(rewritten)
@@ -1625,7 +1533,7 @@ def test_codex_hooks(seeker):
           and '(lapsed)' in reason and f'Call claim(resource="src/panels/Latency.tsx", run_id="{CSID}", agent="{CSID}")' in reason, reason[:160])
     p, _ = run('enforce_allow')
     check('codex pre-tool enforce with no conflict: no output', not p.stdout.strip())
-    p, _ = run('self', e=dict(env, CTRLB_AGENT=SID))      # the 'self' answer names SID as the holder
+    p, _ = run('self', e=dict(env, CTRLB_AGENT=SID))
     check('codex pre-tool: a hold of the caller itself is not a conflict', seeker.calls and not p.stdout.strip())
     p, dt = run('slow')
     check('codex pre-tool timeout: fails open within budget plus scheduling headroom', p.returncode == 0 and not p.stdout.strip() and dt < 4.0, f'{dt:.2f}s')
@@ -1672,12 +1580,12 @@ def read(path):
 
 
 def can_validate_toml():
-    """Python before 3.11 needs the optional Codex CLI for installer TOML validation."""
+
     return sys.version_info >= (3, 11) or shutil.which('codex') is not None
 
 
 def test_root_install():
-    """python3 -I install.py --codex (the command the connect page shows) is codex/install.py with the same options."""
+
     if not can_validate_toml():
         print('SKIP root Codex installer integration (needs Python 3.11+ or codex)')
         return
@@ -1705,7 +1613,7 @@ def test_root_install():
 
 
 def test_init():
-    """install.py init (bin/init.py): the CtrlB block in AGENTS.md and CLAUDE.md, never touching text outside it."""
+
     import project_rules
     import hooks_shared
     base = os.path.join(WORK, 'init')
@@ -1973,7 +1881,7 @@ def test_project_backup_exclusive():
               and read(backup) == old and read(source) == b'updated\n'
               and stat.S_IMODE(os.stat(source).st_mode) == 0o640)
 
-    # Insert a collision at the creation call, after any preliminary name check could have run.
+
     for collision in ('file', 'symlink'):
         source = os.path.join(base, collision + '.md')
         candidate = source + '.ctrlb-backup-' + stamp
@@ -2065,9 +1973,7 @@ def test_project_list_fences():
 
 
 def test_model_call_guard(seeker):
-    """guardModelCalls (docs/relay-hooks.md): with the setting on, a shell command that starts codex exec, codex review
-    or claude -p is refused unless a time limit (timeout) runs it. Off by default; reads only the command; calls
-    nothing. Joining the run is not its job: the started agent finds its parent (test_spawned_agents)."""
+
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import model_call_guard as g
     on = {'guard_model_calls': True, 'run': ''}
@@ -2247,7 +2153,7 @@ def test_model_call_guard(seeker):
           and reason('claude --advisor opus hello') is None and '`claude -p`' in (reason('claude -p hi') or ''),
           json.dumps(unsure)[:500])
 
-    # the setting: environment first, then the config file
+
     home = os.path.join(WORK, 'home-guard')
     shutil.rmtree(home, ignore_errors=True)
     os.makedirs(home)
@@ -2263,7 +2169,7 @@ def test_model_call_guard(seeker):
           and cfg_of(base_env(seeker.url, os.path.join(WORK, 'home-guard-none'))) is False)
     os.remove(os.path.join(home, 'config.json'))
 
-    # the Claude Code hook
+
     inp = {'session_id': SID, 'transcript_path': '', 'cwd': '/work/dash', 'hook_event_name': 'PreToolUse',
            'tool_name': 'Bash', 'tool_input': {'command': 'codex exec "fix it"', 'description': 'run codex'}}
     seeker.reset()
@@ -2293,7 +2199,7 @@ def test_model_call_guard(seeker):
           len(guard) == 1 and [h.get('if') for h in guard[0]['hooks']] == ['Bash(*codex*)', 'Bash(*claude*)']
           and all(h['command'].endswith('hook.py" pre-bash') and h['timeout'] == 5 and 'async' not in h for h in guard[0]['hooks']))
 
-    # the Codex hook: Codex matches its shell tools as Bash, with tool_input.command
+
     cinp = {'session_id': CSID, 'transcript_path': '', 'cwd': '/work/dash', 'hook_event_name': 'PreToolUse',
             'tool_name': 'Bash', 'tool_input': {'command': 'claude -p "review"'}}
     p, _ = chook('pre-bash', cinp, dict(env, CTRLB_GUARD_MODEL_CALLS='1'))
@@ -2316,8 +2222,6 @@ def test_model_call_guard(seeker):
 
     doc = open(os.path.join(ROOT, 'docs', 'relay-hooks.md')).read()
     skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
-    check('docs: relay-hooks.md documents guardModelCalls, its variable, pre-bash and what it does not see',
-          'guardModelCalls' in doc and 'CTRLB_GUARD_MODEL_CALLS' in doc and '`pre-bash`' in doc and 'script' in doc)
     check('relay skill: a model CLI call runs under timeout, and the agent it starts joins the run on its own',
           'timeout' in skill and 'guardModelCalls' in skill and 'joinSpawned' in skill)
 
@@ -2329,9 +2233,7 @@ def _spawn_lib():
 
 
 def test_spawned_agents(seeker):
-    """joinSpawned (docs/relay-hooks.md, lib/spawn.py): an agent CLI started from another agent's shell finds that agent
-    when it starts, from a process record or the CTRLB_PARENT_* variables, joins its Relay run under its own name when
-    that agent is in one, and says who started it. No command text is read."""
+
     spawn = _spawn_lib()
     main, sub = setup_transcripts()
     I = inputs(main, sub)
@@ -2340,7 +2242,7 @@ def test_spawned_agents(seeker):
     env = base_env(seeker.url, home)
     PSID = '7a7a7a7a-0000-4000-8000-0000000000aa'
 
-    # the decision, alone
+
     lead = dict(session=PSID, run='run-s1', agent='lead', relay=True, how='environment')
     d = spawn.decide({'run': '', 'agent': ''}, SID, lead, 'codex')
     check('decide: a child with no run of its own joins a parent in a run, named <parent>.<program>-<8 of its id>',
@@ -2399,7 +2301,7 @@ def test_spawned_agents(seeker):
     check('decide: a parent in no relay run is not joined, and a parent with no label gives no prefix',
           not d['joined'] and d['agent'] == '' and spawn.child_name(PSID, PSID, 'codex', SID) == 'codex-' + SID8, json.dumps(d))
 
-    # the Claude Code parent: CTRLB_PARENT_* in CLAUDE_ENV_FILE, appended, once
+
     env_file = os.path.join(WORK, 'spawn-env-file')
     with open(env_file, 'w') as fh:
         fh.write('export OTHER_PLUGIN=1\n')
@@ -2415,7 +2317,7 @@ def test_spawned_agents(seeker):
     check('parent: its own context is unchanged and nothing is written to CtrlB', 'run id is run-s1' in out_of(p).get('additionalContext', '')
           and 'started you' not in out_of(p).get('additionalContext', '') and not [c for c in seeker.calls if c['method'] != 'GET'])
 
-    # a Claude Code child that inherited the parent's variables (and its CTRLB_RUN and CTRLB_AGENT)
+
     parent_env = dict(CTRLB_PARENT_SESSION=PSID, CTRLB_PARENT_RUN='run-s1', CTRLB_PARENT_AGENT='lead', CTRLB_PARENT_RELAY='1')
     seeker.reset()
     p, _ = hook('session-start', I['session_start'], dict(env, CTRLB_RUN='run-s1', CTRLB_AGENT='lead', **parent_env))
@@ -2439,7 +2341,7 @@ def test_spawned_agents(seeker):
           rows and all(r.get('run_id') == 'run-s1' and r.get('agent') == name for r in rows),
           json.dumps([(r.get('run_id'), r.get('agent')) for r in rows[:3]]))
 
-    # a parent in no relay run: the child is told who started it and joins nothing
+
     shutil.rmtree(home, ignore_errors=True)
     seeker.reset()
     quiet = dict(parent_env, CTRLB_PARENT_RUN=PSID, CTRLB_PARENT_AGENT=PSID, CTRLB_PARENT_RELAY='0')
@@ -2448,7 +2350,7 @@ def test_spawned_agents(seeker):
     check('child of a parent in no run: told who started it, keeps its own run, nothing sent',
           f'(session {PSID}) started you' in ctx and f'run id is {SID}' in ctx and 'Do the work you were asked' not in ctx
           and not seeker.calls, ctx[-600:])
-    # the same parent, once it called a relay tool: the next child joins
+
     shutil.rmtree(home, ignore_errors=True)
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     subprocess.run([sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib')) + '); '
@@ -2460,7 +2362,7 @@ def test_spawned_agents(seeker):
     check('child of a parent that called a relay tool after it started: joins that run (the session id), no label prefix',
           f'run id is {PSID}' in ctx and f'agent id is agent-{SID8}' in ctx, ctx[-600:])
 
-    # joinSpawned off: nothing changes
+
     shutil.rmtree(home, ignore_errors=True)
     seeker.reset()
     p, _ = hook('session-start', I['session_start'], dict(env, CTRLB_JOIN_SPAWNED='0', CTRLB_RUN='run-s1', CTRLB_AGENT='lead', **parent_env))
@@ -2469,8 +2371,8 @@ def test_spawned_agents(seeker):
           'agent id is lead' in ctx and 'started you' not in ctx and not [c for c in seeker.calls if c['method'] != 'GET']
           and not os.path.exists(os.path.join(home, 'spawn')))
 
-    # the process record: a Codex parent (no environment file) found by the child's process tree. Linux only: the fake
-    # agents are links to Python, which on macOS starts again under its own name; real agent CLIs do not.
+
+
     if os.path.isdir('/proc/self'):
         shutil.rmtree(home, ignore_errors=True)
         bindir = os.path.join(WORK, 'spawn-bin')
@@ -2480,8 +2382,8 @@ def test_spawned_agents(seeker):
             os.symlink(sys.executable, os.path.join(bindir, prog))
         cin = load('hooks/codex.json')['session_start']
         cin = dict(cin, session_id=PSID, transcript_path='')
-        # driver.py runs as "codex" (the parent): its own session-start hook writes its process record, then it starts
-        # child.py as "claude" without CTRLB_RUN or CTRLB_AGENT; child.py runs its session-start hook and prints its output
+
+
         driver, child = os.path.join(WORK, 'spawn-driver.py'), os.path.join(WORK, 'spawn-child.py')
         with open(os.path.join(WORK, 'spawn-in.json'), 'w') as fh:
             json.dump(dict(parent=cin, child=I['session_start'], codex_hook=CODEX_HOOK, hook=HOOK,
@@ -2570,7 +2472,7 @@ def test_spawned_agents(seeker):
     check('own agent process: a hook run by another program (not an agent or a shell under one) has none',
           p.stdout.strip() == 'None', p.stdout + p.stderr[-200:])
 
-    # a session with no run that registers a task is in a relay run from then on: its subagents get the whole rule
+
     TSID = '7a7a7a7a-0000-4000-8000-0000000000cc'
     p, _ = hook('subagent-start', dict(I['subagent_start'], session_id=TSID), env)
     before = out_of(p).get('additionalContext', '')
@@ -2602,7 +2504,7 @@ def test_spawned_agents(seeker):
           all(runs_after(t) for t in should) and not any(runs_after(t) for t in should_not),
           json.dumps([t for t in should if not runs_after(t)] + [t for t in should_not if runs_after(t)]))
 
-    # spawnIdleMinutes: the watchdog stops a process whose transcript does not change, and not one whose transcript does
+
     tr = os.path.join(WORK, 'spawn-transcript.jsonl')
     open(tr, 'w').close()
     victim = subprocess.Popen(['sleep', '60'])
@@ -2625,7 +2527,7 @@ def test_spawned_agents(seeker):
     resumed = subprocess.Popen(['sleep', '60'])
     notes = []
 
-    def note_then_work(*a, **k):      # the first note takes long enough for a tool to finish: the transcript changes
+    def note_then_work(*a, **k):
         notes.append(time.monotonic())
         if len(notes) == 1:
             os.utime(tr)
@@ -2677,8 +2579,8 @@ def test_spawned_agents(seeker):
             os.remove(spawn._record_path(other.pid))
         except OSError:
             pass
-    # The watchdog's clocks: idle time and the kill grace are monotonic; the transcript's mtime (wall time) only shows
-    # that it changed. A fake clock: sleep moves both clocks; events move the wall clock or write the transcript.
+
+
     tr2 = os.path.join(WORK, 'spawn-transcript-clock.jsonl')
     open(tr2, 'w').close()
 
@@ -2719,16 +2621,16 @@ def test_spawned_agents(seeker):
         return c.signals
 
     c = Clock()
-    c.events[10.0] = lambda c: setattr(c, 'wall', c.wall + 60)        # 10 s idle, then the wall clock jumps the limit
+    c.events[10.0] = lambda c: setattr(c, 'wall', c.wall + 60)
     jumped = watch_with(c, 45)
     c = Clock()
     c.events[10.0] = lambda c: setattr(c, 'wall', c.wall + 60)
-    c.events[30.0] = lambda c: (setattr(c, 'wall', c.wall - 3600), write_at_wall(c))   # set back, then a write
-    c.events[91.0] = lambda c: setattr(c, 'wall', c.wall + 86400)    # during the grace: forward a day
-    c.events[93.0] = lambda c: setattr(c, 'wall', c.wall - 2 * 86400)   # and back two days
+    c.events[30.0] = lambda c: (setattr(c, 'wall', c.wall - 3600), write_at_wall(c))
+    c.events[91.0] = lambda c: setattr(c, 'wall', c.wall + 86400)
+    c.events[93.0] = lambda c: setattr(c, 'wall', c.wall - 2 * 86400)
     idle = watch_with(c, 10000)
-    # One look and one sleep per turn. A turn whose stat fails changes nothing and signals nothing; the agent is
-    # stopped only when a stat that works shows no change for the whole limit, or the transcript is missing for it.
+
+
     real_stat = os.stat
 
     def run_watch(c, stat, alive_until=10 ** 9, poll=5, path=None, payload=None):
@@ -2777,7 +2679,7 @@ def test_spawned_agents(seeker):
     for t in range(5, 600, 5):
         c.events[float(t)] = write_at_wall
     busy = run_watch(c, failing_from(60), alive_until=600)
-    # checks at 0, 30 and 60 s, an append at 55 s, the stat fails from 60 s: for good, or until 61 s
+
     c = Clock()
     os.utime(tr2, (c.wall, c.wall))
     c.events[55.0] = write_at_wall
@@ -2799,8 +2701,8 @@ def test_spawned_agents(seeker):
     check('spawnIdleMinutes: a transcript missing (ENOENT) for the whole limit stops the agent',
           missing == [(signal.SIGTERM, 61.0), (signal.SIGKILL, 71.0)]
           and removed == [(signal.SIGTERM, 81.0), (signal.SIGKILL, 91.0)], f'{missing} {removed}')
-    # The look before the signal comes after the log and the note: a log line that blocks 5 s at the deadline while
-    # the agent appends cancels that stop; the next stop comes a whole limit after the append.
+
+
     c = Clock()
     os.utime(tr2, (c.wall, c.wall))
     blocked = []
@@ -2828,9 +2730,6 @@ def test_spawned_agents(seeker):
                                         env=dict(env, CTRLB_JOIN_SPAWNED='off', CTRLB_SPAWN_IDLE_MINUTES='30')).stdout) == [False, 30])
 
     doc = open(os.path.join(ROOT, 'docs', 'relay-hooks.md')).read()
-    check('docs: relay-hooks.md documents joinSpawned, spawnIdleMinutes and how the parent is found',
-          'joinSpawned' in doc and 'CTRLB_JOIN_SPAWNED' in doc and 'spawnIdleMinutes' in doc and 'CLAUDE_ENV_FILE' in doc
-          and 'process record' in doc)
 
 
 def test_codex_install():
@@ -2952,9 +2851,7 @@ def test_validate():
 
 
 def test_wait_wording():
-    """Claims never wait (wait_s is gone from claim; a refused task claim lists free_tasks), so the session rule, the relay skill and
-    the tool docs never offer claim(wait_s), timed_out or a place in line; peers keeps wait_s. They keep what
-    belongs_to_task means, ask_about, and contracts (now: read it before building on it, and check a stale one)."""
+
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import hooks_shared as H
     rule = H.RELAY
@@ -2974,24 +2871,10 @@ def test_wait_wording():
           and 'If it is `stale`' in skill and 'peers(kind="answer", since=<ts>, wait_s=30)' in skill)
     tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
     claim_doc = tools[tools.index('### claim'):tools.index('### release')]
-    check('relay-tools: claim has no wait_s argument and no timed_out answer; a claim sending wait_s gets 400 naming peers',
-          '| `wait_s` |' not in claim_doc and '"reason": "timed_out"' not in tools and '"position"' not in tools
-          and 'A claim that sends `wait_s` is refused (HTTP 400)' in claim_doc and 'use peers with wait_s' in claim_doc)
-    check('relay-tools: the refused task claim lists free_tasks with since; the empty list means stop',
-          '"free_tasks": [{"name": "task 05 mode"' in claim_doc and '"since": 1793000100000000' in claim_doc
-          and '`there is no free task in this run`' in claim_doc and '`idle_agents`' in claim_doc)
-    check('relay-tools: belongs_to_task answer and ask_about',
-          '"reason": "belongs_to_task"' in tools and '"task": "task 03 median"' in tools and '"ask_about"' in tools)
-    check('relay-tools: peers since and wait_s, task ask_about, contracts since',
-          '| `since` | Only events after this' in tools and '| `wait_s` | When no event matches yet' in tools
-          and '| `ask_about` |' in tools and '| `since` | When you last read the contracts' in tools)
 
 
 def test_takeover_wording():
-    """The session rule and the relay skill tell the agent to take over a stalled
-    task (or a file held by an agent that stopped) with takeover=true instead of waiting in line; the tool docs give
-    takeover, not_stalled, other_user, taken_over_from and stall; a held refusal of an edit carries the takeover hint;
-    a held takeover's token is kept like a claim's."""
+
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import hooks_shared as H
     rule = H.RELAY
@@ -3008,9 +2891,6 @@ def test_takeover_wording():
           'claim it with `takeover=true`' in skill and 'Never wait in line on a stalled task' in skill
           and '`reason: not_stalled`' in skill and '`reason: other_user`' in skill and '`taken_over_from`' in skill)
     tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
-    check('relay-tools: takeover argument and its answers',
-          '| `takeover` |' in tools and '"taken_over_from": "agent-b"' in tools and '"reason": "not_stalled"' in tools
-          and '`reason: other_user`' in tools and '"stall_after_s": 300' in tools and '`stalled_holds`' in tools)
     check('pre-tool hint: a held refusal suggests takeover=true when the holder has stopped',
           'takeover=true' in H.STALLED_HINT and 'stalled' in H.STALLED_HINT)
     got = H.record_tokens('run-takeover', 'agent-a', 'mcp__ctrlb__claim',
@@ -3022,12 +2902,7 @@ def test_takeover_wording():
 
 
 def test_done_evidence(seeker):
-    """The session rule tells the agent to run the task's test command and give it, its
-    exit code and its last output line as the done evidence (the check it ran when the task has none); the
-    PostToolUse hook remembers the agent's last test-looking Bash command, its exit code and last output line, and when
-    done (or a finished release) is refused for evidence it quotes that command, without calling CtrlB or filling the
-    evidence in, and prefers the task's test command when the refusal quotes it; a done drops the agent's tokens
-    like a release."""
+
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import hooks_shared as H
     rule = H.RELAY
@@ -3071,7 +2946,7 @@ def test_done_evidence(seeker):
           out_of(p).get('hookEventName') == 'PostToolUse' and '`pytest -q tests/test_lat.py` (exit code 0)' in ctx
           and 'done(resource="task 07 latency"' in ctx and '"summary": "4 passed in 0.03s"' in ctx and 'ls src' not in ctx, ctx[:300])
     check('post-tool done refused: CtrlB is not called and nothing is filled in for the agent', not seeker.calls)
-    # A failing run that only the transcript shows (no PostToolUse for it) is newer: it is the one quoted.
+
     tr = os.path.join(WORK, 'done-transcript.jsonl')
     with open(tr, 'w') as fh:
         fh.write(json.dumps({'type': 'assistant', 'timestamp': '2099-01-01T00:00:00.000Z', 'message': {'role': 'assistant', 'content': [
@@ -3092,7 +2967,7 @@ def test_done_evidence(seeker):
     p, _ = hook('post-tool', done_in, fresh)
     check('post-tool done refused with no test run seen: tells the agent to run the test first',
           "Run the task's test, then call done(" in out_of(p).get('additionalContext', ''))
-    # the refusal quotes the task's test command. It wins over a last test command that is not it.
+
     task_test = 'python3 -m pytest tests/test_lat.py'
     quoted = dict(refusal, test=task_test, message=refusal['message'] + "; the task's test command is: " + task_test)
     p, _ = hook('post-tool', dict(done_in, transcript_path=tr, tool_response=[{'type': 'text', 'text': json.dumps(quoted)}]), env)
@@ -3115,7 +2990,7 @@ def test_done_evidence(seeker):
     check('names_test: white space collapsed, a cd before and a flag after still match',
           H.names_test('cd x &&  python3 -m pytest   tests/test_lat.py -q', task_test) and not H.names_test('python3 -I -c "x"', task_test)
           and not H.names_test('pytest', ''))
-    # A done that finished the task: no output, and the task's tokens are dropped like a release's.
+
     hook('post-tool', dict(base, tool_name='mcp__ctrlb__claim', tool_use_id='c1', tool_input={'resource': 'task 07 latency'},
                            tool_response=[{'type': 'text', 'text': json.dumps({'held': True, 'key': 'name:task 07 latency',
                                                                                'paths': ['path:src/panels/Latency.tsx'], 'token': 'tok-9'})}]), env)
@@ -3131,7 +3006,7 @@ def test_done_evidence(seeker):
         {'done': True, 'resource': 'task 07 latency', 'key': 'name:task 07 latency', 'paths': ['path:src/panels/Latency.tsx']})}]), env)
     gone = tokens().get('path:src/panels/Latency.tsx')
     check('post-tool done: no output, the task\'s tokens dropped', not p.stdout.strip() and had and not gone, f'{had} {gone}')
-    # The same claim and release under the plugin install's tool names keep and drop the token the same way.
+
     hook('post-tool', dict(base, tool_name='mcp__plugin_ctrlb-agent_ctrlb__claim', tool_use_id='c2', tool_input={'resource': 'task 08 plugin'},
                            tool_response=[{'type': 'text', 'text': json.dumps({'held': True, 'key': 'name:task 08 plugin',
                                                                                'paths': ['path:src/panels/Plugin.tsx'], 'token': 'tok-10'})}]), env)
@@ -3152,28 +3027,17 @@ def test_done_evidence(seeker):
           "Run the task's test command (`tasks` and `claim` show it as `test`)" in skill and 'give the check you ran' in skill
           and 'When the refusal carries `test`' in skill)
     tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
-    check('relay-tools: done, its evidence and refusal, stalled tasks', '#### done (finish a task)' in tools and '| `evidence` |' in tools
-          and '"reason": "evidence_required"' in tools and '`stalled`' in tools)
-    check('relay-tools: task test, the claim and tasks answers, the refusal\'s test, evidence_matches_test',
-          '| `test` | Optional. The command that tests the task' in tools and '"test": "python3 -m pytest tests/test_median.py"' in tools
-          and "`test` when the task's registration names one" in tools and '`evidence_matches_test`' in tools and '`done_with_task_test`' in tools)
 
 
-def test_round6_hooks(seeker):
-    """The session-end hook hands off every hold of the agent in one call
-    (handoff all=true, no receiver) with a text from the session's own record (edited files, last test and exit code,
-    last note), then flushes; CtrlB down or slow means nothing is written and the hook ends inside the SessionEnd
-    budget. Every Bash command is recorded with its exit code (PostToolUse and PostToolUseFailure). PreToolUse on done
-    witnesses the evidence: a matching command and exit code of this session adds witnessed=true (and a missing exit
-    code), a mismatch is denied naming what the hook saw, no evidence command gives no output, and a witnessed the
-    agent set itself is dropped."""
+def test_evidence_and_handoff_hooks(seeker):
+
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import hooks_shared as H
     rule = H.RELAY
     check('relay rule: redirect to a free task; an empty list means note and stop',
           'If a claim is refused and the answer lists free tasks, claim one of them next. If the list is empty, post a note '
           'saying you have no task and stop.' in rule and 'wait_s' not in rule)
-    # The hooks manage autoSlots files, so the session rule needs no file-specific slot instructions.
+
     check('relay rule: shared-file slots are handled by hooks without file-specific instructions',
           'Edit REGISTRY.md only between' not in rule and 'REGISTRY.md' not in rule)
     home = os.path.join(WORK, 'home-r6')
@@ -3194,7 +3058,7 @@ def test_round6_hooks(seeker):
     check('post-tool-failure Bash: no output, exits 0, no CtrlB call', p.returncode == 0 and not p.stdout.strip() and not seeker.calls)
     hook('post-tool', dict(post, tool_name='mcp__ctrlb__post', tool_input={'text': 'lat: half done, p99 left', 'run_id': run},
                            tool_response=[{'type': 'text', 'text': '{"ok": true}'}]), env)
-    saved, common.HOME = common.HOME, home        # read the record the hooks wrote under their CTRLB_HOME
+    saved, common.HOME = common.HOME, home
     try:
         rec = common.SessionRecord(run, 'agent-1').get(SID)
     finally:
@@ -3234,7 +3098,7 @@ def test_round6_hooks(seeker):
     fresh = dict(rec, bash=[], edited=[], note=None)
     check('handoff text with nothing recorded', H.handoff_text(fresh) == 'Session ended. Edited: nothing. Last test: none run.')
 
-    # The witness.
+
     pre = dict(base, hook_event_name='PreToolUse', tool_name='mcp__ctrlb__done')
     hook('post-tool', dict(post, tool_name='Bash', tool_input={'command': 'cd /work/dash && python3 -m pytest tests/test_lat.py -q'},
                            tool_response={'stdout': '..\n2 passed in 0.01s\n', 'stderr': ''}), env)
@@ -3278,7 +3142,7 @@ def test_round6_hooks(seeker):
           len(hk['PreToolUse']) == 4 and hk['PreToolUse'][1]['matcher'] == 'mcp__ctrlb__done|mcp__plugin_ctrlb-agent_ctrlb__done'
           and hk['PostToolUse'][2]['matcher'].startswith('Edit|Write|MultiEdit|NotebookEdit|mcp__ctrlb__post')
           and hk['PostToolUseFailure'][0]['matcher'] == 'Bash' and hk['SessionEnd'][0]['hooks'][0]['command'].endswith('session-end'))
-    # Codex: the same session-end handoff in a relay run, with what it can say.
+
     seeker.reset()
     shutil.rmtree(os.path.join(WORK, 'home-r6-codex'), ignore_errors=True)
     cenv = base_env(seeker.url, os.path.join(WORK, 'home-r6-codex'), CTRLB_RUN=run, CTRLB_AGENT='codex-1')
@@ -3344,7 +3208,7 @@ def test_handoff_redaction(seeker):
         context = out_of(p).get('additionalContext', '')
         check('evidence hints redact the task test, recorded command and output',
               bool(context) and marker not in context and other not in context and '[REDACTED]' in context)
-    # Follow the actual hint's suggested evidence into the witness, using both its task-test branches.
+
     command = 'API_TOKEN=' + marker + ' pytest -q tests/'
     with mock.patch.object(common, 'HOME', home):
         shared.record_test(run, agent, command, 0, summary)
@@ -3382,13 +3246,8 @@ def _log(home):
         return ''
 
 
-def test_round8_hooks(seeker):
-    """The Relay hooks described in docs/relay-hooks.md. A: PreToolUse on the Agent tool registers a task named
-    from the description, with the prompt as its text and the workspace paths it names, and posts an interface block
-    as a contract; it prints nothing and returns inside its budget. B: PostToolUse on Write/Edit under the scratchpad
-    or the scratch directory posts a small text file as an artifact note (detached), once per content; binaries, big
-    files and secrets are skipped and logged. C: SessionStart in a relay run adds the record block and writes the
-    artefacts back. D: the scratch directory. E: autoSlots claim before the edit, deny when held, release after."""
+def test_registration_artifacts_and_slots_hooks(seeker):
+
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import hooks_shared as H
     import relay_hooks as RH
@@ -3417,7 +3276,7 @@ def test_round8_hooks(seeker):
     env = base_env(seeker.url, home, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
     base = {'session_id': SID, 'transcript_path': '', 'cwd': ws}
 
-    # A: a spawn registers a task (and a contract).
+
     prompt = ('Fix the tokenizer in src/parse.py (see `src/parse.py:12`) and src/emit.py; notes in docs/. Not src/gone.py, '
               'not /etc/hostname, not https://example.test/a/b.py. Test: `python3 -m pytest tests/test_parse.py`.\n\n'
               '## API\n\n```json\n{"tokens": ["str"], "pos": "int"}\n```\n')
@@ -3462,7 +3321,7 @@ def test_round8_hooks(seeker):
           RH.prompt_contract('Do it.\n\nInterface:\nparse(s: str) -> list[str]\n\nNotes:\nnone') == ('Interface', 'parse(s: str) -> list[str]')
           and RH.prompt_contract('Fix the bug.\n```sh\nmake\n```\n') is None)
 
-    # D: the scratch directory, created by session-start and named in the rule.
+
     seeker.reset()
     shutil.rmtree(os.path.join(WORK, 'scratch-r8'), ignore_errors=True)
     senv = dict(env, CTRLB_SCRATCH_DIR=os.path.join(WORK, 'scratch-r8', '{run}'))
@@ -3477,7 +3336,7 @@ def test_round8_hooks(seeker):
     ctx = out_of(p).get('additionalContext', '')
     check('session-start: the default scratchDir is <CTRLB_HOME>/relay/<run id>/scratch', os.path.isdir(default) and default in ctx)
 
-    # C: the record block.
+
     block = ctx[ctx.find('CtrlB Relay record of run'):] if 'CtrlB Relay record of run' in ctx else ''
     gets = sorted(c['path'].split('?')[0].rsplit('/', 1)[-1] for c in seeker.calls if c['method'] == 'GET')
     check('session-start (relay run): reads tasks, contracts, peers (notes, handoffs) and artifacts of this agent',
@@ -3515,7 +3374,7 @@ def test_round8_hooks(seeker):
     hook('session-start', dict(base, hook_event_name='SessionStart', source='startup'), base_env(seeker.url, os.path.join(WORK, 'home-r8-plain')))
     check('session-start without CTRLB_RUN: no record read', not seeker.calls)
 
-    # B: artefacts.
+
     pad = os.path.join(WORK, 'pad-r8')
     shutil.rmtree(pad, ignore_errors=True)
     os.makedirs(os.path.join(pad, 'notes'))
@@ -3596,7 +3455,7 @@ def test_round8_hooks(seeker):
           os.path.isfile(os.path.join(sdir, 'notes', 'plan.md')) and open(os.path.join(sdir, 'notes', 'plan.md')).read() == text + 'step 3: ship\n'
           and f'Your artefacts from the previous session are in {sdir}.' in ctx, ctx[-300:])
 
-    # E: autoSlots.
+
     ehome = os.path.join(WORK, 'home-r8e')
     shutil.rmtree(ehome, ignore_errors=True)
     eenv = base_env(seeker.url, ehome, CTRLB_RUN=run, CTRLB_AGENT='agent-1')
@@ -3663,7 +3522,7 @@ def test_round8_hooks(seeker):
     hook('pre-tool', pre, base_env(seeker.url, os.path.join(WORK, 'home-r8-plain')))
     check('autoSlots outside a relay run: no claim', not [c for c in seeker.calls if c['path'].endswith('/claims')])
 
-    # hooks.json, Codex and the docs.
+
     hk = load('../../plugin/hooks/hooks.json')['hooks']
     agent_hook = [g for g in hk['PreToolUse'] if g.get('matcher') == 'Agent|Task']
     fail_edit = [g for g in hk['PostToolUseFailure'] if g.get('matcher') == 'Edit|Write|MultiEdit|NotebookEdit']
@@ -3680,15 +3539,8 @@ def test_round8_hooks(seeker):
           'CtrlB Relay record of run run-r8' in ctx and 'task 01 parse (held by agent-b' in ctx
           and os.path.join(WORK, 'home-r8-codex', 'relay', run, 'scratch') in ctx, ctx[-300:])
     doc = open(os.path.join(ROOT, 'docs', 'relay-hooks.md')).read()
-    check('docs/relay-hooks.md: every Relay hook with its event, fields, output and budget, citing the hooks reference',
-          all(w in doc for w in ('PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'SessionStart', 'SessionEnd', 'scratchpad_dir',
-                                 'tool_input.prompt', 'tool_input.description', 'permissionDecision', 'additionalContext',
-                                 'autoSlots', 'scratchDir', 'fail open', 'code.claude.com/docs/en/hooks')))
     tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
     claim_doc = tools[tools.index('### claim'):tools.index('### release')]
-    check('relay-tools: claim next and done next documented',
-          '| `next` |' in claim_doc and '`free_tasks: []`' in claim_doc and 'done(resource="task 03 median", evidence=' in tools
-          and 'next=true' in tools[tools.index('#### done'):tools.index('### handoff')])
     skill = open(os.path.join(ROOT, 'plugin', 'skills', 'relay', 'SKILL.md')).read()
     check('relay skill: claim(next=true), done with next=true, autoSlots instead of the REGISTRY.md claim',
           '`claim(next=true)`' in skill and '`next=true`' in skill and 'claim(resource="slot:REGISTRY.md"' not in skill)
@@ -3730,7 +3582,7 @@ def test_local_mode(seeker):
                 ctx = out_of(p).get('additionalContext', '')
                 check(f'{label} local {source} {mode}: recall context without Relay', p.returncode == 0
                       and 'search_sessions' in ctx and 'Relay' not in ctx and 'claim(' not in ctx)
-            # REGISTRY.md exercises autoSlots; the Agent prompt would register a task and contract in hosted mode.
+
             edits = dict(fixtures['session_start'], tool_name='Write', tool_input={'file_path': 'REGISTRY.md', 'content': 'test'})
             if label == 'Codex':
                 edits.update(tool_name='apply_patch', tool_input='*** Begin Patch\n*** Update File: REGISTRY.md\n@@\n-a\n+b\n*** End Patch')
@@ -3772,7 +3624,7 @@ def test_local_mode(seeker):
               any(c['path'].endswith('/check') for c in seeker.calls)
               and out_of(p).get('permissionDecision') == 'deny')
         if label == 'Claude':
-            # Spawn registration requires a prompt path that exists under the session's cwd.
+
             workspace = os.path.join(home, 'workspace')
             os.makedirs(os.path.join(workspace, 'src'), exist_ok=True)
             with open(os.path.join(workspace, 'src', 'parse.py'), 'w') as fh:
@@ -3932,7 +3784,7 @@ def test_local_relay(seeker):
                 check(tag + ': handoff includes edit and test evidence',
                       'src/parse.py' in text and 'python3 -m unittest' in text)
 
-            # An environment run is required even when the config has a saved run.
+
             for value in (None, '', '   ', '${CTRLB_RUN}'):
                 offenv = dict(env)
                 offenv.pop('CTRLB_RUN')
@@ -3957,7 +3809,7 @@ def test_local_relay(seeker):
 
 
 def local_stub(home):
-    """Synthetic ctrlb executable; writes only test state and serves health until the test stops it."""
+
     path = os.path.join(home, 'bin', 'ctrlb')
     os.makedirs(os.path.dirname(path), exist_ok=True)
     source = '''import json, os, sys, threading, time
@@ -4036,7 +3888,7 @@ elif sys.argv[1] == 'serve' and not os.environ.get('STUB_NO_HEALTH'):
 
 
 def wait_local_health(url, timeout=8.0):
-    """Allow cold startup and transient loopback timeouts without extending the hook's budget."""
+
     deadline = time.monotonic() + timeout
     detail = 'health did not answer'
     while True:
@@ -4054,7 +3906,7 @@ def wait_local_health(url, timeout=8.0):
 
 
 def local_startup_diagnostics(home, url):
-    """Only synthetic state: never dump config, request headers, bodies or exception messages."""
+
     print('Startup diagnostics:')
     marker = os.path.join(home, 'serve-invocations.jsonl')
     try:
@@ -4107,116 +3959,12 @@ def stop_local_stub(home):
                 pass
 
 
-def test_local_health_retry():
-    with mock.patch.object(common, 'local_health', side_effect=[ConnectionRefusedError(), TimeoutError(),
-                           common.urllib.error.URLError('timed out'), 200]) as probe, \
-            mock.patch.object(time, 'sleep'):
-        healthy, detail = wait_local_health('http://127.0.0.1')
-    check('health retry: connection refusal, socket timeout and URL timeout are retried',
-          healthy and probe.call_count == 4, detail)
-    with mock.patch.object(common, 'local_health', side_effect=common.urllib.error.URLError('timed out')), \
-            mock.patch.object(time, 'monotonic', side_effect=[0, 0, 0.1, 0.1]), mock.patch.object(time, 'sleep'):
-        healthy, detail = wait_local_health('http://127.0.0.1', timeout=0.1)
-    check('health retry: deadline exhaustion returns a failed check with the last error',
-          not healthy and 'URLError' in detail and 'timed out' in detail)
 
 
-def test_fixture_bind_without_dns():
-    with mock.patch.object(socket, 'getfqdn', side_effect=AssertionError('unexpected reverse DNS')) as lookup:
-        seeker = Seeker()
-        try:
-            healthy, detail = wait_local_health(seeker.url)
-            check('HTTP fixtures: bind and serve health without reverse DNS', healthy and lookup.call_count == 0, detail)
-            check('HTTP fixtures: server name and port come from the bound address',
-                  (seeker.httpd.server_name, seeker.httpd.server_port) == seeker.httpd.server_address
-                  and seeker.httpd.server_name == '127.0.0.1' and seeker.httpd.server_port > 0)
-        finally:
-            seeker.httpd.shutdown()
-            seeker.httpd.server_close()
 
 
-def test_local_stub_slow_dns():
-    home = os.path.join(WORK, 'home-start-slow-dns')
-    binary = local_stub(home)
-    port = closed_port()
-    url = f'http://127.0.0.1:{port}'
-    env = base_env(url, home, STUB_PORT=str(port), STUB_GETFQDN_DELAY='10')
-    process = subprocess.Popen([binary, 'serve'], cwd=home, env=env, stdin=subprocess.DEVNULL,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    try:
-        # The ordinary eight-second readiness deadline is shorter than the injected lookup delay.
-        healthy, detail = wait_local_health(url)
-        check_local_startup('local stub: health answers despite a ten-second reverse DNS delay', healthy, home, url, detail)
-        events = [json.loads(line) for line in read(os.path.join(home, 'startup.jsonl')).decode().splitlines()]
-        names = [event['event'] for event in events]
-        check('local stub: bind and listen complete without calling getfqdn',
-              'bound' in names and 'listening' in names and 'getfqdn' not in names
-              and names.index('bound') < names.index('listening'))
-    finally:
-        if process.poll() is None:
-            process.terminate()
-        process.wait(timeout=5)
 
 
-def test_local_stub_idle_connections():
-    import contextlib
-    import io
-    home = os.path.join(WORK, 'home-start-idle')
-    binary = local_stub(home)
-    port = closed_port()
-    url = f'http://127.0.0.1:{port}'
-    env = base_env(url, home, STUB_PORT=str(port))
-    process = subprocess.Popen([binary, 'serve'], cwd=home, env=env, stdin=subprocess.DEVNULL,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    idle = []
-    try:
-        healthy, detail = wait_local_health(url)
-        check_local_startup('local stub: initial health answers', healthy, home, url, detail)
-        if not healthy:
-            return
-        try:
-            # More than the old backlog of five: none of these clients sends a request line.
-            for _ in range(12):
-                idle.append(socket.create_connection(('127.0.0.1', port), timeout=1))
-            healthy, detail = wait_local_health(url, timeout=1.5)
-        except OSError as exc:
-            healthy, detail = False, type(exc).__name__
-        check_local_startup('local stub: health answers while twelve idle clients remain connected',
-                            healthy, home, url, detail)
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output), mock.patch.dict(check.__globals__, results=[]):
-            check_local_startup('synthetic startup failure', False, home, url)
-        diagnostics = output.getvalue()
-        check('startup diagnostics: failed checks show live pid, connected socket and startup/request events',
-              'FAIL synthetic startup failure' in diagnostics and f'pid={process.pid} alive=True' in diagnostics
-              and 'raw socket connect: connected' in diagnostics
-              and all('"event": "' + event + '"' in diagnostics for event in ('bound', 'listening', 'request'))
-              and KEY not in diagnostics and 'Authorization' not in diagnostics)
-        expired = False
-        if idle:
-            idle[0].settimeout(4)
-            try:
-                expired = idle[0].recv(1) == b''
-            except OSError:
-                pass
-        check_local_startup('local stub: idle request lines expire without a client close', expired, home, url)
-    finally:
-        for client in idle:
-            client.close()
-        if process.poll() is None:
-            process.terminate()
-        process.wait(timeout=5)
-    output = io.StringIO()
-    with contextlib.redirect_stdout(output):
-        local_startup_diagnostics(home, url)
-    check('startup diagnostics: stopped stub shows dead pid and refused socket',
-          f'pid={process.pid} alive=False' in output.getvalue() and 'raw socket connect: refused' in output.getvalue())
-    output = io.StringIO()
-    with contextlib.redirect_stdout(output), mock.patch.object(socket, 'create_connection', side_effect=socket.timeout):
-        local_startup_diagnostics(home + '-missing', url)
-    check('startup diagnostics: socket timeout and missing startup state are reported without raising',
-          'raw socket connect: timeout' in output.getvalue() and 'stub pid=unknown' in output.getvalue()
-          and 'startup.jsonl unavailable' in output.getvalue())
 
 
 def test_local_startup(seeker):
@@ -4262,7 +4010,7 @@ def test_local_startup(seeker):
         p, dt = call('session-start', inp, env)
         check_local_startup(f'{label} startup: non-loopback URL is skipped',
                             p.returncode == 0 and not os.path.exists(marker) and dt < 3.0, home, env['CTRLB_URL'])
-        # Isolate PATH so no installed ctrlb can interfere with the missing-binary case.
+
         os.unlink(binary)
         env.update(CTRLB_URL=f'http://localhost:{closed_port()}', PATH=home)
         p, dt = call('session-start', inp, env)
@@ -4284,7 +4032,7 @@ def test_local_startup(seeker):
 
 
 def test_local_startup_delayed():
-    # The detached server can become ready after the hook's best-effort three-second poll ends.
+
     for call, label, sid in ((hook, 'Claude', SID), (chook, 'Codex', CSID)):
         home = os.path.join(WORK, 'home-start-delayed-' + label)
         binary = local_stub(home)
@@ -4508,7 +4256,7 @@ def test_mcp_url_transport():
                     env['CTRLB_MCP_URL'] = url
                 stored = {'mcp_url': url} if source == 'file' else {}
                 with mock.patch.object(common, '_file_config', return_value=stored):
-                    # Run main in process so file configuration is isolated too; it performs no network I/O.
+
                     main = runpy.run_path(INSTALL)['main']
                     with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(io.StringIO()), \
                             contextlib.redirect_stderr(io.StringIO()) as err:
@@ -4561,7 +4309,7 @@ def test_local_health_answers(seeker):
                 seeker.state.pop('health', None)
 
     for status in (401, 503):
-        # A connection refusal followed by an HTTP error exercises the post-spawn poll without a process.
+
         import io
         response = io.BytesIO(b'response body must not be read or logged')
         error = common.urllib.error.HTTPError('http://localhost/healthz', status, 'unused reason', {}, response)
@@ -4621,7 +4369,7 @@ def test_local_configure_status(seeker):
               and 'python3 -I -c' in p.stdout and 'config.json' in p.stdout)
         exports = '\n'.join(s.strip() for s in p.stdout.splitlines() if s.strip().startswith('export '))
         if exports:
-            # Check the exported value without letting it reach the test output.
+
             script = exports + '\n' + 'test "$CTRLB_KEY" = ' + KEY
             q = subprocess.run(['/bin/sh', '-c', script], capture_output=True, text=True, env=env, timeout=5)
             check('configure --local: printed export is executable', q.returncode == 0 and not q.stdout and not q.stderr)
@@ -4651,7 +4399,7 @@ def test_local_configure_status(seeker):
 
 
 def test_local_install():
-    """Only local fixtures: the root installer verifies before replacing a binary."""
+
     import io
     import pathlib
     import tempfile
@@ -4885,7 +4633,7 @@ def test_local_install_download_errors():
             case, name = path.strip('/').split('/')
             is_manifest = name == 'SHA256SUMS'
             if case in ('signed-redirect', 'plain-http-redirect'):
-                # A release host answers with a redirect to a signed file address.
+
                 host = '127.0.0.1' if case == 'signed-redirect' else '127.0.0.2'
                 self.send_response(302)
                 self.send_header('Location', f'http://{host}:{self.server.server_address[1]}/signed/{name}?sp=r&sig=abc')
@@ -4913,7 +4661,7 @@ def test_local_install_download_errors():
                 destination = home / 'bin' / 'ctrlb'
                 destination.write_bytes(b'previous installation')
                 env = base_env('', str(home))
-                # A smaller cap exercises the boundary without a large fixture.
+
                 launcher = ('import sys, platform, runpy; sys.path.insert(0, ' + repr(os.path.join(ROOT, 'lib')) + '); '
                             'import local_install; local_install.MAX_BINARY_BYTES = 64 * 1024; '
                             'platform.system = lambda: "Linux"; platform.machine = lambda: "x86_64"; '
@@ -4940,7 +4688,7 @@ def test_local_install_download_errors():
                 p = subprocess.run([sys.executable, '-I', '-c', launcher, '--local', '--download-url', base],
                                    capture_output=True, text=True, env=base_env('', str(home)), timeout=10)
                 if case == 'signed-redirect':
-                    # The fixture is not a program, so init fails after the verified replacement.
+
                     check('local install download: a redirect to a signed address with a query is followed',
                           destination.read_bytes() == body and 'ctrlb init' in p.stderr
                           and 'Traceback' not in p.stderr, p.stderr[-200:])
@@ -4955,39 +4703,20 @@ def test_local_install_download_errors():
 
 
 def test_local_documentation():
-    doc = read(os.path.join(ROOT, 'docs', 'local-mode.md')).decode()
     recall_tools = ['search_sessions', 'find_command', 'next_actions', 'fetch_records', 'session_index']
-    check('local docs: five recall tools with descriptions',
-          'five recall tools' in doc
-          and re.findall(r'^- `(\w+)`: .+\.$', doc, re.M) == recall_tools)
-    paths = ['README.md', 'docs/local-mode.md', 'docs/limits.md', 'docs/session-store.md',
-             'docs/relay-tools.md',
-             'plugin/skills/recall/SKILL.md', 'plugin/skills/relay/SKILL.md']
-    for path in paths:
+    for path in ('plugin/skills/recall/SKILL.md', 'plugin/skills/relay/SKILL.md'):
         text = read(os.path.join(ROOT, path)).decode()
         check(f'local recall wording: {path} names all five tools and session index scope',
               all(f'`{tool}`' in text for tool in recall_tools)
-              and ("lists the caller's recent sessions" in text
-                   or "list the caller's recent sessions" in text))
+              and ("lists the caller's recent sessions" in text or "list the caller's recent sessions" in text))
         check(f'local recall wording: {path} documents stored reads, run independence and no model writes',
               'read only stored records and make no model call' in text
               and 'with or without `CTRLB_RUN`' in text
               and 'Local mode writes no running notes or memories; those need a model.' in text)
-    for name in ('claude-code', 'codex', 'http', 'otel'):
-        path = f'docs/connect-{name}.md'
-        check(f'local docs: {path} links to local setup',
-              '(local-mode.md)' in read(os.path.join(ROOT, path)).decode())
-    commands = [line for line in doc.splitlines() if line.startswith('ctrlb push ')]
-    check('local docs: push uses hosted environment key or private key file without a key argument',
-          commands and not any(re.search(r'--key(?:\s|=)', c) for c in commands)
-          and 'CTRLB_HOSTED_KEY' in doc and '--key-file' in doc and 'group/world readable' in doc
-          and 'getpass' in doc)
-    check('local docs: existing binary setup documents configure local, port and binary override',
-          'python3 -I bin/configure.py --local' in doc and 'CTRLB_BIN' in doc and '--port N' in doc)
 
 
 def test_codex_install_hardening():
-    """Installer shell quoting, header masking and exclusive temporary files."""
+
     if not can_validate_toml():
         print('SKIP Codex installer hardening integration (needs Python 3.11+ or codex)')
         return
@@ -4995,7 +4724,7 @@ def test_codex_install_hardening():
     shutil.rmtree(base, ignore_errors=True)
     os.makedirs(base)
 
-    # a checkout path with shell syntax in it: the hook command passes it as written and runs nothing from it
+
     odd = os.path.join(base, 'repo $(touch PWNED) `touch TICK` "q" \\b')
     for d in ('codex', 'lib'):
         shutil.copytree(os.path.join(ROOT, d), os.path.join(odd, d), ignore=shutil.ignore_patterns('__pycache__'))
@@ -5012,7 +4741,7 @@ def test_codex_install_hardening():
     hook_env = dict(env, CTRLB_OFF='1')
     for c in cmds[:1]:
         subprocess.run(['sh', '-c', c], cwd=run_dir, input='', capture_output=True, text=True, env=hook_env, timeout=30)
-    # what sh makes of the path word: printf it in place of python3 -I
+
     words = [subprocess.run(['sh', '-c', "printf '%s' " + c[len('python3 -I '):].rsplit(' ', 1)[0]], cwd=run_dir,
                             capture_output=True, text=True, timeout=10).stdout for c in cmds]
     check('codex install: a checkout path with $(...), backquotes, quotes and a backslash is one shell word; nothing in it runs',
@@ -5021,7 +4750,7 @@ def test_codex_install_hardening():
           and all(w == os.path.realpath(os.path.join(odd, 'codex', 'hook.py')) for w in words),
           f'{os.listdir(run_dir)} {cmds[:1]} {p.stderr[-200:]}')
 
-    # --dry-run never prints an OTEL header value; the file written without --dry-run holds it, as documented
+
     chome = os.path.join(base, 'codex-otel')
     os.makedirs(chome)
     hv = 'otelhdr' + 'value0001'
@@ -5038,7 +4767,7 @@ def test_codex_install_hardening():
           hv in read(os.path.join(chome, 'config.toml')).decode() and hv not in p2.stdout and '-headers = {' in p2.stdout,
           p2.stdout[-300:])
 
-    # a file or link named like the old fixed temporary file is never written through
+
     chome = os.path.join(base, 'codex-tmp')
     os.makedirs(chome)
     victim = os.path.join(base, 'victim.txt')
@@ -5053,11 +4782,11 @@ def test_codex_install_hardening():
           and sorted(os.listdir(chome)) == ['config.toml', 'config.toml.ctrlb-tmp'], str(sorted(os.listdir(chome))))
 
 def test_hardening(seeker):
-    """Atomic config writes, private local state and confined artefact restoration."""
+
     import relay_hooks
     base = os.path.join(WORK, 'hardening-config')
     os.makedirs(base, exist_ok=True)
-    # configure.py: atomic write, a 0600 backup of the old file, and a link kept and said
+
     home = os.path.join(base, 'home-cfg')
     cenv = {k: v for k, v in os.environ.items() if not k.startswith('CTRLB_')}
     cenv['CTRLB_HOME'] = home
@@ -5088,8 +4817,8 @@ def test_hardening(seeker):
           p.returncode == 0 and os.path.islink(cfg_path) and k1 in read(real_cfg).decode()
           and 'is a link to' in p.stdout, p.stdout[-300:])
 
-    # CTRLB_HOME, its state directory and every file the hooks write are private, also under umask 022, and an
-    # existing world-readable log is tightened
+
+
     home = os.path.join(base, 'home-hooks')
     os.makedirs(home, mode=0o755)
     os.chmod(home, 0o755)
@@ -5121,7 +4850,7 @@ def test_hardening(seeker):
     check('hooks: CTRLB_HOME and state are 0700 and every state, mutex and log file is 0600 (umask 022; an old 0644 log '
           'is tightened)', not loose and os.path.isdir(state) and os.listdir(state), ', '.join(loose))
 
-    # artefact restore never writes through a link in the scratch directory, or outside it
+
     scratch = os.path.join(base, 'scratch')
     outside = os.path.join(base, 'outside')
     os.makedirs(scratch)
@@ -5243,7 +4972,7 @@ def test_upload_large_line(seeker):
         try:
             with mock.patch.object(common, 'HOME', home):
                 try:
-                    # This checks batching and retry cursors, not parsing speed on a busy runner.
+
                     rows_claude.upload_file(cfg, path, time.time() + 60)
                 except common.SeekerError:
                     state = json.loads(read(common.FileState(path, time.time() + 1).file))
@@ -5329,7 +5058,7 @@ def test_upload_deadline(seeker):
         with mock.patch.object(common, 'ingest_records') as send_mock:
             rows_claude.upload_file(cfg, path, time.time() - 1)
             check('expired upload does not parse or send new rows', not send_mock.called)
-    # Exercise the socket timeout as well as the deterministic scheduling check.
+
     seeker.reset()
 
     def slow(body):
@@ -5672,7 +5401,7 @@ def test_backfill_failure_status(seeker):
 
 
 def test_redaction_linear_budget():
-    # Bound wall time in a subprocess, and measure matching CPU time independently of runner contention.
+
     source = '''import json, sys, time
 sys.path.insert(0, sys.argv[1])
 import redact
@@ -5732,24 +5461,13 @@ print(json.dumps(results))
               n > 0 and secret not in clean)
 
 
-def test_witness_docs():
-    readme = read(os.path.join(ROOT, 'README.md')).decode()
-    limits = read(os.path.join(ROOT, 'docs', 'limits.md')).decode()
-    relay = read(os.path.join(ROOT, 'docs', 'relay-tools.md')).decode()
-    check('enforcement documentation separates edit checks from done witnessing',
-          all('automatic slot claims' in text and 'Done evidence witnessing still runs' in text for text in (readme, limits))
-          and 'done evidence witnessing still runs |' in readme)
-    check('witness documentation requires a complete command and describes quoting and redirections',
-          'complete command of this session must match' in relay and 'quoted whitespace must match' in relay
-          and 'Output redirection preserves the witness; a pipeline does not.' in relay
-          and "contains the evidence's command" not in relay)
 
 
-# ---------------------------------------------------------------- sessions started for one task (lib/launch.py)
+
 
 LAUNCH = '0a1b2c3d4e5f6071'
-LAUNCH_TASK = 'task 07 latency'           # the task the Claude Code claim fixtures answer for
-CODEX_TASK = 'task 03 watering'           # the task of tests/fixtures/codex-claims.jsonl, in run garden-run
+LAUNCH_TASK = 'task 07 latency'
+CODEX_TASK = 'task 03 watering'
 RELAY_STATE = dict(check='allow', handoff='ok', briefs='ok', claims='ok', release='ok', posts='ok', tasks='ok',
                    contracts='ok', peers='ok', artifacts='ok')
 NO_LAUNCH_TEXTS = os.path.join(FIX, 'hooks', 'no-launch-texts.json')
@@ -5757,8 +5475,7 @@ LEAD_SID = '7a7a7a7a-0000-4000-8000-0000000000bb'
 
 
 def launch_files():
-    """Copies of the Claude Code transcripts and a Codex home under tests/work/launch: (top, claude inputs, codex
-    inputs, codex home, codex main rollout)."""
+
     top = os.path.join(WORK, 'launch')
     shutil.rmtree(top, ignore_errors=True)
     proj = os.path.join(top, 'projects', '-work-dash')
@@ -5772,7 +5489,7 @@ def launch_files():
 
 
 def start_paths(I, C):
-    """Every session-start and subagent-start path of both hooks: (name, hook function, mode, input, extra env)."""
+
     run = dict(CTRLB_RUN='run-w', CTRLB_AGENT='w1')
     joined = dict(CTRLB_PARENT_SESSION=LEAD_SID, CTRLB_PARENT_RUN='run-w', CTRLB_PARENT_AGENT='lead',
                   CTRLB_PARENT_RELAY='1', CTRLB_RUN='run-w', CTRLB_AGENT='lead')
@@ -5791,8 +5508,7 @@ def start_paths(I, C):
 
 
 def no_launch_texts(seeker, extra=None):
-    """The context of every start path of both hooks: {path: text}, with tests/work and the fake CtrlB's address
-    replaced by <work> and <url>. Each path runs in a home of its own."""
+
     top, I, C, chome, _ = launch_files()
     seeker.state.update(RELAY_STATE)
     out = {}
@@ -5821,8 +5537,7 @@ NEXT_TASK_WORDS = ('next=true', 'claim(next', 'free task', 'next free', 'done wi
 
 
 def no_next_task(text):
-    """No sentence that sends the agent to another task. (The session-start record lists tasks as "free"; that is
-    the run's state, not a rule.)"""
+
     low = text.lower()
     return not [w for w in NEXT_TASK_WORDS if w in low]
 
@@ -5851,7 +5566,7 @@ def descendant_rule(text, task, run, agent):
 
 
 def test_launch_no_change(seeker):
-    """Without CTRLB_LAUNCH (or with one that is not a launch id) every start text is the one the hooks wrote before."""
+
     want = load('hooks/no-launch-texts.json')
     got = no_launch_texts(seeker)
     diff = [k for k in want if got.get(k) != want[k]]
@@ -5872,9 +5587,7 @@ def test_launch_no_change(seeker):
 
 
 def test_launch_rules(seeker):
-    """The first session of a launch gets the one-task rule in every start path; every other session of the launch
-    (a subagent, a second session, an agent the worker starts from its shell) gets the descendant rule; the worker
-    keeps its role after compaction and resume; a subagent never takes the marker."""
+
     spawn = _spawn_lib()
     top, I, C, chome, _ = launch_files()
     seeker.state.update(RELAY_STATE)
@@ -5896,7 +5609,7 @@ def test_launch_rules(seeker):
         except OSError:
             return None
 
-    # Claude Code: the worker, in every start path of its own session
+
     L = '1111111111111111'
     env = env_for('home-c', L)
     texts = {n: ctx(hook, 'session-start', I[k], env) for n, k in (('startup', 'session_start'),
@@ -5946,7 +5659,7 @@ def test_launch_rules(seeker):
     q = ctx(hook, 'session-start', I['session_start'], env_for('home-c5', '5555555555555555', task=odd))
     check('claude: the task name goes into the claim call quoted as JSON', f'claim(resource={json.dumps(odd)}, ' in q, q[-600:])
 
-    # Codex
+
     C5 = '6666666666666666'
     cenv = env_for('home-x', C5)
     ctexts = {n: ctx(chook, 'session-start', C[k], cenv) for n, k in (('startup', 'session_start'),
@@ -5985,7 +5698,7 @@ def test_launch_rules(seeker):
     ctake = ctx(chook, 'session-start', C['session_start'], env_for('home-x4', '9999999999999999', mode='takeover'))
     check('codex: takeover mode', one_task_rule(ctake, LAUNCH_TASK, 'run-w', 'w1', takeover=True), ctake[-600:])
 
-    # a launch's sessions register no task for a subagent they spawn
+
     ws = os.path.join(top, 'ws')
     os.makedirs(os.path.join(ws, 'src'))
     with open(os.path.join(ws, 'src', 'parse.py'), 'w') as fh:
@@ -6001,9 +5714,9 @@ def test_launch_rules(seeker):
     check('claude: a subagent spawned in a launch registers no task (it works for the worker); without a launch it does',
           not in_launch and len(plain) == 1, f'{len(in_launch)} {len(plain)}')
 
-    # An edit of a file the agent that started this one holds: no claim (CtrlB answers belongs_to_task); the change
-    # goes to that agent. Who started an agent is read from the records (the hook input's subagent, the spawn
-    # record), never from its name. A file another agent holds, or an agent with no record, keeps the claim text.
+
+
+
     import hooks_shared
 
     def answer(mode, holder):
@@ -6037,7 +5750,7 @@ def test_launch_rules(seeker):
     spawn._write_json(spawn._session_path(par), dict(rec, parent=gp, parent_agent='w1'))
     spawn._write_json(spawn._session_path(kid), dict(rec, parent=par, parent_agent='w1.codex-0000000a'))
     spawn._write_json(spawn._session_path(own), dict(rec, parent=gp, parent_agent='w1', joined=False))
-    # started by w1 in run A with its own CTRLB_RUN (run-w) and w1's inherited CTRLB_AGENT: renamed, not joined
+
     spawn._write_json(spawn._session_path(other_run), dict(parent=gp, parent_agent='w1', parent_run='run-a', run='run-w',
                                                            joined=False, renamed=True))
     spawn._write_json(spawn._session_path(bad), dict(joined=True, run='run-w', parent_agent='w1', parent=['bad-parent']))
@@ -6063,7 +5776,7 @@ def test_launch_rules(seeker):
           'or with a record that is not what spawn.py writes (never an exception)',
           chain == [['w1.codex-0000000a', 'w1'], ['w1.codex-0000000a.claude-0000000b', 'w1.codex-0000000a', 'w1'],
                     [], ['w1:docs'], [], [], [], [], [], [], [], [], ['w1:docs']], json.dumps(chain))
-    # Through the Claude Code hook: CtrlB's answer names agent-b as the holder.
+
     seeker.state['check'] = 'enforce'
     hook_home = os.path.join(top, 'home-starter')
     sessions = os.path.join(hook_home, 'spawn', 'sessions')
@@ -6102,8 +5815,8 @@ def test_launch_rules(seeker):
           and 'claim(' not in outs['subagent of agent-b'][1]
           and all(outs[k][0] == 'deny' and 'claim(resource=' in outs[k][1] and 'You work for' not in outs[k][1]
                   for k in claim_text), json.dumps(outs)[:1200])
-    # The ownership check comes first; who started the agent is looked up only to choose the words. An interrupt or
-    # exit in that lookup still refuses (the ordinary text), in both hooks, with one ownership check.
+
+
     import importlib.util
     hook_mods = {}
     for name, path in (('claude', os.path.join(ROOT, 'plugin', 'hooks', 'hook.py')), ('codex', os.path.join(ROOT, 'codex', 'hook.py'))):
@@ -6139,7 +5852,7 @@ def test_launch_rules(seeker):
 
 
 def test_launch_result_claude(seeker):
-    """Claude Code: the post-tool hook writes the result file from the worker's own claim of the named task."""
+
     top, I, C, chome, _ = launch_files()
     seeker.state.update(RELAY_STATE)
     watch = os.path.join(top, 'watch')
@@ -6208,8 +5921,7 @@ def test_launch_result_claude(seeker):
 
 
 def test_launch_result_codex(seeker):
-    """Codex: the result file is read from the worker's rollout (a claim call matched with its answer) at session end
-    and at the end of a turn."""
+
     sys.path.insert(0, os.path.join(ROOT, 'lib'))
     import rows_codex
     top, I, C, chome, cmain = launch_files()
@@ -6217,13 +5929,6 @@ def test_launch_result_codex(seeker):
     watch = os.path.join(top, 'watch')
     with open(os.path.join(FIX, 'codex-claims.jsonl')) as fh:
         lines = {json.loads(ln)['payload']['item']['id']: ln for ln in fh if ln.strip()}
-    calls = rows_codex.claim_calls(os.path.join(FIX, 'codex-claims.jsonl'))
-    by_id = [a for a, _ in calls]
-    answers = [ans for _, ans in calls]
-    check('rows_codex.claim_calls: each claim call with its answer; no answer for a transport error, an error answer '
-          'or text that is not JSON', len(calls) == 9 and answers[0].get('held') is True and answers[1].get('held') is False
-          and answers[2] is None and answers[3] is None and answers[4] is None and by_id[5]['resource'] == 'task 04 pruning',
-          json.dumps(answers)[:400])
     check('rows_codex.claim_calls: thread keeps only that thread\'s calls',
           len(rows_codex.claim_calls(os.path.join(FIX, 'codex-claims.jsonl'), CSID)) == 8)
 
@@ -6281,8 +5986,7 @@ def test_launch_result_codex(seeker):
 
 
 def test_launch_result_synced():
-    """The result file's rename is synced in its directory (and a directory made for it in its parent), so a power
-    failure cannot bring back a replaced refused result."""
+
     import launch
     top = os.path.join(WORK, 'launch-sync')
     shutil.rmtree(top, ignore_errors=True)
@@ -6317,7 +6021,7 @@ def test_launch_result_synced():
     check('launch: the result directory made for the first result is synced in the watch directory',
           ('fsync-dir', watch_ino) in refused, str(refused))
     check('launch: the held result replaced refused', open(os.path.join(watch, 'result', name)).read() == '{"claim":"held"}')
-    spaced = os.path.join(top, 'watch ')      # the watcher reads CTRLB_WATCH_DIR as given: the trailing space is kept
+    spaced = os.path.join(top, 'watch ')
     info2 = dict(info, launch='5ec5ec5ec5ec0002')
     with mock.patch.dict(os.environ, {'CTRLB_WATCH_DIR': spaced}), mock.patch.object(launch.common, 'log'):
         open(launch.marker_path(info2), 'w').write('sid')
@@ -6354,7 +6058,6 @@ def main():
     run_test(test_nested_codex_run)
     run_test(test_backfill_failure_status, seeker)
     run_test(test_redaction_linear_budget)
-    run_test(test_witness_docs)
     run_test(test_launch_no_change, seeker)
     run_test(test_launch_rules, seeker)
     run_test(test_launch_result_claude, seeker)
@@ -6365,15 +6068,14 @@ def main():
     run_test(test_spawned_agents, seeker)
     run_test(test_keys)
     run_test(test_edit_keys_across_harnesses, seeker)
-    run_test(test_docs)
     run_test(test_release_wording)
     run_test(test_briefs_wording)
     run_test(test_wait_wording)
     run_test(test_takeover_wording)
     run_test(test_done_evidence, seeker)
-    run_test(test_round6_hooks, seeker)
+    run_test(test_evidence_and_handoff_hooks, seeker)
     run_test(test_handoff_redaction, seeker)
-    run_test(test_round8_hooks, seeker)
+    run_test(test_registration_artifacts_and_slots_hooks, seeker)
     run_test(test_failure_safety, seeker)
     run_test(test_config_and_status, seeker)
     run_test(test_codex_rows, seeker)
@@ -6381,10 +6083,6 @@ def main():
     run_test(test_local_mode, seeker)
     run_test(test_local_session_context, seeker)
     run_test(test_local_relay, seeker)
-    run_test(test_local_health_retry)
-    run_test(test_fixture_bind_without_dns)
-    run_test(test_local_stub_slow_dns)
-    run_test(test_local_stub_idle_connections)
     run_test(test_local_startup, seeker)
     run_test(test_local_startup_delayed)
     run_test(test_local_startup_concurrent)

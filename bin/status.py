@@ -1,10 +1,8 @@
-"""Print ctrlb-agent's configuration (the key masked), the user the key carries (the name rows are written under),
-whether the environment the ctrlb tools need is set, whether
-CtrlB answers and the latest runs, how many transcript files are tracked, and the last lines of the hook log."""
+
 import json, os, sys, time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
-import common  # noqa: E402
+import common
 
 
 def main():

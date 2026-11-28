@@ -1,16 +1,8 @@
-"""Upload past Claude Code sessions (and their subagents) from ~/.claude/projects, or past Codex sessions from
-$CODEX_HOME/sessions (default ~/.codex/sessions), to CtrlB.
-Usage: backfill.py [--codex] [--project TEXT] [--count] [--yes]
-  --codex         Codex rollouts instead of Claude Code transcripts
-  --project TEXT  only project folders whose name contains TEXT (e.g. the repo name); with --codex, only sessions
-                  whose working directory contains TEXT
-  --count         print what would be uploaded and stop
-  --yes           do not ask before uploading
-Already-uploaded lines are skipped, so running it twice sends nothing new."""
+
 import argparse, glob, os, sys, time
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
-import common, rows_claude, rows_codex  # noqa: E402
+import common, rows_claude, rows_codex
 
 ROOT = os.path.expanduser(os.environ.get('CLAUDE_PROJECTS_DIR', '~/.claude/projects'))
 

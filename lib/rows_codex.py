@@ -1,33 +1,12 @@
-"""Codex rollout -> session rows, the same columns as rows_claude with harness = "codex".
 
-A rollout is ~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<time>-<thread id>.jsonl, one JSON object per line:
-{timestamp, type, payload}. What becomes a row (seq is the line number, block_idx the item index):
-
-  response_item message              user and assistant text items -> block_type "text" (developer messages are
-                                     harness instructions and are skipped, as Claude Code's system prompt is)
-  response_item reasoning            summary and content text -> "thinking" (encrypted-only reasoning is skipped)
-  response_item custom_tool_call,    -> "tool_use"; tool_use_id is call_id. command: the shell command(s) of the call
-                function_call,         (exec_command cmd values inside a code-mode "exec" call; command / cmd of a
-                local_shell_call       shell function call). paths: the files an apply_patch touches, from the
-                                       patch's *** Update File / *** Add File / *** Delete File / *** Move to lines,
-                                       normalised against the row's cwd by paths.edit_paths
-  response_item *_output             -> "tool_result" with the tool name of its call; is_error when an exec script
-                                       failed or a shell call exited non-zero
-  token_usage_record                 -> one "result" row, role system, input_tokens and output_tokens from usage
-                                       (input includes cached input, as OpenAI counts it), once per response_id
-  compacted with a message           -> "text" row, role user, is_summary true
-
-session_meta gives the ids, cwd and git branch; turn_context updates cwd. A rollout whose session_meta names a
-parent_thread_id is a subagent: parent_session is that id, agent_id its own thread id, and it joins its parent's
-run. Upload is incremental by byte offset with FileState, through rows_claude.upload_file."""
 import functools, glob, hashlib, json, os, re, shlex
 import common, rows_claude
 from paths import edit_paths as normalise_edit_paths
-from rows_claude import micros
+from rows_claude import micros, _num
 
 HARNESS = 'codex'
 UUID_RE = re.compile(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$')
-# A patch header line ends at a newline, real or escaped inside a code-mode string literal, or at the literal's end.
+
 PATCH_RE = re.compile(r'\*\*\* (?:Update File|Add File|Delete File|Move to): (.+?)[ \t]*(?=\\r|\\n|\r|\n|"|$)')
 CMD_RE = re.compile(r'''["']?\bcmd["']?\s*:\s*("(?:[^"\\]|\\.)*")''')
 SHELL_TOOLS = ('shell', 'shell_command', 'exec_command', 'local_shell', 'container.exec', 'unified_exec')
@@ -35,7 +14,7 @@ TEXT_ITEMS = ('input_text', 'output_text', 'text')
 
 
 def patch_paths(text):
-    """The file paths an apply_patch text touches, in order, once each. Empty unless the text holds a patch."""
+
     if not isinstance(text, str) or '*** Begin Patch' not in text:
         return []
     out = []
@@ -47,7 +26,7 @@ def patch_paths(text):
 
 
 def strings_in(v):
-    """Every string inside a JSON value."""
+
     if isinstance(v, str):
         yield v
     elif isinstance(v, dict):
@@ -59,7 +38,7 @@ def strings_in(v):
 
 
 def input_paths(tool_input):
-    """Patch paths from a hook's tool_input (apply_patch, or a shell command that pipes a patch to apply_patch)."""
+
     out = []
     for s in strings_in(tool_input):
         for p in patch_paths(s):
@@ -69,7 +48,7 @@ def input_paths(tool_input):
 
 
 def exec_commands(code):
-    """The cmd values of tools.exec_command({cmd: "..."}) calls in a code-mode exec input."""
+
     out = []
     for m in CMD_RE.finditer(code or ''):
         try:
@@ -80,7 +59,7 @@ def exec_commands(code):
 
 
 def shell_command(args):
-    """The command of a shell function call's arguments: cmd or command, a string or an argv list."""
+
     if not isinstance(args, dict):
         return ''
     c = args.get('cmd') if args.get('cmd') is not None else args.get('command')
@@ -93,7 +72,7 @@ def shell_command(args):
 
 
 def read_meta(path):
-    """The session_meta payload on the first line of a rollout, or {}."""
+
     try:
         with open(path, 'rb') as fh:
             rec = json.loads(fh.readline(8_000_000))
@@ -105,8 +84,7 @@ def read_meta(path):
 
 
 def agent_for(cfg, sid, parent=''):
-    """The agent id of a Codex thread. A session: CTRLB_AGENT or its session id. A subagent thread: its own thread id,
-    prefixed with the CTRLB_AGENT label and ':' when one is set."""
+
     label = cfg.get('agent') or ''
     if parent:
         return f'{label}:{sid}' if label else sid
@@ -115,7 +93,7 @@ def agent_for(cfg, sid, parent=''):
 
 @functools.lru_cache(maxsize=4)
 def _session_files(root):
-    """Index filenames once per process; backfill must not reopen every session for each child."""
+
     files = {}
     for file in rollouts(root):
         match = UUID_RE.search(os.path.basename(file))
@@ -125,28 +103,26 @@ def _session_files(root):
 
 
 def session_run(cfg, sid, parent='', path=''):
-    """Resolve the ancestor chain once for both uploads and hooks. A missing ancestor falls back to the oldest
-    known thread; cycles stop without looping. An explicit run always wins."""
+
     if cfg.get('run') or not parent:
         return common.run_id(cfg, sid, parent)
     return root_session(sid, parent, path)
 
 
 def root_session(sid, parent='', path=''):
-    """The session id at the top of a thread's ancestor chain (sid itself when it has no parent)."""
+
     return root_rollout(sid, parent, path)[0]
 
 
 def root_rollout(sid, parent='', path=''):
-    """(session id, rollout file) at the top of a thread's ancestor chain; the file is path for a thread with no
-    parent, and '' when the root's file is not found."""
+
     file = path
     seen = {sid}
     while parent and parent not in seen and len(seen) < 64:
         seen.add(parent)
         sid, parent = parent, ''
-        # A sibling named directly by id is also useful for exported rollouts. Only safe filename components
-        # may be used here; normal Codex filenames are found by their UUID suffix, without reading other files.
+
+
         file = os.path.join(os.path.dirname(path), sid + '.jsonl') if path and re.fullmatch(r'[\w-]+', sid) else ''
         if not file or not os.path.isfile(file):
             file = _session_files(os.path.join(codex_home(), 'sessions')).get(sid) or ''
@@ -161,17 +137,13 @@ RELAY_WRITE_TOOLS = ('post', 'claim', 'handoff', 'release', 'done', 'task', 'bri
 
 
 def relay_call(path):
-    """(run_id, agent) of the last ctrlb relay tool call that writes to a run, from a Codex rollout's McpToolCall
-    items (server ctrlb), or None. Codex has no hook after a tool call, so this is how a Codex session is known to be in
-    a run. A rollout only grows: the part read is kept under <CTRLB_HOME>/spawn/rollouts (its offset, its inode and
-    the 64 bytes before the offset, so a replaced or rewritten file is read again from the start), and each call reads
-    only what was added since the last one."""
+
     try:
         st = os.stat(path)
     except (OSError, TypeError, ValueError):
         return None
     keep, c, last = '', {}, None
-    try:      # without the kept part (a folder that cannot be made, a bad file) the whole rollout is read
+    try:
         d = common.private_dir(os.path.join(common.HOME, 'spawn', 'rollouts'))
         keep = os.path.join(d, hashlib.sha256(os.path.abspath(path).encode()).hexdigest()[:32] + '.json')
         with open(keep) as fh:
@@ -182,7 +154,7 @@ def relay_call(path):
         with open(path, 'rb') as fh:
             ok = (isinstance(c, dict) and c.get('ino') == st.st_ino and isinstance(c.get('offset'), int)
                   and 0 <= c['offset'] <= st.st_size)
-            if ok and c['offset']:       # the bytes just before the offset are still the ones read (not a rewritten file)
+            if ok and c['offset']:
                 fh.seek(max(0, c['offset'] - 64))
                 ok = fh.read(c['offset'] - max(0, c['offset'] - 64)).hex() == c.get('tail')
             if not ok:
@@ -194,7 +166,7 @@ def relay_call(path):
                 while True:
                     line = fh.readline()
                     if not line.endswith(b'\n'):
-                        break           # a line still being written is read next time
+                        break
                     c['offset'] += len(line)
                     if b'McpToolCall' in line:
                         last = _relay_item(line) or last
@@ -210,7 +182,7 @@ def relay_call(path):
                         os.replace(tmp, keep)
                     except OSError:
                         pass
-    except TimeoutError:      # the hook's time ran out: what was found so far, the kept part included
+    except TimeoutError:
         return tuple(last) if last else None
     except OSError:
         return None
@@ -236,8 +208,7 @@ def _relay_item(line):
 
 
 def _answer(item):
-    """The JSON object a completed McpToolCall answered, or None: a failed call (status failed, an error), an error
-    answer (isError) and text that is not a JSON object are no answer."""
+
     if item.get('status') != 'completed' or item.get('error'):
         return None
     res = item.get('result')
@@ -258,11 +229,7 @@ def _answer(item):
 
 
 def claim_calls(path, thread=''):
-    """Every ctrlb claim call of a Codex rollout with its answer, in order: [(arguments, answer)]. A McpToolCall item
-    holds the call (arguments) and, once completed, its answer (result) under one item id; an item seen again (started,
-    then completed) is matched by that id and keeps its last state. answer is the JSON object the claim answered, or
-    None (still running, failed, an error answer, or text that does not parse). thread keeps only the items of that
-    thread when an event names one."""
+
     calls = {}
     try:
         fh = open(path, 'rb')
@@ -330,21 +297,8 @@ def _failed(o, text):
 
 
 def _row(cfg, ids, st, hostname, ts, seq, role):
-    r = dict(_timestamp=ts, host=hostname, harness=HARNESS, session_id=ids['sid'], parent_session=ids['parent'],
-             agent_id=ids['agent_id'], run_id=ids['run_id'], agent=ids['agent'], seq=seq, block_idx=0, role=role,
-             block_type='', tool_name='', tool_use_id='', command='', paths='', body='', is_error=False,
-             is_summary=False, cwd=st.get('cwd') or '', git_branch=st.get('branch') or '', cost_usd=0.0,
-             input_tokens=0.0, output_tokens=0.0)
-    if cfg.get('user'):   # the key's own user (common.key_user), never CTRLB_USER; without it CtrlB fills user_name
-        r['user_name'] = cfg['user']
-    return r
-
-
-def _num(v):
-    try:
-        return float(v or 0)
-    except (TypeError, ValueError):
-        return 0.0
+    return rows_claude.row_defaults(cfg, ids, hostname, ts, seq, ids['parent'], role, HARNESS,
+                                    st.get('cwd') or '', st.get('branch') or '', False)
 
 
 def _tool_use(r, p, st):
@@ -364,7 +318,7 @@ def _tool_use(r, p, st):
         r['command'] = shell_command(args) if name in SHELL_TOOLS or name.endswith('exec_command') else ''
         r['body'] = r['command'] or raw
         paths = input_paths(args) if isinstance(args, (dict, list)) else patch_paths(raw)
-    else:                                   # local_shell_call
+    else:
         name = 'local_shell'
         action = p.get('action') or {}
         r['command'] = shell_command(action)
@@ -445,7 +399,7 @@ def rows_from(rec, seq, st, ids, cfg, hostname):
 
 
 def upload_file(cfg, path, deadline):
-    """Send the complete lines of a rollout added since the last upload. Returns {rows, lines, redacted}."""
+
     if not path or not os.path.isfile(path):
         return dict(rows=0, lines=0, redacted=0)
     return rows_claude.upload_file(cfg, path, deadline, ids=ids_for_file(cfg, path), rows_fn=rows_from)
@@ -456,6 +410,6 @@ def codex_home():
 
 
 def rollouts(root=None):
-    """Every rollout file under $CODEX_HOME/sessions, oldest first."""
+
     root = root or os.path.join(codex_home(), 'sessions')
     return sorted(glob.glob(os.path.join(root, '**', 'rollout-*.jsonl'), recursive=True))

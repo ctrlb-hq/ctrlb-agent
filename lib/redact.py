@@ -1,10 +1,7 @@
-"""Secret redaction, shared by every parser. Runs on each row's body and command before upload.
-Pattern matching cannot catch every secret; it catches the common shapes (keys, tokens, Authorization values,
-assignments to names ending in SECRET, TOKEN, PASSWORD or KEY, passwords in URLs, credential headers such as
-X-API-Key and Cookie, and flags such as --token and --password)."""
+
 import json, re
 
-# Quoted values may contain spaces and escaped quotes. Keep placeholders and variable references intact.
+
 ESCAPED_VALUE = (r'''\\"(?![<$]|\[REDACTED\](?:\\"|$))(?:(?!\\")[^\r\n])*(?:\\"|(?=\r?\n|$))''')
 QUOTED_VALUE = (r'''(?:''' + ESCAPED_VALUE + r'''|"(?![<$]|\[REDACTED\](?:"|$))(?:\\[^\r\n]|[^"\\\r\n])*(?:"|(?=\r?\n|$))|'''
                 r"""'(?![<$]|\[REDACTED\](?:'|$))(?:\\[^\r\n]|[^'\\\r\n])*(?:'|(?=\r?\n|$)))""")
@@ -17,7 +14,7 @@ SECRET_SUFFIXES = ('password', 'passwd', 'secret', 'token', 'client_secret', 'ap
                    'access_token', 'refresh_token')
 UPPER_PARTS = ('SECRET', 'TOKEN', 'PASSWORD', 'PASSWD', 'API_KEY', 'APIKEY', 'PRIVATE_KEY', 'ACCESS_KEY', '_KEY')
 NAME = re.compile(r'[A-Z][A-Z0-9_]*$')
-# Scan each complete candidate once. Starting another search at each hyphen or dot makes a long key quadratic.
+
 ASSIGNMENT = re.compile(r'''(?<![\w.\-])((?:\\?["'])?([\w.\-]+)(?:\\?["'])?\s*(?::=?|=(?:>)?(?!=))\s*)''')
 CASE_EQUIVALENTS = str.maketrans({'ſ': 's', 'İ': 'i', 'ı': 'i', 'K': 'k'})
 
@@ -39,8 +36,8 @@ def _secret_name(name, legacy=False):
         if name.endswith(suffix):
             prefix = name[:-len(suffix)]
             if not prefix or not prefix[-1].isalnum():
-                # Any non-word character can introduce a name, including spaces in JSON keys. A leading
-                # or repeated underscore stays part of the word and cannot introduce a suffix match.
+
+
                 head = re.split(r'\W+', prefix)[-1]
                 return not head or bool(re.fullmatch(r'(?:[a-z0-9]+_)+', head))
     return False
@@ -76,24 +73,24 @@ REDACT = [
     re.compile(r'\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b'),
     re.compile(r'\bgithub_pat_[A-Za-z0-9_]{20,}\b'),
     re.compile(r'\bxox[abposr]-[A-Za-z0-9\-]{10,}'),
-    re.compile(r'\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}'),  # JWT
+    re.compile(r'\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}'),
     re.compile(r'''(?i)((?:proxy-)?authorization(?:\\?["'])?\s*(?::|=(?!=))\s*(?:(?:bearer|basic|token)\s+)?)(?!\[REDACTED\])''' + AUTH_VALUE),
     re.compile(r'(?i)(\bbearer\s+)[A-Za-z0-9._~+/=\-]{12,}'),
-    # Assignment passes run here, before URL passwords and headers.
+
     'assignments',
     re.compile(r'((?<![\w+.\-])[\w+.\-]+://[^\s:/@]+:)[^\s@/]+(@)'),
-    # credential headers, in curl -H/--header, httpie Name:value and raw requests. A value already redacted by an
-    # earlier pattern is left alone, so a secret is counted once.
+
+
     re.compile(r'''(?i)(\b''' + HEADER_NAME + r'''(?:\\?["'])?\s*:\s*)''' + HEADER_VALUE),
     re.compile(r'''(?i)(\b(?:set-)?cookie["']?\s*:\s*)''' + QUOTED_VALUE),
     'cookies',
-    # credential flags: --token <value>, --api-key=<value>, --password "<value>"; a value starting with -, < or $ is another
-    # flag, a placeholder or a variable reference
+
+
     re.compile(FLAG_PREFIX + r'(?![-<$]|\[REDACTED\])' + SHELL_VALUE),
-    # Assignment matching can leave a comma/brace suffix on an equals-form flag. Trim it only after all
-    # headers and later flags have been checked, so masking their names cannot hide their values.
+
+
     re.compile(FLAG_PREFIX + r'''\[REDACTED\][^\s"']+'''),
-    # A brace can end an assignment value inside a header. Finish its suffix after later flags are checked.
+
     re.compile(r'''(?i)(\b''' + HEADER_NAME + r'''(?:\\?["'])?\s*:\s*)\[REDACTED\]}[^\s"';,]*'''),
     'operators',
 ]
@@ -151,18 +148,18 @@ def _assignments(text, upper, operators=False):
         value = value_rx.match(text, m.end())
         if not value and ((operator == ':=' and text.startswith('<', m.end())) or
                           (operator == '=>' and text[m.end():m.end() + 1] in ('<', '$'))):
-            # The old colon/equals passes covered these literals. Keep := dollar-variable placeholders exempt.
+
             value = re.compile(r'''[^\s"']+''' if upper else r'''[^\s"',}]+''').match(text, m.end())
         if not value:
             continue
         if bool(operator) != operators:
-            # Check the name and actual value before scanning the legacy value, so repeated non-credentials
-            # and placeholders stay linear. Spaced/quoted values wait until after other headers and flags.
+
+
             legacy = value_rx.match(text, start + prefix.index(operator) + 1)
             if not legacy or legacy.end() <= m.end():
                 continue
-        # Only a short, complete code expression can be exempt; do not copy the remaining transcript for
-        # every assignment on a long line.
+
+
         expression = text[m.end():m.end() + 2048].split('\n', 1)[0].strip()
         if m.end() + 2048 < len(text) and '\n' not in text[m.end():m.end() + 2048]:
             expression = ''
@@ -189,7 +186,7 @@ def _private_keys(text):
             break
         end = PRIVATE_END.search(text, start.end())
         if not end:
-            break                         # later starts cannot have an end either
+            break
         out.extend((text[pos:start.start()], '[REDACTED]'))
         pos = end.end()
         n += 1
@@ -208,8 +205,8 @@ def _cookies(text):
                 continue
             key_end = key.end()
         if key_end == len(text) or text[key_end] != '=':
-            # Another Cookie: may begin inside this run and end beyond it. Reuse the run's end so repeated
-            # prefixes stay linear, but let the next header check its own key.
+
+
             continue
         end = COOKIE_BODY.match(text, key_end).end()
         out.extend((text[pos:start.end()], '[REDACTED]'))
@@ -220,7 +217,7 @@ def _cookies(text):
 
 
 def redact(text, _credential=False):
-    """(text or JSON value with secrets replaced by [REDACTED], number of replacements)."""
+
     if isinstance(text, dict):
         out, n = {}, 0
         for key, value in text.items():
@@ -245,8 +242,8 @@ def redact(text, _credential=False):
         return '[REDACTED]', 1
     if not text:
         return text or '', 0
-    # Tool results can themselves contain JSON strings. Decode before matching so escaped quotes and nested
-    # credential dictionaries receive the same treatment as parsed tool inputs.
+
+
     if text.lstrip().startswith(('{', '[')):
         try:
             value = json.loads(text)
@@ -262,7 +259,7 @@ def redact(text, _credential=False):
             n += k
             continue
         if rx in ('assignments', 'operators'):
-            # New operator forms run after legacy headers/flags so their names cannot hide another value.
+
             text, k = _assignments(text, True, rx == 'operators')
             n += k
             text, k = _assignments(text, False, rx == 'operators')

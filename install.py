@@ -1,4 +1,4 @@
-"""Install ctrlb-agent for a harness from a clone of this repo.
+HELP_TEXT = """Install ctrlb-agent for a harness from a clone of this repo.
 
   python3 -I install.py --codex [options]   writes the CtrlB block into Codex's config.toml (codex/install.py; every
                                             option after --codex is passed through, --help lists them)
@@ -23,13 +23,13 @@ def main(argv):
         return local_install.main(argv[1:])
     if argv[:1] == ['init']:
         sys.path.insert(0, os.path.join(HERE, 'bin'))
-        import init as project_init   # bin/init.py
+        import init as project_init
         return project_init.main(argv[1:])
     if argv[:1] != ['--codex']:
-        print(__doc__)
+        print(HELP_TEXT)
         return 0 if argv[:1] in (['-h'], ['--help']) else 2
     sys.path.insert(0, os.path.join(HERE, 'codex'))
-    import install as codex_install   # codex/install.py
+    import install as codex_install
     return codex_install.main(argv[1:])
 
 

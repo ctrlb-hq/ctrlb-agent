@@ -1,7 +1,4 @@
-"""What the Claude Code hook (plugin/hooks/hook.py) and the Codex hook (codex/hook.py) share: the injected rules and
-the pre-tool edit check. Both harnesses take the same output shapes: hookSpecificOutput with additionalContext
-(SessionStart, SubagentStart, PreToolUse) and, on PreToolUse, permissionDecision "deny" with a non-empty
-permissionDecisionReason."""
+
 import datetime
 import os
 import json
@@ -14,14 +11,8 @@ from redact import redact
 
 CHECK_S = 2.0
 
-RECALL = ("Earlier work is in the CtrlB record, not in your context: this session's turns before compaction, and this "
-          "user's earlier sessions. Before your first grep, file read or shell command for a question about earlier "
-          "work (what was done, decided, run, read, or why something failed), call `search_sessions` without session_id "
-          "to search this user's sessions. Pass session_id {sid} only to search this session's own turns before compaction. "
-          "After a command fails, call `find_command` with the command before changing it, then `next_actions` with a "
-          "session_id and seq it returns to see what followed. Do not say something was not said or not done until you "
-          "have searched. Pass this session_id to every subagent you "
-          "start and tell it the same rule.")
+RECALL = common.RECALL_COMMON.format(session=' {sid}') + ' Pass this session_id to every subagent you start and tell it the same rule.'
+
 
 SUBAGENT = ("You are a subagent of session {sid}. That session's full record, including what it already read, ran and "
             "decided, is searchable with the ctrlb tools (search_sessions with session_id {sid}, fetch_records, "
@@ -31,8 +22,8 @@ SUBAGENT = ("You are a subagent of session {sid}. That session's full record, in
             "After a command fails, call `find_command` with the command before changing it, then `next_actions` with "
             "a session_id and seq it returns to see what followed.")
 
-# A session started from another agent's shell (lib/spawn.py): who started it, and, when it joined that agent's run,
-# how to work in it. RELAY (claim the next free task) is not given: a started agent has its own job.
+
+
 STARTED_BY = ("{parent_agent} (session {parent}) started you from its shell. Its record is searchable: call "
               "`search_sessions` with session_id {parent} before you redo its work or rerun its commands.")
 SPAWNED = ("CtrlB Relay: you joined the run of the agent that started you. Your run id is {run} and your agent id is "
@@ -43,8 +34,7 @@ SPAWNED = ("CtrlB Relay: you joined the run of the agent that started you. Your 
 
 
 def spawned_text(started, run, agent, scratch):
-    """The context lines for a session started from another agent's shell: '' when it was not; who started it; and,
-    when it joined that agent's run and run is given, how to work in it."""
+
     if not started or not started.get('parent'):
         return ''
     text = '\n\n' + STARTED_BY.format(parent_agent=started.get('parent_agent') or started['parent'], parent=started['parent'])
@@ -53,8 +43,26 @@ def spawned_text(started, run, agent, scratch):
     return text
 
 
-# Claim before working, finish with evidence, and read peers for context or to wait for news.
-# The hooks manage autoSlots files; helper files go to the run's scratch directory.
+
+
+def session_start_text(cfg, head, started, rule, run, agent, scratch, source, in_run, label):
+    if started.get('joined'):
+        text = head + (spawned_text(started, '', '', '') + '\n\n' + rule if rule else
+                       spawned_text(started, run, agent, scratch))
+        block = ''
+    else:
+        active = in_run()
+        text = head + spawned_text(started, '', '', '') + '\n\n' + (rule or relay_text(active, run, agent, scratch))
+        block = ''
+        if active:
+            try:
+                import relay_hooks
+                block = relay_hooks.session_start_block(cfg, run, agent, source)
+            except Exception as e:
+                common.log(f"{label}: {type(e).__name__}: {str(e)[:200]}")
+    return text + ('\n\n' + block if block else '')
+
+
 RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other agents in this run may be working in "
          "the same files. Pass run_id=\"{run}\" and agent=\"{agent}\" to the ctrlb relay tools (peers, post, claim, "
          "release, handoff, ask, answer, brief, briefs, tasks, contract, contracts, done). Start with `claim(next=true)`. When "
@@ -86,9 +94,9 @@ RELAY = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Other 
          "reopen=true. Put helper scripts and binaries in the scratch directory {scratch}, not in /tmp.")
 
 
-# A session with no run set (no CTRLB_RUN, no relay tool called, not joined to the run of the agent that started it):
-# its run is its own and nobody registered tasks in it, so it is not told to claim the next task (or to stop when none
-# is free).
+
+
+
 SOLO = ("CtrlB Relay: no run was set for this session (CTRLB_RUN), so no Relay tasks are waiting for you: do the work "
         "you were asked to do; do not claim a task to find work. Your run id is {run} and your agent id is {agent}. "
         "Pass run_id=\"{run}\" and agent=\"{agent}\" to the ctrlb relay tools only when you register tasks for "
@@ -97,11 +105,11 @@ SOLO = ("CtrlB Relay: no run was set for this session (CTRLB_RUN), so no Relay t
 
 
 def relay_text(in_run, run, agent, scratch):
-    """RELAY for a session in a relay run, SOLO for one that is its own run."""
+
     return (RELAY if in_run else SOLO).format(run=run, agent=agent, scratch=scratch)
 
 
-# A session started for one named task (lib/launch.py): it works on that task only, in place of RELAY.
+
 ONE_TASK = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Pass run_id=\"{run}\" and agent=\"{agent}\" "
             "to the ctrlb relay tools. You were started for one task: {task}. Work on that task only. First call "
             "{call}. Its files come with it. If held is false, post one note that says why the claim was refused, "
@@ -112,11 +120,11 @@ ONE_TASK = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Pas
             "output line as the evidence, and without next. When the task has no test command, give the check you "
             "ran. Then stop. If you must leave the task before it is finished, use handoff. Put helper scripts and "
             "binaries in the scratch directory {scratch}, not in /tmp.")
-# After a takeover: what the earlier holder did, before the first edit.
+
 TAKEOVER_READ = ("The task was stalled: after the takeover, before your first edit, read the task's evidence and notes "
                  "(tasks, and history with the task name) and the earlier holder's steps (next_actions or "
                  "fetch_records on its session). ")
-# Any other session of the same launch: a subagent of the worker, or an agent it started from its shell.
+
 DESCENDANT = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. Pass run_id=\"{run}\" and "
               "agent=\"{agent}\" to the ctrlb relay tools. You work for the agent that started you, which holds the "
               "task {task} in this run: do the part of the work it asked of you. The files of that task come with it, "
@@ -130,8 +138,7 @@ DESCENDANT = ("CtrlB Relay: your run id is {run} and your agent id is {agent}. P
 
 
 def launch_text(info, role, run, agent, scratch):
-    """The rule of a session started for one task: ONE_TASK for its worker, DESCENDANT for every other session of the
-    same launch. The task name is quoted as JSON, as it goes into the claim call."""
+
     task = json.dumps(info['task'], ensure_ascii=False)
     if role != 'worker':
         return DESCENDANT.format(run=run, agent=agent, task=task, scratch=scratch)
@@ -141,7 +148,7 @@ def launch_text(info, role, run, agent, scratch):
                            scratch=scratch)
 
 
-# A hold whose holder has stopped is taken over, not waited out.
+
 STALLED_HINT = ("If the holder has stopped, the hold shows as stalled (tasks lists stalled tasks); claim it with "
                 "takeover=true instead of waiting.")
 
@@ -157,8 +164,7 @@ def start_context(cfg, event, text):
 
 
 def _resource(c):
-    """What to name in the claim call: the conflict's path without the key prefix when claiming that names the same key
-    ("src/app.py"), else the key itself ("path:Makefile", since a bare "Makefile" is keyed as a name)."""
+
     key = c.get('key') or ''
     if not key.startswith(PATH):
         return c.get('path') or key
@@ -175,16 +181,7 @@ def _lease(c):
 
 
 def decide(cfg, run, agent, paths, cwd='', find_starters=None):
-    """Post the paths an edit is about to touch to CtrlB's check and turn the answer into the hook
-    output, or None for no output (allowed, mode off, or no conflict). Raises on any CtrlB error; the caller fails
-    open. The paths are sent as paths.edit_paths gives them (relative to cwd, once per key), so CtrlB keys them as it
-    keys claims and as it keys the paths column of the session rows. The tokens the agent's claims answered are sent
-    with them, so CtrlB can tell a hold of an earlier round of the file's task.
 
-    find_starters: called with no arguments, it returns the agents that started this one, as recorded (starters()).
-    It runs only after CtrlB's check has found a conflict, and only to choose the words: whatever it does (any
-    exception, KeyboardInterrupt and SystemExit included) the edit is still refused or warned about, with the
-    ordinary text when it fails."""
     paths = normalise_edit_paths(paths, cwd or '')
     if not paths or not run or not agent:
         return None
@@ -207,8 +204,8 @@ def decide(cfg, run, agent, paths, cwd='', find_starters=None):
     if reasons == {'held'}:
         holder = conflicts[0]['held_by']
         if _all_held_by_starters(find_starters, conflicts):
-            # The agent that started this one holds the file (a task's file comes with the task): a claim is refused
-            # with belongs_to_task, so the change goes to that agent.
+
+
             if mode == 'enforce' and res.get('allowed') is False:
                 return _deny(f"CtrlB Relay (run {run}): {said}. You work for {holder}: do not claim the file. Tell the "
                              f"agent that started you the change you want, and it makes it.")
@@ -222,7 +219,7 @@ def decide(cfg, run, agent, paths, cwd='', find_starters=None):
         return context('PreToolUse', f"CtrlB Relay (run {run}): {said}. Another agent is working on this file. Before "
                                      f"editing it, call {call}; if held is false, leave the file to its holder and pick "
                                      f"other work. {STALLED_HINT}")
-    # Fencing (holdRequired): the agent does not hold the file now.
+
     text = (f"CtrlB Relay (run {run}): {said}. Call {call} and edit only if held is true; if held is false, leave the "
             f"file to its holder and pick other work.")
     if mode == 'enforce' and res.get('allowed') is False:
@@ -231,8 +228,7 @@ def decide(cfg, run, agent, paths, cwd='', find_starters=None):
 
 
 def _all_held_by_starters(find_starters, conflicts):
-    """Whether every conflict is held by an agent that started this one. False when there is no lookup, or it fails
-    in any way (BaseException: an interrupt here must not end the hook before it refuses)."""
+
     if find_starters is None:
         return False
     try:
@@ -247,17 +243,7 @@ def _all_held_by_starters(find_starters, conflicts):
 
 
 def starters(sid, run, parent_agent=''):
-    """The agents that started this one, nearest first, from what the plugin recorded, never from the shape of a
-    name: parent_agent (the agent of the session whose subagent this is, from the hook input), then each agent that
-    started a session from its shell (lib/spawn.py's record of the session, then of its parent). A record counts only
-    when it says the session joined its parent's run, and both its run and its parent's run are this run; a record
-    without parent_run, or with any field that is not what spawn.py writes, means no starter at all. Callers still
-    guard the call (decide): a starter only chooses the words of a refusal.
 
-    No age check: a record is the session's own. Its file is named by the session id, and spawn.py writes it once, at
-    the session's first start; every hook of that session id (after compaction or resume too) applies the same record
-    as the session's run and agent name (spawn.apply), so the run and name this check runs under come from that record
-    too. A new session has a new id (/clear starts a new session), and a record not read for a long time is pruned."""
     try:
         import spawn
         if not isinstance(parent_agent, str) or not isinstance(run, str) or not run:
@@ -270,16 +256,16 @@ def starters(sid, run, parent_agent=''):
             if not isinstance(rec, dict):
                 return []
             if not rec:
-                break                        # no record: the chain ends here
+                break
             joined, rec_run, parent_run, agent, parent = (rec.get(k) for k in ('joined', 'run', 'parent_run',
                                                                                'parent_agent', 'parent'))
             if not isinstance(joined, bool) or not isinstance(rec_run, str) or not isinstance(parent_run, str) \
                     or not isinstance(agent, str) or not isinstance(parent, str):
                 return []
             if not joined:
-                break                        # it kept its own run: its parent is not a starter in this run
+                break
             if rec_run != run or parent_run != run or not agent:
-                return []                    # a record that contradicts itself or this run: no starter
+                return []
             out.append(agent)
             sid = parent
         return out
@@ -289,7 +275,7 @@ def starters(sid, run, parent_agent=''):
 
 
 def _said(c):
-    """One conflict in words: the holder (held), or CtrlB's message for lapsed, unheld and stale_round."""
+
     reason = c.get('reason') or 'held'
     if reason == 'held':
         return f"{_resource(c)} is claimed by {c['held_by']}{_lease(c)}"
@@ -304,14 +290,12 @@ def _deny(reason):
 
 
 def _tool_error(resp):
-    """Whether a PostToolUse tool_response is an MCP error result (isError true): its text is an error, never an
-    answer, even when it parses as JSON."""
+
     return isinstance(resp, dict) and (resp.get('isError') is True or resp.get('is_error') is True)
 
 
 def _tool_answer(resp):
-    """The JSON answer of an MCP tool from a PostToolUse tool_response: a dict, a list of content blocks, a dict with
-    content, or text. An MCP error result answers {}."""
+
     if _tool_error(resp):
         return {}
     if isinstance(resp, dict) and ('held' in resp or 'handed' in resp or 'released' in resp or 'done' in resp):
@@ -330,8 +314,7 @@ def _tool_answer(resp):
 
 
 def record_tokens(run, agent, tool, answer):
-    """Keep the agent's hold tokens: a held claim's token for its key and its bundle's keys; a handoff
-    or a release drops them. Returns the keys changed."""
+
     if not run or not agent or not isinstance(answer, dict):
         return []
     keys = [k for k in [answer.get('key')] + list(answer.get('paths') or []) if isinstance(k, str) and k]
@@ -349,9 +332,9 @@ def record_tokens(run, agent, tool, answer):
     return []
 
 
-# ---------------------------------------------------------------- done and its evidence
 
-# A test-looking command: pytest, python -m pytest / unittest, go test, npm (run) test, cargo test, make test.
+
+
 TEST_COMMAND = re.compile(r'(?:^|[\s;&|(`])(?:pytest|py\.test|python[0-9.]*\s+-m\s+(?:pytest|unittest)|go\s+test|npm\s+(?:run\s+)?test'
                           r'|cargo\s+test|make\s+(?:\S+\s+)*test)(?:$|[\s;&|)`])')
 EXIT_CODE = re.compile(r'^\s*(?:Error:\s*)?Exit code (-?\d+)')
@@ -359,13 +342,12 @@ SUMMARY_MAX = 300
 COMMAND_MAX = 500
 
 
-# Installing a test tool is not running a test.
+
 INSTALL_COMMAND = re.compile(r'\b(?:pip[0-9.]*|uv|poetry|pipx|apt(?:-get)?|brew|npm|yarn|pnpm|cargo|go)\s+(?:install|add|i|get)\b')
 
 
 def _invocation(cmd):
-    """A single invocation, optionally after `cd dir &&` and environment assignments. Compound shell programs
-    need a separate test invocation: their final status does not tell us which branch or pipeline ran."""
+
     if not isinstance(cmd, str) or '\n' in cmd or '`' in cmd or '$(' in cmd:
         return []
     try:
@@ -380,11 +362,11 @@ def _invocation(cmd):
     while i < len(words):
         word = words[i]
         if word in ('>', '>>', '>|', '&>', '&>>', '>&'):
-            # Output redirection preserves the command's exit status. A pipe (including |&) does not.
+
             if i + 1 >= len(words) or all(c in ';&|()<>' for c in words[i + 1]):
                 return []
             if invocation and invocation[-1].isdigit():
-                invocation.pop()         # optional file descriptor, as in 2>&1
+                invocation.pop()
             i += 2
             continue
         if word and all(c in ';&|()<>' for c in word):
@@ -426,8 +408,7 @@ def _last_line(text):
 
 
 def bash_result(resp):
-    """(exit code, last output line) of a Bash tool_response: an object with stdout and stderr (the command exited
-    0; an explicit exit code field wins), or the error text of a failed call, whose first line is "Exit code N"."""
+
     if isinstance(resp, list):
         resp = ''.join(b.get('text', '') if isinstance(b, dict) else str(b) for b in resp)
     if isinstance(resp, dict):
@@ -445,7 +426,7 @@ def bash_result(resp):
 
 
 def record_test(run, agent, command, code, line):
-    """Remember the agent's last test command, its exit code and last output line (per run and agent)."""
+
     if not run or not agent or not is_test_command(command):
         return None
     rec = dict(command=command.strip()[:COMMAND_MAX], exit_code=code, summary=line, ts=time.time())
@@ -454,8 +435,7 @@ def record_test(run, agent, command, code, line):
 
 
 def last_test_in_transcript(path):
-    """The newest test-looking Bash call of a transcript and its result: {command, exit_code, summary, ts}, or None.
-    A failed call's result is an error whose first line is "Exit code N"."""
+
     if not path:
         return None
     calls, best = {}, None
@@ -496,14 +476,13 @@ def _epoch(ts):
         return 0.0
 
 
-# An evidence_required refusal of a task with a test command carries it as "test", and its message
-# ends with this marker and the command.
+
+
 TASK_TEST_MARKER = "; the task's test command is: "
 
 
 def refusal_test(answer):
-    """The task's test command an evidence_required refusal quotes: its "test", else the end of its message after
-    TASK_TEST_MARKER. '' when it quotes none."""
+
     test = answer.get('test')
     if isinstance(test, str) and test.strip():
         return test.strip()
@@ -514,16 +493,13 @@ def refusal_test(answer):
 
 
 def names_test(command, test):
-    """Whether a command names the task's test (CtrlB's rule: the test, each run of white space as one space,
-    appears in the command so spaced)."""
+
     t = ' '.join((test or '').split())
     return bool(t) and t in ' '.join((command or '').split())
 
 
 def evidence_hint(run, agent, answer, transcript='', keys=()):
-    """When done (or a finished release) was refused for evidence, the PostToolUse output that shows the agent the
-    task's test command when the refusal quotes one, else the last test command it ran, so it can call done again
-    with it. Never fills evidence in. None otherwise."""
+
     if not isinstance(answer, dict) or answer.get('reason') != 'evidence_required':
         return None
     found = None
@@ -535,7 +511,7 @@ def evidence_hint(run, agent, answer, transcript='', keys=()):
                 found = None
             if found:
                 break
-    # The transcript has failed runs too (a failing Bash call may not reach PostToolUse): the newer of the two wins.
+
     seen = last_test_in_transcript(transcript)
     if seen and (not found or (seen.get('ts') or 0) >= (found.get('ts') or 0)):
         found = seen
@@ -545,7 +521,7 @@ def evidence_hint(run, agent, answer, transcript='', keys=()):
     matches = found and names_test(found.get('command'), test)
     found, test = redact(found)[0], redact(test)[0]
     if test and not matches:
-        # The task's own test wins over whatever the agent ran last.
+
         ran = f" The last test command you ran, `{found['command']}`, is not it." if found else ''
         return context('PostToolUse', f'{head} The task\'s test command is `{test}`.{ran} Run it; when it passes, call '
                                       f'done(resource="{resource}", run_id="{run}", agent="{agent}", evidence={{"command": '
@@ -567,14 +543,14 @@ def evidence_hint(run, agent, answer, transcript='', keys=()):
                                   f'evidence={json.dumps(ev)}); otherwise run the task\'s test first. Report only a check '
                                   f'you ran.')
 
-# ---------------------------------------------------------------- the session record
+
 
 HANDOFF_TEXT_MAX = 1500
 LINE_MAX = 200
 
 
 def _norm(cmd):
-    # Collapse only unquoted whitespace. Keep quotes and escapes: "$VAR" and '$VAR' run different commands.
+
     out, quote, escaped, space = [], '', False, False
     for ch in str(cmd or '').strip():
         if escaped:
@@ -601,8 +577,7 @@ def _norm(cmd):
 
 
 def record_bash(run, agent, sid, command, code, line):
-    """Remember one Bash command of this session, its exit code (None when unknown) and last output line: every
-    command, not only tests (the done witness checks evidence against them)."""
+
     if not run or not agent or not isinstance(command, str) or not command.strip():
         return None
     rec = dict(command=command.strip()[:COMMAND_MAX], exit_code=code, summary=(line or '')[:SUMMARY_MAX], ts=time.time())
@@ -612,7 +587,7 @@ def record_bash(run, agent, sid, command, code, line):
 
 
 def record_edit(run, agent, sid, paths):
-    """Remember the files an applied edit tool call wrote in this session (in order, once each)."""
+
     paths = [p for p in paths or [] if isinstance(p, str) and p]
     if not run or not agent or not paths:
         return []
@@ -627,7 +602,7 @@ def record_edit(run, agent, sid, paths):
 
 
 def record_note(run, agent, sid, text):
-    """Remember the agent's newest note (the ctrlb post tool's text)."""
+
     if not run or not agent or not isinstance(text, str) or not text.strip():
         return None
     note = dict(text=text.strip()[:LINE_MAX * 2], ts=time.time())
@@ -636,7 +611,7 @@ def record_note(run, agent, sid, text):
 
 
 def mark_relay(run, agent, sid):
-    """Remember that the agent used the ctrlb relay tools in this session (the session-end handoff is then sent)."""
+
     if run and agent:
         common.SessionRecord(run, agent).update(sid, lambda d: d.update(relay=True))
 
@@ -647,8 +622,7 @@ def _cut(s, n):
 
 
 def handoff_text(rec, last_test=None):
-    """The open handoff's text, one paragraph from the hook's own record: the files edited in this
-    session, the last test command it saw and its exit code, and the agent's last note."""
+
     parts = ['Session ended.']
     edited = [redact(os.path.basename(p) if len(p) > 80 else p)[0] for p in (rec.get('edited') or [])]
     if edited:
@@ -675,7 +649,7 @@ def handoff_text(rec, last_test=None):
 
 
 def _evidence_of(args):
-    """The done call's evidence as a dict, or None (free text, or nothing)."""
+
     ev = args.get('evidence')
     if isinstance(ev, str):
         try:
@@ -697,11 +671,7 @@ def _code(v):
 
 
 def witness(rec, tool_input):
-    """The PreToolUse output for a done call, checked against this session's Bash record. A command
-    equal to the complete raw evidence command or its redacted form, with an equal exit code (newest first): allow, with
-    witnessed true (and the exit code filled in from the record when the call left it out). No such command: deny,
-    naming what the hook saw. No evidence command: None, unless the agent set witnessed itself (then it is dropped).
-    The hook asserts only what it saw; it is as strong as the host it runs on."""
+
     args = dict(tool_input) if isinstance(tool_input, dict) else {}
     ev = _evidence_of(args)
     cmd = _norm(ev.get('command')) if ev else ''

@@ -1,23 +1,12 @@
-"""Write the CtrlB block into a project's AGENTS.md (Codex) and CLAUDE.md (Claude Code).
 
-  python3 -I install.py init --codex [--claude] [--dir DIR] [--dry-run] [--remove]
-  python3 -I bin/init.py --codex [--claude] [--dir DIR] [--dry-run] [--remove]
-
-The block asks the agent to search the CtrlB record before it greps, reads files or reruns a command for a question
-about earlier work. It sits between <!-- ctrlb:begin --> and <!-- ctrlb:end -->; text outside the markers is never
-changed. A file that does not exist is created. A run that would change nothing writes nothing. Before a change, the
-old file is copied to <name>.ctrlb-backup-<time> beside it. --dry-run prints the diff and writes nothing. --remove
-deletes the block. Every file is checked before any is written: one marker without its pair, or two blocks, is
-refused (exit 2), and so is a file without a block that ends inside an open code block; a file that cannot be read or is not UTF-8 stops the run (exit 1). Markers inside fenced code blocks
-are ignored."""
 import argparse, difflib, os, sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'lib'))
-import project_rules as P  # noqa: E402
+import project_rules as P
 
 
 def diff(path, old, new):
-    """A unified diff; a last line without a newline gets the usual "\\ No newline at end of file" line."""
+
     out = []
     for ln in difflib.unified_diff(P.split_lines(old or ''), P.split_lines(new),
                                    fromfile=path, tofile=path + ' (new)'):
@@ -39,10 +28,10 @@ def main(argv=None):
     if not os.path.isdir(a.dir):
         ap.error(f'--dir {a.dir}: not a directory')
     plans, seen = [], set()
-    for n in names:                     # plan every file before writing any
+    for n in names:
         p = os.path.join(a.dir, n)
         real = os.path.realpath(p)
-        if real in seen:                # CLAUDE.md linked to AGENTS.md: one file, one block
+        if real in seen:
             print(f'{p}: same file as {plans[-1][0]}, planned once')
             continue
         seen.add(real)

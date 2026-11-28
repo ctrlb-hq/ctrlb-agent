@@ -1,17 +1,5 @@
-"""Claude Code transcript -> session rows, one per content block, and incremental upload to
-CtrlB with redaction. seq is the line number in the transcript file, so a row can be traced back to its place.
+import socket
 
-Beyond the content blocks:
-  run_id, agent   resolved by common.run_id and common.agent_name
-  user_name       only the key's own user (common.key_user); omitted when the key carries none, and CtrlB fills it
-  paths           JSON array text of the file paths an edit tool touched (Edit, Write, MultiEdit, NotebookEdit),
-                  on tool_use rows, normalised against the row's cwd by paths.edit_paths so CtrlB keys them as the
-                  claims are keyed; '' on every other row
-  input_tokens,   from message.usage, once per message id (Claude Code repeats the usage on every block line of one
-  output_tokens   message); input_tokens includes cache reads and cache writes. Floats; 0.0 elsewhere
-  cost_usd        on block_type "result" rows: the increase of the session's cumulative cost since the previous
-                  cost record (a transcript "cost-state" record, or a stream-json "result" record), so the sum of
-                  cost_usd over a session's rows is its cost. Float; 0.0 elsewhere"""
 import copy, datetime, glob, json, os, time
 import common
 from paths import edit_paths as normalise_edit_paths
@@ -22,7 +10,7 @@ SKIP_TYPES = {'mode', 'permission-mode', 'bridge-session', 'custom-title', 'agen
               'file-history-snapshot', 'file-history-delta', 'last-prompt', 'atis-latch', 'tools-used', 'attachment'}
 EDIT_TOOLS = ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')
 BODY_CAP = 64 * 1024
-BATCH_ROWS, BATCH_BYTES = 500, 3_500_000   # CtrlB takes at most 500 rows or 4 MB per records call
+BATCH_ROWS, BATCH_BYTES = 500, 3_500_000
 
 
 def micros(ts):
@@ -33,7 +21,7 @@ def micros(ts):
 
 
 def edit_paths(tool_name, tool_input):
-    """The file paths an edit tool call touches, as given in its input."""
+
     if tool_name not in EDIT_TOOLS or not isinstance(tool_input, dict):
         return []
     p = tool_input.get('notebook_path' if tool_name == 'NotebookEdit' else 'file_path')
@@ -74,8 +62,7 @@ def _num(v):
 
 
 def ids_for(path):
-    """(session_id, parent_session, agent_id) from a transcript path. Subagent files sit at
-    <project>/<parent session id>/subagents/agent-<id>.jsonl."""
+
     base = os.path.basename(path)[:-6] if path.endswith('.jsonl') else os.path.basename(path)
     d = os.path.dirname(path)
     if os.path.basename(d) == 'subagents':
@@ -89,15 +76,19 @@ def ids_for_file(cfg, path):
                 agent=common.agent_name(cfg, sid, agent_id and sid))
 
 
-def _base(cfg, ids, hostname, rec, ts, seq, parent, role, summ):
-    r = dict(_timestamp=ts, host=hostname, harness='claude', session_id=ids['sid'], parent_session=parent,
+def row_defaults(cfg, ids, hostname, ts, seq, parent, role, harness, cwd, branch, summary):
+    r = dict(_timestamp=ts, host=hostname, harness=harness, session_id=ids['sid'], parent_session=parent,
              agent_id=ids['agent_id'], run_id=ids['run_id'], agent=ids['agent'], seq=seq, block_idx=0, role=role,
              block_type='', tool_name='', tool_use_id='', command='', paths='', body='', is_error=False,
-             is_summary=summ, cwd=rec.get('cwd') or '', git_branch=rec.get('gitBranch') or '',
-             cost_usd=0.0, input_tokens=0.0, output_tokens=0.0)
-    if cfg.get('user'):   # the key's own user (common.key_user), never CTRLB_USER; without it CtrlB fills user_name
+             is_summary=summary, cwd=cwd, git_branch=branch, cost_usd=0.0, input_tokens=0.0, output_tokens=0.0)
+    if cfg.get('user'):
         r['user_name'] = cfg['user']
     return r
+
+
+def _base(cfg, ids, hostname, rec, ts, seq, parent, role, summ):
+    return row_defaults(cfg, ids, hostname, ts, seq, parent, role, 'claude',
+                        rec.get('cwd') or '', rec.get('gitBranch') or '', summ)
 
 
 def _cost_row(rec, seq, st, ids, cfg, hostname):
@@ -109,7 +100,7 @@ def _cost_row(rec, seq, st, ids, cfg, hostname):
     st['cost'] = total
     parent = ids['parent'] or (rec.get('sessionId') if ids['agent_id'] else '') or ''
     r = _base(cfg, ids, hostname, rec, ts, seq, parent, 'system', False)
-    r['cwd'] = r['cwd'] or st.get('cwd', '')            # cost records carry no cwd or branch: use the last seen
+    r['cwd'] = r['cwd'] or st.get('cwd', '')
     r['git_branch'] = r['git_branch'] or st.get('branch', '')
     r['block_type'] = 'result'
     r['cost_usd'] = round(total - prev if total >= prev else total, 8)
@@ -195,22 +186,20 @@ def _finish(r, counts):
 
 
 def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
-    """Send the complete lines of path added since the last upload. Returns {rows, lines, redacted}. The offset only
-    moves forward after CtrlB accepts the rows, so a failed upload is retried next time. ids and rows_fn default to
-    the Claude Code parser; rows_codex passes its own (rows_fn(rec, seq, state, ids, cfg, hostname) -> [row])."""
+
     counts = dict(rows=0, lines=0, redacted=0)
     until = time.monotonic() + max(0, deadline - time.time())
     if not path or not os.path.isfile(path) or time.monotonic() >= until:
         return counts
     ids = ids if ids is not None else ids_for_file(cfg, path)
     rows_fn = rows_fn or rows_from
-    hostname = common.host()
+    hostname = socket.gethostname()
     with common.FileState(path, deadline) as fs:
         if os.path.getsize(path) < fs.data['offset']:
             fs.reset()
         pending = copy.deepcopy(fs.data)
         first_line = pending['line']
-        batch, nbytes = [], 2             # JSON array brackets; each row includes its separator
+        batch, nbytes = [], 2
 
         def checkpoint(state):
             fs.data = copy.deepcopy(state)
@@ -228,8 +217,8 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
         with open(path, 'rb') as fh:
             fh.seek(pending['offset'])
             while time.monotonic() < until:
-                # Read bounded chunks, checking the budget even within a very long line. An incomplete last
-                # line stays at its old offset until a later hook sees its terminating newline.
+
+
                 pieces = []
                 while time.monotonic() < until:
                     raw = fh.readline(1024 * 1024)
@@ -251,7 +240,7 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
                 for r in line_rows:
                     size = len(json.dumps(r).encode()) + 2
                     if size + 2 > BATCH_BYTES:
-                        # Body truncation normally suffices; a shell command or metadata can also be huge.
+
                         for k, v in r.items():
                             if isinstance(v, str):
                                 r[k] = v.encode()[:BODY_CAP].decode(errors='ignore')
@@ -268,15 +257,15 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
                 if batch and (len(batch) + len(line_rows) > BATCH_ROWS or nbytes + sum(sizes) > BATCH_BYTES):
                     if not send(batch):
                         return counts
-                    checkpoint(pending)   # candidate has not entered this acknowledged batch
+                    checkpoint(pending)
                     batch, nbytes = [], 2
                 candidate.update(offset=fh.tell(), line=pending['line'] + 1, row=0)
                 for i, (r, size) in enumerate(zip(line_rows, sizes)):
                     if batch and (len(batch) == BATCH_ROWS or nbytes + size > BATCH_BYTES):
                         if not send(batch):
                             return counts
-                        # A line can span batches. Keep its pre-parse state and a row cursor until every row
-                        # has been accepted, so retries neither lose usage state nor resend accepted blocks.
+
+
                         pending['row'] = start + i
                         checkpoint(pending)
                         batch, nbytes = [], 2
@@ -291,7 +280,7 @@ def upload_file(cfg, path, deadline, ids=None, rows_fn=None):
 
 
 def session_files(transcript_path):
-    """The main transcript and its subagent transcripts."""
+
     if not transcript_path:
         return []
     out = [transcript_path]
