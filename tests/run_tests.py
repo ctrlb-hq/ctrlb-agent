@@ -52,6 +52,27 @@ def run_test(test, *args):
 
 
 
+def test_runner_failure_reporting():
+    import contextlib
+    import io
+
+    def broken_check():
+        check('probe', common.local_health(dict(url='http://127.0.0.1', key=KEY)) == 200)
+
+    def later_check():
+        check('later check', True)
+
+    recorded, output = [], io.StringIO()
+    with mock.patch.dict(run_test.__globals__, results=recorded), contextlib.redirect_stdout(output), \
+            mock.patch.object(common, 'local_health', side_effect=common.urllib.error.URLError('timed out')):
+        run_test(broken_check)
+        run_test(later_check)
+    check('test runner: a probe exception records FAIL with a traceback and the next test runs',
+          len(recorded) == 2 and not recorded[0][1] and recorded[1][1]
+          and 'FAIL broken_check' in output.getvalue() and 'Traceback' in recorded[0][2]
+          and 'URLError' in recorded[0][2] and 'timed out' in recorded[0][2])
+
+
 def load(name):
     with open(os.path.join(FIX, name)) as fh:
         return json.load(fh)
@@ -983,8 +1004,6 @@ def test_release_wording():
              if os.path.isfile(f) and f.endswith(('.md', '.py', '.json')) and '/tests/' not in f and '/.git/' not in f]
     bad = [os.path.relpath(f, ROOT) for f in files if old.search(open(f, errors='replace').read())]
     check('no agent-facing text says to release with finished=true for every claim', not bad, ', '.join(bad))
-    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
-    lim = open(os.path.join(ROOT, 'docs', 'limits.md')).read()
 
 
 def test_briefs_wording():
@@ -1002,10 +1021,6 @@ def test_briefs_wording():
     check('relay skill: call briefs before reading a shared file, post a brief after reading one',
           'call `briefs` with it' in skill and 'post a `brief` for it' in skill and 'up to a few hundred words' in skill
           and 'what it exports or decides, and what not to touch' in skill and 'not a claim and reserves nothing' in skill)
-    tools = open(os.path.join(ROOT, 'docs', 'relay-tools.md')).read()
-    sections = re.findall(r'^### (\w+)$', tools, re.M)
-    relay = sections[sections.index('peers'):] if 'peers' in sections else []
-    http = open(os.path.join(ROOT, 'docs', 'connect-http.md')).read()
 
 
 def test_keys():
@@ -1015,6 +1030,8 @@ def test_keys():
     bad = [c for c in cases if paths.key(c['resource'], c['cwd'])[0] != c['key']]
     check(f'paths.key passes CtrlB keys.json ({len(cases)} cases)', len(cases) >= 40 and not bad,
           '; '.join(f"{c['resource']!r},{c['cwd']!r} -> {paths.key(c['resource'], c['cwd'])[0]!r} want {c['key']!r}" for c in bad[:5]))
+    check('paths.key returns the kind of each expected key',
+          all(paths.key(c['resource'], c['cwd'])[1] == c['key'].partition(':')[0] for c in cases))
     check('paths.key is idempotent on its own keys', all(paths.key(paths.key(c['resource'], c['cwd'])[0], c['cwd'])[0] == c['key']
                                                          for c in cases if c['key']))
     check('keys.json: lib/keys.json (read at run time) is tests/fixtures/keys.json byte for byte',
@@ -5912,9 +5929,6 @@ def test_launch_result_codex(seeker):
     watch = os.path.join(top, 'watch')
     with open(os.path.join(FIX, 'codex-claims.jsonl')) as fh:
         lines = {json.loads(ln)['payload']['item']['id']: ln for ln in fh if ln.strip()}
-    calls = rows_codex.claim_calls(os.path.join(FIX, 'codex-claims.jsonl'))
-    by_id = [a for a, _ in calls]
-    answers = [ans for _, ans in calls]
     check('rows_codex.claim_calls: thread keeps only that thread\'s calls',
           len(rows_codex.claim_calls(os.path.join(FIX, 'codex-claims.jsonl'), CSID)) == 8)
 
@@ -6022,6 +6036,7 @@ def test_launch_result_synced():
 
 def main():
     seeker = Seeker()
+    run_test(test_runner_failure_reporting)
     run_test(test_layout)
     run_test(test_no_secrets_in_repo)
     run_test(test_credential_redaction, seeker)
